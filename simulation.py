@@ -74,6 +74,7 @@ class Player:
             ["X", "X", "X"],
             ["X", "X", "X"]
             ]
+        self.game_state = []
 
     def card2rank(self, card):
         if card == "X":
@@ -106,6 +107,14 @@ class Player:
         else:
             self.open_ranks = self.get_card_ranks(self.open_cards)
         self.score, self.scores = self.score_cards(self.open_ranks)
+    
+    def gather_game_state(self, game):
+        self.game_state = list(np.array(self.open_ranks).flatten())
+
+        # add next player id
+        self.game_state += list(np.array(game.players[(self.id + 1) % game.num_players].open_ranks).flatten())
+        self.game_state += self.card2rank(game.face_card)
+
 
 class Golf:
     def __init__(self, players=None):
@@ -113,7 +122,7 @@ class Golf:
         self.discard = GolfDeck(cards="Blank")
         self.face_card = None
         self.players = players
-        self.player_num = len(players)
+        self.num_players = len(players)
         self.last_turn = False
         self.game_over = False
         self.end_game_player_id = None
@@ -247,7 +256,7 @@ max_num_rounds = 100
 ledger = []
 rank_cutoff = 6
 for game_num in range(1):
-    for hole in range(10):
+    for hole in range(1):
         players = [Player(name="PL1", id=0), Player(name="PL2", id=1), Player(name="PL3", id=2)]
         golf = Golf(players=players)
         golf.shuffle()
@@ -257,11 +266,12 @@ for game_num in range(1):
         while round_num < max_num_rounds and not golf.last_turn:
             for player_id in range(3):
                 if not golf.last_turn and golf.end_game_player_id != player_id:
+                    golf.players[player_id].gather_game_state(golf)
+                    print(game_num, hole, round_num, player_id, golf.players[player_id].game_state)
                     take_turn(player_id, golf, rank_cutoff)
             round_num += 1
                     
         for player in golf.players:
-            
             player.calculate_score(final=True)
             ledger.append(dict(player_id=player.id, score=player.score, hole=hole, game=game_num))
 game_result_df = pd.DataFrame.from_dict(ledger)
