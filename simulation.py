@@ -285,5 +285,6 @@ for game_num in range(1):
             player.calculate_score(final=True)
             ledger.append(dict(player_id=player.id, score=player.score, hole=hole, game=game_num))
 game_result_df = pd.DataFrame.from_dict(ledger)
+
 res = game_result_df.groupby(["player_id","game"])['score'].sum().reset_index().groupby("player_id")['score'].mean()
 print(res)
