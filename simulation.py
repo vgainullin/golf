@@ -113,7 +113,7 @@ class Player:
 
         # add next player id
         self.game_state += list(np.array(game.players[(self.id + 1) % game.num_players].open_ranks).flatten())
-        self.game_state += self.card2rank(game.face_card)
+        self.game_state.append(self.card2rank(game.face_card))
 
 
 class Golf:
@@ -202,9 +202,9 @@ def get_player_action(game, player_id, rank_cutoff=5):
         rank_match = np.argwhere(game.players[player_id].open_ranks == rank_of_face_card)
         
         if game.players[player_id].card_to_score[game.face_card[0]] < rank_cutoff or rank_match.size > 0:
-            return "take_discard", None
+            return "take_discard", None, 0
         else:
-            return "take_new", None
+            return "take_new", None, 0
     if game.players[player_id].action_num == 1:
         # calculate optimal placement for card
         # iterate through each possible placement position
@@ -223,6 +223,7 @@ def get_player_action(game, player_id, rank_cutoff=5):
                     min_score = score
                     opt_pos = (row, c)
                     upd_score = score
+        reward = current_score - upd_score
         # If found a place that reduces current score by rank_cutoff
         golf.players[player_id].calculate_score()
         available_pos_to_place = np.argwhere(np.isnan(golf.players[player_id].scores))
@@ -231,16 +232,19 @@ def get_player_action(game, player_id, rank_cutoff=5):
         else:
             can_place = False
         if upd_score <= (current_score - rank_cutoff):
-            action = ("place", opt_pos)
+            action = "place"
+            pos = opt_pos
         
         elif can_place and (upd_score - current_score) < rank_cutoff:
             # card value is less than rank, place it somewhere
-            action = ("place", tuple(available_pos_to_place[0]))
+            action = "place"
+            pos = tuple(available_pos_to_place[0])
         elif can_place:
             # discard and flip one of the cards instead
-            action = ("discard", tuple(available_pos_to_place[0]))
+            action = "discard"
+            pos = tuple(available_pos_to_place[0])
 
-        return action
+        return action, pos, reward
 
 
 def take_turn(player_id, game, rank_cutoff=5):
@@ -248,8 +252,9 @@ def take_turn(player_id, game, rank_cutoff=5):
         print("GAME OVER")
     else:
         for i in range(2):
-            action, pos = get_player_action(deepcopy(game), player_id, rank_cutoff)
+            action, pos, reward = get_player_action(deepcopy(game), player_id, rank_cutoff)
             game.take_action(player_id=player_id, action=action, position=pos)
+    return reward
 
 max_num_rounds = 100
 
@@ -267,8 +272,13 @@ for game_num in range(1):
             for player_id in range(3):
                 if not golf.last_turn and golf.end_game_player_id != player_id:
                     golf.players[player_id].gather_game_state(golf)
-                    print(game_num, hole, round_num, player_id, golf.players[player_id].game_state)
-                    take_turn(player_id, golf, rank_cutoff)
+                    state_ = golf.players[player_id].game_state
+                    print(game_num, hole, round_num, player_id, state_)
+                    reward = take_turn(player_id, golf, rank_cutoff)
+                    golf.players[player_id].gather_game_state(golf)
+                    upd_state_ = golf.players[player_id].game_state
+                    print(game_num, hole, round_num, player_id, upd_state_, reward)
+
             round_num += 1
                     
         for player in golf.players:
