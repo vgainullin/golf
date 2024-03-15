@@ -154,7 +154,7 @@ class Golf:
                 self.players[player_id].holding = self.deck.pop()
                 self.players[player_id].action_num = 1
 
-            elif action == "take_discard":
+            elif action == "take_face_card":
                 self.players[player_id].holding = self.discard.pop()
                 self.players[player_id].action_num = 1
             else:
@@ -168,8 +168,11 @@ class Golf:
                 # TODO: Handle exit state
                 # Throw error
             elif action == "place" and position:
+                # remove the card that is being replaced
                 discard_ = self.players[player_id].cards[position[0]][position[1]]
+                # place it in discard pile
                 self.discard.append(discard_)
+                # put the new card into its new position
                 self.players[player_id].cards[position[0]][position[1]] = self.players[player_id].holding
                 self.players[player_id].open_cards[position[0]][position[1]] = self.players[player_id].holding
                 self.players[player_id].holding = None
@@ -177,7 +180,9 @@ class Golf:
                 self.face_card = discard_
             elif action == "discard" and self.players[player_id].holding == self.face_card:
                 print("ERROR must place and provide position")
+                
             elif self.players[player_id].holding != self.face_card and action == "discard" and position:
+                # Do not place a card, instead flip a new card
                 if self.players[player_id].open_cards[position[0]][position[1]] != "X":
                     print("ERROR Already flipped this card")
                 else:
@@ -198,11 +203,11 @@ class Golf:
 def get_player_action(game, player_id, rank_cutoff=5):
     if game.players[player_id].action_num == 0:
         rank_of_face_card = game.players[player_id].card2rank(game.face_card)
-        # if rank of face card matches one in deck
+        # if rank of face card matches any ranks in open cards
         rank_match = np.argwhere(game.players[player_id].open_ranks == rank_of_face_card)
         
         if game.players[player_id].card_to_score[game.face_card[0]] < rank_cutoff or rank_match.size > 0:
-            return "take_discard", None, 0
+            return "take_face_card", None, 0
         else:
             return "take_new", None, 0
     if game.players[player_id].action_num == 1:
@@ -223,6 +228,8 @@ def get_player_action(game, player_id, rank_cutoff=5):
                     min_score = score
                     opt_pos = (row, c)
                     upd_score = score
+        # reward is the difference between current and improved score
+        # reward should reflext improvement over face card if random card is flipped?            
         reward = current_score - upd_score
         # If found a place that reduces current score by rank_cutoff
         golf.players[player_id].calculate_score()
