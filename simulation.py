@@ -5,7 +5,6 @@ import random
 import numpy as np
 import pandas as pd
 
-
 import collections
 from collections.abc import MutableSequence
 from collections import namedtuple
@@ -167,7 +166,7 @@ class Golf:
                 print("ERROR, Player should be holding a card")
                 # TODO: Handle exit state
                 # Throw error
-            elif action == "place" and position:
+            elif action == "place" and position != None:
                 # remove the card that is being replaced
                 discard_ = self.players[player_id].cards[position[0]][position[1]]
                 # place it in discard pile
@@ -178,10 +177,13 @@ class Golf:
                 self.players[player_id].holding = None
                 self.players[player_id].action_num = 0
                 self.face_card = discard_
-            elif action == "discard" and self.players[player_id].holding == self.face_card:
-                print("ERROR must place and provide position")
+            # elif action == "discard" and self.players[player_id].holding == self.face_card:
+            #     self.discard.append(self.players[player_id].holding)
+            #     self.players[player_id].holding = None
+            #     self.players[player_id].action_num = 0
+            #     self.face_card = self.players[player_id].holding
                 
-            elif self.players[player_id].holding != self.face_card and action == "discard" and position:
+            elif action == "discard" and position:
                 # Do not place a card, instead flip a new card
                 if self.players[player_id].open_cards[position[0]][position[1]] != "X":
                     print("ERROR Already flipped this card")
@@ -196,12 +198,22 @@ class Golf:
         self.players[player_id].calculate_score()
         if not self.game_over:
             if not np.isnan(self.players[player_id].scores).any():
+                
                 self.last_turn = True
                 self.end_game_player_id = player_id
+                print(f'last turn, player_id:{player_id}')
 
 
-def get_player_action(game, player_id, rank_cutoff=5):
+def get_player_action(game, player_id, rank_cutoff=5, take_random_action=False):
+    available_actions = {
+        0: ['take_face_card', 'take_new'],
+        1: ['place','discard']
+        }
     if game.players[player_id].action_num == 0:
+        if take_random_action:
+            rand_action = random.choice(available_actions[0])
+            return rand_action, None, 0
+
         rank_of_face_card = game.players[player_id].card2rank(game.face_card)
         # if rank of face card matches any ranks in open cards
         rank_match = np.argwhere(game.players[player_id].open_ranks == rank_of_face_card)
@@ -211,6 +223,7 @@ def get_player_action(game, player_id, rank_cutoff=5):
         else:
             return "take_new", None, 0
     if game.players[player_id].action_num == 1:
+        
         # calculate optimal placement for card
         # iterate through each possible placement position
         # calculate score
@@ -229,15 +242,38 @@ def get_player_action(game, player_id, rank_cutoff=5):
                     opt_pos = (row, c)
                     upd_score = score
         # reward is the difference between current and improved score
-        # reward should reflext improvement over face card if random card is flipped?            
+        # TODO: reward should reflext improvement over face card if random card is flipped?            
         reward = current_score - upd_score
         # If found a place that reduces current score by rank_cutoff
+        # TODO: this should be calculated on disposable copy?
         golf.players[player_id].calculate_score()
         available_pos_to_place = np.argwhere(np.isnan(golf.players[player_id].scores))
+
         if len(available_pos_to_place) > 0:
             can_place = True
         else:
             can_place = False
+        
+        if take_random_action:
+            rand_action = random.choice(available_actions[1])
+            if can_place:
+                rand_pos = tuple(random.choice(available_pos_to_place))
+                # calculate reward
+                player_cards_copy = deepcopy(game.players[player_id].open_cards)
+                if rand_action == 'place':
+                    player_cards_copy[rand_pos[0]][rand_pos[1]] = game.players[player_id].holding
+                elif rand_action == 'discard':
+                    player_cards_copy[rand_pos[0]][rand_pos[1]] = game.players[player_id].cards[rand_pos[0]][rand_pos[1]]
+                player_card_ranks = game.players[player_id].get_card_ranks(player_cards_copy)
+                upd_rand_score, scores_ = game.players[player_id].score_cards(player_card_ranks)
+                reward = current_score - upd_rand_score
+            else:
+                rand_pos = None
+                reward = 0
+            # if rand_action == 'place' and not can_place:
+            #     rand_action = 'discard'
+            return rand_action, rand_pos, reward
+        
         if upd_score <= (current_score - rank_cutoff):
             action = "place"
             pos = opt_pos
@@ -254,21 +290,23 @@ def get_player_action(game, player_id, rank_cutoff=5):
         return action, pos, reward
 
 
-def take_turn(player_id, game, rank_cutoff=5):
+def take_turn(player_id, game, rank_cutoff=5, take_random_action=False):
     if game.game_over:
         print("GAME OVER")
     else:
         for i in range(2):
-            action, pos, reward = get_player_action(deepcopy(game), player_id, rank_cutoff)
+            action, pos, reward = get_player_action(deepcopy(game), player_id, rank_cutoff, take_random_action)
             game.take_action(player_id=player_id, action=action, position=pos)
-    return reward
+    return action, pos, reward
 
 max_num_rounds = 100
 
 ledger = []
 rank_cutoff = 6
+
+random_actions = True
 for game_num in range(1):
-    for hole in range(1):
+    for hole in range(10):
         players = [Player(name="PL1", id=0), Player(name="PL2", id=1), Player(name="PL3", id=2)]
         golf = Golf(players=players)
         golf.shuffle()
@@ -280,11 +318,20 @@ for game_num in range(1):
                 if not golf.last_turn and golf.end_game_player_id != player_id:
                     golf.players[player_id].gather_game_state(golf)
                     state_ = golf.players[player_id].game_state
-                    print(game_num, hole, round_num, player_id, state_)
-                    reward = take_turn(player_id, golf, rank_cutoff)
+                    print(game_num, hole, round_num,len(golf.deck), player_id, state_)
+                    # Action 1
+                    action, pos, reward = get_player_action(deepcopy(golf), player_id, rank_cutoff, take_random_action=random_actions)
+                    print(game_num, hole, round_num,len(golf.deck), player_id, action, pos, reward)
+                    golf.take_action(player_id=player_id, action=action, position=pos)
+                    # Action 2
+                    action, pos, reward = get_player_action(deepcopy(golf), player_id, rank_cutoff, take_random_action=random_actions)
+                    print(game_num, hole, round_num,len(golf.deck), player_id, action, pos, reward)
+                    golf.take_action(player_id=player_id, action=action, position=pos)
+                    # act_, pos_, reward = take_turn(player_id, golf, rank_cutoff, take_random_action=random_actions)
+                    
                     golf.players[player_id].gather_game_state(golf)
                     upd_state_ = golf.players[player_id].game_state
-                    print(game_num, hole, round_num, player_id, upd_state_, reward)
+                    print(game_num, hole, round_num,len(golf.deck), player_id, upd_state_)
 
             round_num += 1
                     
