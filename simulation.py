@@ -139,59 +139,67 @@ class Golf:
         self.face_card = face_card
         
     
-    def take_action(self, player_id, action, position=None):
+    def take_action(self, player_id, action_array):
         # step 1: revealed_card = choice (deck.pop(), discard.pop())
         # step 2: if revealed_card != face_card:
         #            -> choice(position, discard), else choice(position)
+        # action = [turn_num, action, position_int]
+        available_actions = {
+        0: ['take_face_card', 'take_new'],
+        1: ['place','discard']
+        }
+        action_num = action_array[0]
+        action_term = available_actions[action_array[0]][action_array[1]]
+        if action_array[2] == None:
+            pos_tuple = None
+        else:
+            pos_tuple = action_array[2] // 3, action_array[2] % 3
+        #print(f"{action_array[2]} -> {pos_tuple}")
+        
         if self.last_turn and self.end_game_player_id == player_id:
             self.game_over = True
             print("Game Over")
             return None
         self.players[player_id].last_action = action
-        if self.players[player_id].action_num == 0:
-            if action == "take_new":
+        if action_num == 0:
+            if action_term == "take_new":
                 self.players[player_id].holding = self.deck.pop()
                 self.players[player_id].action_num = 1
 
-            elif action == "take_face_card":
+            elif action_term == "take_face_card":
                 self.players[player_id].holding = self.discard.pop()
                 self.players[player_id].action_num = 1
             else:
                 print("Incorrect action")
                 
-        elif self.players[player_id].action_num == 1:
+        elif action_num == 1:
             if self.game_over:
                 print("ERROR Game ended")
             elif not self.players[player_id].holding:
                 print("ERROR, Player should be holding a card")
                 # TODO: Handle exit state
                 # Throw error
-            elif action == "place" and position != None:
+            elif action_term == "place" and pos_tuple != None:
                 # remove the card that is being replaced
-                discard_ = self.players[player_id].cards[position[0]][position[1]]
+                discard_ = self.players[player_id].cards[pos_tuple[0]][pos_tuple[1]]
                 # place it in discard pile
                 self.discard.append(discard_)
                 # put the new card into its new position
-                self.players[player_id].cards[position[0]][position[1]] = self.players[player_id].holding
-                self.players[player_id].open_cards[position[0]][position[1]] = self.players[player_id].holding
+                self.players[player_id].cards[pos_tuple[0]][pos_tuple[1]] = self.players[player_id].holding
+                self.players[player_id].open_cards[pos_tuple[0]][pos_tuple[1]] = self.players[player_id].holding
                 self.players[player_id].holding = None
                 self.players[player_id].action_num = 0
                 self.face_card = discard_
-            # elif action == "discard" and self.players[player_id].holding == self.face_card:
-            #     self.discard.append(self.players[player_id].holding)
-            #     self.players[player_id].holding = None
-            #     self.players[player_id].action_num = 0
-            #     self.face_card = self.players[player_id].holding
-                
-            elif action == "discard" and position:
+
+            elif action_term == "discard" and pos_tuple:
                 # Do not place a card, instead flip a new card
-                if self.players[player_id].open_cards[position[0]][position[1]] != "X":
+                if self.players[player_id].open_cards[pos_tuple[0]][pos_tuple[1]] != "X":
                     print("ERROR Already flipped this card")
                 else:
                     self.discard.append(self.players[player_id].holding)
                     self.face_card = self.players[player_id].holding
                     self.players[player_id].holding = None
-                    self.players[player_id].open_cards[position[0]][position[1]] = self.players[player_id].cards[position[0]][position[1]]
+                    self.players[player_id].open_cards[pos_tuple[0]][pos_tuple[1]] = self.players[player_id].cards[pos_tuple[0]][pos_tuple[1]]
                     self.players[player_id].action_num = 0
             else:
                 print("ERROR No condition met")
@@ -204,14 +212,31 @@ class Golf:
                 print(f'last turn, player_id:{player_id}')
 
 
-def get_player_action(game, player_id, rank_cutoff=5, take_random_action=False):
+def get_player_action(game, player_id, action_num, rank_cutoff=5, take_random_action=False):
+    def encode_pos_tuple(pos):
+            if pos:
+                # (0, 0): 0
+                # (0, 1): 1
+                # (0, 2): 2
+                # (1, 0): 3
+                # (1, 1): 4
+                # (1, 2): 5
+                if pos[0] == 1:
+                    pos_int = (np.array(pos) + 1).sum()
+                else:
+                    pos_int = np.array(pos).sum()
+            else:
+                pos_int = None
+            return pos_int
+    
     available_actions = {
         0: ['take_face_card', 'take_new'],
         1: ['place','discard']
         }
-    if game.players[player_id].action_num == 0:
+    if action_num == 0:
         if take_random_action:
-            rand_action = random.choice(available_actions[0])
+
+            rand_action = random.choice([0, 1])
             return rand_action, None, 0
 
         rank_of_face_card = game.players[player_id].card2rank(game.face_card)
@@ -219,11 +244,11 @@ def get_player_action(game, player_id, rank_cutoff=5, take_random_action=False):
         rank_match = np.argwhere(game.players[player_id].open_ranks == rank_of_face_card)
         
         if game.players[player_id].card_to_score[game.face_card[0]] < rank_cutoff or rank_match.size > 0:
-            return "take_face_card", None, 0
+            return 0, None, 0
         else:
-            return "take_new", None, 0
-    if game.players[player_id].action_num == 1:
+            return 1, None, 0
         
+    if action_num == 1:
         # calculate optimal placement for card
         # iterate through each possible placement position
         # calculate score
@@ -255,14 +280,14 @@ def get_player_action(game, player_id, rank_cutoff=5, take_random_action=False):
             can_place = False
         
         if take_random_action:
-            rand_action = random.choice(available_actions[1])
+            rand_action = random.choice([0, 1])
             if can_place:
                 rand_pos = tuple(random.choice(available_pos_to_place))
                 # calculate reward
                 player_cards_copy = deepcopy(game.players[player_id].open_cards)
-                if rand_action == 'place':
+                if rand_action == 0:
                     player_cards_copy[rand_pos[0]][rand_pos[1]] = game.players[player_id].holding
-                elif rand_action == 'discard':
+                elif rand_action == 1:
                     player_cards_copy[rand_pos[0]][rand_pos[1]] = game.players[player_id].cards[rand_pos[0]][rand_pos[1]]
                 player_card_ranks = game.players[player_id].get_card_ranks(player_cards_copy)
                 upd_rand_score, scores_ = game.players[player_id].score_cards(player_card_ranks)
@@ -272,39 +297,31 @@ def get_player_action(game, player_id, rank_cutoff=5, take_random_action=False):
                 reward = 0
             # if rand_action == 'place' and not can_place:
             #     rand_action = 'discard'
-            return rand_action, rand_pos, reward
+            return rand_action, encode_pos_tuple(rand_pos), reward
         
         if upd_score <= (current_score - rank_cutoff):
-            action = "place"
+            action = 0
             pos = opt_pos
         
         elif can_place and (upd_score - current_score) < rank_cutoff:
             # card value is less than rank, place it somewhere
-            action = "place"
+            action = 0
             pos = tuple(available_pos_to_place[0])
         elif can_place:
             # discard and flip one of the cards instead
-            action = "discard"
+            action = 1
             pos = tuple(available_pos_to_place[0])
+        
 
-        return action, pos, reward
+        return action, encode_pos_tuple(pos), reward
 
-
-def take_turn(player_id, game, rank_cutoff=5, take_random_action=False):
-    if game.game_over:
-        print("GAME OVER")
-    else:
-        for i in range(2):
-            action, pos, reward = get_player_action(deepcopy(game), player_id, rank_cutoff, take_random_action)
-            game.take_action(player_id=player_id, action=action, position=pos)
-    return action, pos, reward
 
 max_num_rounds = 100
 
 ledger = []
-rank_cutoff = 6
+rank_cutoff = 4
 
-random_actions = True
+random_actions = False
 for game_num in range(1):
     for hole in range(10):
         players = [Player(name="PL1", id=0), Player(name="PL2", id=1), Player(name="PL3", id=2)]
@@ -318,15 +335,17 @@ for game_num in range(1):
                 if not golf.last_turn and golf.end_game_player_id != player_id:
                     golf.players[player_id].gather_game_state(golf)
                     state_ = golf.players[player_id].game_state
-                    print(game_num, hole, round_num,len(golf.deck), player_id, state_)
+                    print(game_num, hole, round_num, len(golf.deck), player_id, state_)
                     # Action 1
-                    action, pos, reward = get_player_action(deepcopy(golf), player_id, rank_cutoff, take_random_action=random_actions)
-                    print(game_num, hole, round_num,len(golf.deck), player_id, action, pos, reward)
-                    golf.take_action(player_id=player_id, action=action, position=pos)
+                    action, pos, reward = get_player_action(deepcopy(golf), player_id, 0, rank_cutoff, take_random_action=random_actions)
+                    action_array = [0, action, pos]
+                    print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward)
+                    golf.take_action(player_id=player_id, action_array=action_array)
                     # Action 2
-                    action, pos, reward = get_player_action(deepcopy(golf), player_id, rank_cutoff, take_random_action=random_actions)
-                    print(game_num, hole, round_num,len(golf.deck), player_id, action, pos, reward)
-                    golf.take_action(player_id=player_id, action=action, position=pos)
+                    action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=random_actions)
+                    action_array = [1, action, pos]
+                    print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward)
+                    golf.take_action(player_id=player_id, action_array=action_array)
                     # act_, pos_, reward = take_turn(player_id, golf, rank_cutoff, take_random_action=random_actions)
                     
                     golf.players[player_id].gather_game_state(golf)
