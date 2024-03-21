@@ -42,9 +42,10 @@ class GolfDeck(MutableSequence):
     
 
 class Player:
-    def __init__(self, name, id):
+    def __init__(self, name, id, type='Heuristic'):
         self.name = name
         self.id = id
+        self.type = type
         self.cards = [
             ["X", "X", "X"],
             ["X", "X", "X"]
@@ -111,8 +112,13 @@ class Player:
         self.game_state = list(np.array(self.open_ranks).flatten())
 
         # add next player id
-        self.game_state += list(np.array(game.players[(self.id + 1) % game.num_players].open_ranks).flatten())
+        #self.game_state += list(np.array(game.players[(self.id + 1) % game.num_players].open_ranks).flatten())
         self.game_state.append(self.card2rank(game.face_card))
+        if self.holding:
+            self.game_state.append(self.card2rank(self.holding))
+        else:
+            self.game_state.append('0')
+        self.game_state = ''.join(self.game_state)
 
 
 class Golf:
@@ -316,15 +322,25 @@ def get_player_action(game, player_id, action_num, rank_cutoff=5, take_random_ac
         return action, encode_pos_tuple(pos), reward
 
 
+
+# Define Q-learning parameters
+epsilon = 0.1  # Exploration rate
+alpha = 0.1  # Learning rate
+gamma = 0.9  # Discount factor
+
+# Initialize Q-table
+# Q-table maps state-action pairs to their Q-values
+Q = {}
+
 max_num_rounds = 100
 
 ledger = []
-rank_cutoff = 4
-
+rank_cutoff = 5
+# action = max(Q.get(state, {}).items(), key=lambda x: x[1])[0]
 random_actions = False
 for game_num in range(1):
     for hole in range(10):
-        players = [Player(name="PL1", id=0), Player(name="PL2", id=1), Player(name="PL3", id=2)]
+        players = [Player(name="PL1", id=0, type='Heuristic'), Player(name="PL2", id=1, type='Random'), Player(name="PL3", id=2, type='Random')]
         golf = Golf(players=players)
         golf.shuffle()
         golf.deal()
@@ -335,14 +351,33 @@ for game_num in range(1):
                 if not golf.last_turn and golf.end_game_player_id != player_id:
                     golf.players[player_id].gather_game_state(golf)
                     state_ = golf.players[player_id].game_state
+
                     print(game_num, hole, round_num, len(golf.deck), player_id, state_)
                     # Action 1
-                    action, pos, reward = get_player_action(deepcopy(golf), player_id, 0, rank_cutoff, take_random_action=random_actions)
+                    # TODO: Move this to player class
+                    if golf.players[player_id].type == 'Heuristic':
+                        action, pos, reward = get_player_action(deepcopy(golf), player_id, 0, rank_cutoff, take_random_action=False)
+                    elif golf.players[player_id].type == 'Random':
+                        action, pos, reward = get_player_action(deepcopy(golf), player_id, 0, rank_cutoff, take_random_action=True)
+                    elif golf.players[player_id].type == 'RL':
+                        action, pos = max(Q.get('0'+state_, {}).items(), key=lambda x: x[1])[0]
+                    else:
+                        raise TypeError
+
                     action_array = [0, action, pos]
                     print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward)
                     golf.take_action(player_id=player_id, action_array=action_array)
+
                     # Action 2
-                    action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=random_actions)
+                    if golf.players[player_id].type == 'Heuristic':
+                        action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=False)
+                    elif golf.players[player_id].type == 'Random':
+                        action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=True)
+                    elif golf.players[player_id].type == 'RL':
+                        action, pos = max(Q.get('1'+state_, {}).items(), key=lambda x: x[1])[0]
+                    else:
+                        raise TypeError
+                    
                     action_array = [1, action, pos]
                     print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward)
                     golf.take_action(player_id=player_id, action_array=action_array)
@@ -361,3 +396,4 @@ game_result_df = pd.DataFrame.from_dict(ledger)
 
 res = game_result_df.groupby(["player_id","game"])['score'].sum().reset_index().groupby("player_id")['score'].mean()
 print(res)
+
