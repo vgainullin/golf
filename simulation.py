@@ -46,6 +46,7 @@ class Player:
         self.name = name
         self.id = id
         self.type = type
+        self.score= 10 # TODO: Initialize with maximum value? 10
         self.cards = [
             ["X", "X", "X"],
             ["X", "X", "X"]
@@ -150,6 +151,7 @@ class Golf:
         # step 2: if revealed_card != face_card:
         #            -> choice(position, discard), else choice(position)
         # action = [turn_num, action, position_int]
+        score_before_action = self.players[player_id].score
         available_actions = {
         0: ['take_face_card', 'take_new'],
         1: ['place','discard']
@@ -210,6 +212,7 @@ class Golf:
             else:
                 print("ERROR No condition met")
         self.players[player_id].calculate_score()
+        reward = score_before_action - self.players[player_id].score
         if not self.game_over:
             if not np.isnan(self.players[player_id].scores).any():
                 
@@ -217,6 +220,7 @@ class Golf:
                 self.end_game_player_id = player_id
                 print(f'last turn, player_id:{player_id}')
 
+        return reward
 
 def get_player_action(game, player_id, action_num, rank_cutoff=5, take_random_action=False):
     def encode_pos_tuple(pos):
@@ -248,8 +252,10 @@ def get_player_action(game, player_id, action_num, rank_cutoff=5, take_random_ac
         rank_of_face_card = game.players[player_id].card2rank(game.face_card)
         # if rank of face card matches any ranks in open cards
         rank_match = np.argwhere(game.players[player_id].open_ranks == rank_of_face_card)
-        
+        # if its a small card or it matches an open card
         if game.players[player_id].card_to_score[game.face_card[0]] < rank_cutoff or rank_match.size > 0:
+            # TODO: Calculate reward
+            # The reward should not be 0 
             return 0, None, 0
         else:
             return 1, None, 0
@@ -320,9 +326,7 @@ def get_player_action(game, player_id, action_num, rank_cutoff=5, take_random_ac
         
 
         return action, encode_pos_tuple(pos), reward
-
-
-
+    
 # Define Q-learning parameters
 epsilon = 0.1  # Exploration rate
 alpha = 0.1  # Learning rate
@@ -339,7 +343,7 @@ rank_cutoff = 5
 # action = max(Q.get(state, {}).items(), key=lambda x: x[1])[0]
 random_actions = False
 for game_num in range(1):
-    for hole in range(10):
+    for hole in range(1):
         players = [Player(name="PL1", id=0, type='Heuristic'), Player(name="PL2", id=1, type='Random'), Player(name="PL3", id=2, type='Random')]
         golf = Golf(players=players)
         golf.shuffle()
@@ -361,13 +365,13 @@ for game_num in range(1):
                         action, pos, reward = get_player_action(deepcopy(golf), player_id, 0, rank_cutoff, take_random_action=True)
                     elif golf.players[player_id].type == 'RL':
                         action, pos = max(Q.get('0'+state_, {}).items(), key=lambda x: x[1])[0]
+                        # calculate reward
                     else:
                         raise TypeError
 
                     action_array = [0, action, pos]
-                    print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward)
-                    golf.take_action(player_id=player_id, action_array=action_array)
-
+                    reward_upd = golf.take_action(player_id=player_id, action_array=action_array)
+                    print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward_upd)
                     # Action 2
                     if golf.players[player_id].type == 'Heuristic':
                         action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=False)
@@ -379,8 +383,8 @@ for game_num in range(1):
                         raise TypeError
                     
                     action_array = [1, action, pos]
-                    print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward)
-                    golf.take_action(player_id=player_id, action_array=action_array)
+                    reward_upd = golf.take_action(player_id=player_id, action_array=action_array)
+                    print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward_upd)
                     # act_, pos_, reward = take_turn(player_id, golf, rank_cutoff, take_random_action=random_actions)
                     
                     golf.players[player_id].gather_game_state(golf)
