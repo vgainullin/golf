@@ -4,6 +4,7 @@ from collections import namedtuple
 import random
 import numpy as np
 import pandas as pd
+import json
 
 import collections
 from collections.abc import MutableSequence
@@ -218,7 +219,7 @@ class Golf:
                 
                 self.last_turn = True
                 self.end_game_player_id = player_id
-                print(f'last turn, player_id:{player_id}')
+                #print(f'last turn, player_id:{player_id}')
 
         return reward
 
@@ -340,11 +341,12 @@ max_num_rounds = 100
 
 ledger = []
 rank_cutoff = 5
+verbose = False
 # action = max(Q.get(state, {}).items(), key=lambda x: x[1])[0]
 random_actions = False
-for game_num in range(1):
-    for hole in range(1):
-        players = [Player(name="PL1", id=0, type='Heuristic'), Player(name="PL2", id=1, type='Random'), Player(name="PL3", id=2, type='Random')]
+for game_num in range(1000):
+    for hole in range(10):
+        players = [Player(name="PL1", id=0, type='RL'), Player(name="PL2", id=1, type='RL'), Player(name="PL3", id=2, type='RL'), Player(name="PL3", id=3, type='RL')]
         golf = Golf(players=players)
         golf.shuffle()
         golf.deal()
@@ -356,7 +358,7 @@ for game_num in range(1):
                     golf.players[player_id].gather_game_state(golf)
                     state_ = golf.players[player_id].game_state
 
-                    print(game_num, hole, round_num, len(golf.deck), player_id, state_)
+                    #print(game_num, hole, round_num, len(golf.deck), player_id, state_)
                     # Action 1
                     # TODO: Move this to player class
                     if golf.players[player_id].type == 'Heuristic':
@@ -364,40 +366,97 @@ for game_num in range(1):
                     elif golf.players[player_id].type == 'Random':
                         action, pos, reward = get_player_action(deepcopy(golf), player_id, 0, rank_cutoff, take_random_action=True)
                     elif golf.players[player_id].type == 'RL':
-                        action, pos = max(Q.get('0'+state_, {}).items(), key=lambda x: x[1])[0]
-                        # calculate reward
+                        q_state_ = Q.get('0'+state_, {}).items()
+                        if q_state_:
+                            action_pos = max(q_state_, key=lambda x: x[1])[0]
+                            action, pos = action_pos.split("|")
+                            action = int(action)
+                            if pos == 'None':
+                                pos = None
+                            else:
+                                pos = int(pos)
+                        else:
+                            action, pos, reward = get_player_action(deepcopy(golf), player_id, 0, rank_cutoff, take_random_action=True) 
                     else:
                         raise TypeError
 
                     action_array = [0, action, pos]
-                    reward_upd = golf.take_action(player_id=player_id, action_array=action_array)
-                    print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward_upd)
+                    try:
+                        reward_upd = golf.take_action(player_id=player_id, action_array=action_array)
+                    except IndexError as e:
+                        print(action_array)
+                        raise e
+                    golf.players[player_id].gather_game_state(golf)
+                    upd_state_0 = golf.players[player_id].game_state
+
+                    # Update Q-value using Q-learning formula
+                    if golf.players[player_id].type == 'RL':
+                        old_q_value = Q.get('0'+state_, {}).get(f"{action}|{pos}", 0)
+                        next_max_q_value = max(Q.get('0'+upd_state_0, {}).values(), default=0)
+                        new_q_value = old_q_value + alpha * (reward + gamma * next_max_q_value - old_q_value)
+                        Q.setdefault('0'+state_, {})[f"{action}|{pos}"] = new_q_value
+
+                    #print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward_upd)
+                    
+                    
                     # Action 2
                     if golf.players[player_id].type == 'Heuristic':
                         action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=False)
                     elif golf.players[player_id].type == 'Random':
                         action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=True)
                     elif golf.players[player_id].type == 'RL':
-                        action, pos = max(Q.get('1'+state_, {}).items(), key=lambda x: x[1])[0]
+                        q_state_ = Q.get('1'+state_, {}).items()
+                        if q_state_:
+                            action_pos = max(q_state_, key=lambda x: x[1])[0]
+                            action, pos = action_pos.split("|")
+                            action = int(action)
+                            if pos == 'None':
+                                pos = None
+                            else:
+                                pos = int(pos)
+                        else:
+                            action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=True) 
                     else:
                         raise TypeError
                     
                     action_array = [1, action, pos]
-                    reward_upd = golf.take_action(player_id=player_id, action_array=action_array)
-                    print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward_upd)
+                    try:
+                        reward_upd = golf.take_action(player_id=player_id, action_array=action_array)
+                    except TypeError as e:
+                        print(action_array)
+                        raise e
+                    #print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward_upd)
+
+
                     # act_, pos_, reward = take_turn(player_id, golf, rank_cutoff, take_random_action=random_actions)
                     
                     golf.players[player_id].gather_game_state(golf)
-                    upd_state_ = golf.players[player_id].game_state
-                    print(game_num, hole, round_num,len(golf.deck), player_id, upd_state_)
+                    upd_state_1 = golf.players[player_id].game_state
+
+
+                    if verbose: print(game_num, hole, round_num,len(golf.deck), player_id, upd_state_1)
+                    
+                    # Gather updated state
+
+                    # Update Q-value using Q-learning formula
+                    if golf.players[player_id].type == 'RL':
+                        old_q_value = Q.get('1'+upd_state_0, {}).get(f"{action}|{pos}", 0)
+                        next_max_q_value = max(Q.get('1'+upd_state_1, {}).values(), default=0)
+                        new_q_value = old_q_value + alpha * (reward + gamma * next_max_q_value - old_q_value)
+                        Q.setdefault('1'+upd_state_0, {})[f"{action}|{pos}"] = new_q_value
 
             round_num += 1
                     
         for player in golf.players:
             player.calculate_score(final=True)
             ledger.append(dict(player_id=player.id, score=player.score, hole=hole, game=game_num))
-game_result_df = pd.DataFrame.from_dict(ledger)
+    game_result_df = pd.DataFrame.from_dict(ledger)
+    res = game_result_df.groupby(["player_id","game"])['score'].sum().reset_index().groupby("player_id")['score'].mean()
+    print(f"Game {game_num}: result")
+    print(res)
+    print(f"RL Q-table size: {len(Q)}")
+    print("="*20)
 
-res = game_result_df.groupby(["player_id","game"])['score'].sum().reset_index().groupby("player_id")['score'].mean()
-print(res)
+with open('q_table.json', 'w') as fp:
+    json.dump(Q, fp)
 
