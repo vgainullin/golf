@@ -9,6 +9,7 @@ import json
 import collections
 from collections.abc import MutableSequence
 from collections import namedtuple
+from collections import deque
 
 
 Card = namedtuple('Card', ['rank', 'suit'])
@@ -78,8 +79,36 @@ class Player:
             ]
         self.game_state = []
 
+        if self.type == 'CountingHeuristic':
+            self.card_counts = None
+            self.total_cards = 52
+            self.probability_threshold = 0.4  # Default value, can be changed
+
+    def initialize_card_counts(self):
+        self.card_counts = collections.Counter()
+        ranks = [str(n) for n in range(2, 11)] + list('JQKA')
+        for rank in ranks:
+            self.card_counts[rank] = 4
+
+    def update_card_counts(self, cards, face_card):
+        for card in cards:
+            if card != 'X':
+                rank = card[0]
+                self.card_counts[rank] -= 1
+                self.total_cards -= 1
+        if face_card != 'X':
+            rank = face_card[0]
+            self.card_counts[rank] -= 1
+            self.total_cards -= 1
+
+    def get_card_probabilities(self):
+        probabilities = {}
+        for rank, count in self.card_counts.items():
+            probabilities[rank] = count / self.total_cards
+        return probabilities
+
     def card2rank(self, card):
-        if card == "X":
+        if card is None or card == "X":
             return card
         else:
             return card[0]
@@ -97,8 +126,16 @@ class Player:
                 scores[0][i] = 0
                 scores[1][i] = 0
             else:
-                scores[0][i] = self.card_to_score[cards[0][i]]
-                scores[1][i] = self.card_to_score[cards[1][i]]
+                if cards[0][i] is not None:
+                    scores[0][i] = self.card_to_score.get(cards[0][i], np.nan)
+                else:
+                    scores[0][i] = np.nan
+
+                if cards[1][i] is not None:
+                    scores[1][i] = self.card_to_score.get(cards[1][i], np.nan)
+                else:
+                    scores[1][i] = np.nan
+
         scores = np.array(scores)
         score = np.nansum(scores)
         return score, scores
@@ -168,26 +205,30 @@ class Golf:
         if self.last_turn and self.end_game_player_id == player_id:
             self.game_over = True
             print("Game Over")
-            return None
-        self.players[player_id].last_action = action
+            return 0  # Return a default reward
+        self.players[player_id].last_action = action_array
         if action_num == 0:
             if action_term == "take_new":
                 self.players[player_id].holding = self.deck.pop()
                 self.players[player_id].action_num = 1
 
             elif action_term == "take_face_card":
-                self.players[player_id].holding = self.discard.pop()
-                self.players[player_id].action_num = 1
+                if len(self.discard) > 0:  # Check if discard pile is not empty
+                    self.players[player_id].holding = self.discard.pop()
+                    self.players[player_id].action_num = 1
+                else:
+                    print(f"ERROR: Discard pile is empty, cannot take face card {player_id}")
+                    return 0  # Return a default reward
             else:
                 print("Incorrect action")
                 
         elif action_num == 1:
             if self.game_over:
                 print("ERROR Game ended")
+                return 0  # Return a default reward
             elif not self.players[player_id].holding:
-                print("ERROR, Player should be holding a card")
-                # TODO: Handle exit state
-                # Throw error
+                print(f"ERROR, Player should be holding a card {player_id}")
+                return 0  # Return a default reward
             elif action_term == "place" and pos_tuple != None:
                 # remove the card that is being replaced
                 discard_ = self.players[player_id].cards[pos_tuple[0]][pos_tuple[1]]
@@ -212,6 +253,7 @@ class Golf:
                     self.players[player_id].action_num = 0
             else:
                 print("ERROR No condition met")
+                return 0  # Return a default reward
         self.players[player_id].calculate_score()
         reward = score_before_action - self.players[player_id].score
         if not self.game_over:
@@ -223,240 +265,269 @@ class Golf:
 
         return reward
 
-def get_player_action(game, player_id, action_num, rank_cutoff=5, take_random_action=False):
-    def encode_pos_tuple(pos):
-            if pos:
-                # (0, 0): 0
-                # (0, 1): 1
-                # (0, 2): 2
-                # (1, 0): 3
-                # (1, 1): 4
-                # (1, 2): 5
-                if pos[0] == 1:
-                    pos_int = (np.array(pos) + 1).sum()
-                else:
-                    pos_int = np.array(pos).sum()
-            else:
-                pos_int = None
-            return pos_int
-    
-    available_actions = {
-        0: ['take_face_card', 'take_new'],
-        1: ['place','discard']
-        }
-    if action_num == 0:
-        if take_random_action:
-
-            rand_action = random.choice([0, 1])
-            return rand_action, None, 0
-
-        rank_of_face_card = game.players[player_id].card2rank(game.face_card)
-        # if rank of face card matches any ranks in open cards
-        rank_match = np.argwhere(game.players[player_id].open_ranks == rank_of_face_card)
-        # if its a small card or it matches an open card
-        if game.players[player_id].card_to_score[game.face_card[0]] < rank_cutoff or rank_match.size > 0:
-            # TODO: Calculate reward
-            # The reward should not be 0 
-            return 0, None, 0
+def encode_pos_tuple(pos):
+    if pos:
+        # (0, 0): 0
+        # (0, 1): 1
+        # (0, 2): 2
+        # (1, 0): 3
+        # (1, 1): 4
+        # (1, 2): 5
+        if pos[0] == 1:
+            pos_int = (np.array(pos) + 1).sum()
         else:
-            return 1, None, 0
-        
-    if action_num == 1:
-        # calculate optimal placement for card
-        # iterate through each possible placement position
-        # calculate score
-        # choose min score
-        current_score = game.players[player_id].score
-        min_score = 99
-        for row in range(2):
-            for c in range(3):
-                player_cards_copy = deepcopy(game.players[player_id].open_cards)
-                player_cards_copy[row][c] = game.players[player_id].holding
-                player_card_ranks = game.players[player_id].get_card_ranks(player_cards_copy)
-                score, scores = game.players[player_id].score_cards(player_card_ranks)
-                #print((row, c), score)
+            pos_int = np.array(pos).sum()
+    else:
+        pos_int = None
+    return pos_int
+
+def calc_opt_heuristic_position(player, holding_card, random_action=False):
+    """
+    Calculates the optimal position to place the holding card for a given player.
+    Returns the optimal position (row, col) and the updated score if the card is placed there.
+    If random_action is True, returns a random available position and the corresponding updated score.
+    """
+    min_score = 99
+    opt_pos = None
+    upd_score = None
+    available_pos = []
+
+    for row in range(2):
+        for col in range(3):
+            if player.open_cards[row][col] == "X":
+                available_pos.append((row, col))
+                player_cards_copy = deepcopy(player.open_cards)
+                player_cards_copy[row][col] = holding_card
+                #print("player_cards_copy:", player_cards_copy)
+                player_card_ranks = player.get_card_ranks(player_cards_copy)
+                score, _ = player.score_cards(player_card_ranks)
+
                 if score < min_score:
                     min_score = score
-                    opt_pos = (row, c)
+                    opt_pos = (row, col)
                     upd_score = score
-        # reward is the difference between current and improved score
-        # TODO: reward should reflext improvement over face card if random card is flipped?            
-        reward = current_score - upd_score
-        # If found a place that reduces current score by rank_cutoff
-        # TODO: this should be calculated on disposable copy?
-        golf.players[player_id].calculate_score()
-        available_pos_to_place = np.argwhere(np.isnan(golf.players[player_id].scores))
 
-        if len(available_pos_to_place) > 0:
-            can_place = True
+    if random_action and available_pos:
+        rand_pos = random.choice(available_pos)
+        player_cards_copy = deepcopy(player.open_cards)
+        player_cards_copy[rand_pos[0]][rand_pos[1]] = holding_card
+        player_card_ranks = player.get_card_ranks(player_cards_copy)
+        upd_score, _ = player.score_cards(player_card_ranks)
+        opt_pos = rand_pos
+
+    return opt_pos, upd_score
+
+def get_player_action(game, player_id, action_num, rank_cutoff=5, take_random_action=False):
+    available_actions = {
+        0: ['take_face_card', 'take_new'],
+        1: ['place', 'discard']
+    }
+    player = game.players[player_id]
+
+    # Action 0: Take a card
+    if action_num == 0:
+        if player.type == 'CountingHeuristic':
+            card_probabilities = player.get_card_probabilities()
+            rank_of_face_card = player.card2rank(game.face_card)
+            face_card_probability = card_probabilities[rank_of_face_card]
+            lower_rank_probability = sum(card_probabilities[rank] for rank in card_probabilities if player.card_to_score[rank] < player.card_to_score[rank_of_face_card])
+            if lower_rank_probability > player.probability_threshold:
+                return 1, None, 0  # Take a new card from the deck
+            else:
+                return 0, None, 0  # Take the face card
+        elif player.type == 'Heuristic':
+            rank_of_face_card = player.card2rank(game.face_card)
+            rank_match = np.argwhere(player.open_ranks == rank_of_face_card)
+            if player.card_to_score[game.face_card[0]] < rank_cutoff or rank_match.size > 0:
+                return 0, None, 0  # Take the face card
+            else:
+                return 1, None, 0  # Take a new card from the deck
+        elif take_random_action:
+            return random.choice([0, 1]), None, 0
         else:
-            can_place = False
-        
+            raise TypeError(f"Invalid player type: {player.type}")
+
+    # Action 1: Place or discard a card
+    elif action_num == 1:
+        current_score = player.score
+        opt_pos, upd_score = calc_opt_heuristic_position(player, player.holding)
+        reward = current_score - upd_score
+
         if take_random_action:
             rand_action = random.choice([0, 1])
-            if can_place:
-                rand_pos = tuple(random.choice(available_pos_to_place))
-                # calculate reward
-                player_cards_copy = deepcopy(game.players[player_id].open_cards)
-                if rand_action == 0:
-                    player_cards_copy[rand_pos[0]][rand_pos[1]] = game.players[player_id].holding
-                elif rand_action == 1:
-                    player_cards_copy[rand_pos[0]][rand_pos[1]] = game.players[player_id].cards[rand_pos[0]][rand_pos[1]]
-                player_card_ranks = game.players[player_id].get_card_ranks(player_cards_copy)
-                upd_rand_score, scores_ = game.players[player_id].score_cards(player_card_ranks)
+            if rand_action == 0:
+                rand_pos, upd_rand_score = calc_opt_heuristic_position(player, player.holding, random_action=True)
                 reward = current_score - upd_rand_score
+                return rand_action, encode_pos_tuple(rand_pos), reward
             else:
-                rand_pos = None
-                reward = 0
-            # if rand_action == 'place' and not can_place:
-            #     rand_action = 'discard'
-            return rand_action, encode_pos_tuple(rand_pos), reward
-        
-        if upd_score <= (current_score - rank_cutoff):
-            action = 0
-            pos = opt_pos
-        
-        elif can_place and (upd_score - current_score) < rank_cutoff:
-            # card value is less than rank, place it somewhere
-            action = 0
-            pos = tuple(available_pos_to_place[0])
-        elif can_place:
-            # discard and flip one of the cards instead
-            action = 1
-            pos = tuple(available_pos_to_place[0])
-        
+                available_pos_to_place = np.argwhere(np.isnan(player.scores))
+                if len(available_pos_to_place) > 0:
+                    rand_pos = tuple(available_pos_to_place[random.randint(0, len(available_pos_to_place) - 1)])
+                else:
+                    rand_pos = None
+                return rand_action, encode_pos_tuple(rand_pos), 0
+        else:
+            available_pos_to_place = np.argwhere(np.isnan(player.scores))
+            can_place = len(available_pos_to_place) > 0
 
-        return action, encode_pos_tuple(pos), reward
-    
+            if upd_score <= (current_score - rank_cutoff):
+                action, pos = 0, opt_pos
+            elif can_place and (upd_score - current_score) < rank_cutoff:
+                action, pos = 0, tuple(available_pos_to_place[0])
+            elif can_place:
+                action, pos = 1, tuple(available_pos_to_place[0])
+            else:
+                raise ValueError("No valid action found")
+
+            return action, encode_pos_tuple(pos), reward
+
+    else:
+        raise ValueError(f"Invalid action number: {action_num}")
+
 # Define Q-learning parameters
 epsilon = 0.1  # Exploration rate
 alpha = 0.1  # Learning rate
 gamma = 0.9  # Discount factor
 
-# Initialize Q-table
-# Q-table maps state-action pairs to their Q-values
+def play_single_turn(golf, player_id, action_num, Q, state_):
+    player = golf.players[player_id]
+    
+    # Determine action based on player type
+    if player.type == 'Heuristic':
+        action, pos, reward = get_player_action(deepcopy(golf), player_id, action_num, rank_cutoff, take_random_action=False)
+    elif player.type == 'Random':
+        action, pos, reward = get_player_action(deepcopy(golf), player_id, action_num, rank_cutoff, take_random_action=True)
+    elif player.type == 'CountingHeuristic':
+        action, pos, reward = get_player_action(deepcopy(golf), player_id, action_num, rank_cutoff, take_random_action=False)
+    elif player.type == 'RL':
+        q_state_ = Q.get(f'{action_num}'+state_, {}).items()
+        if q_state_:
+            action_pos = max(q_state_, key=lambda x: x[1])[0]
+            action, pos = action_pos.split("|")
+            action = int(action)
+            pos = None if pos == 'None' else int(pos)
+        else:
+            action, pos, reward = get_player_action(deepcopy(golf), player_id, action_num, rank_cutoff, take_random_action=True)
+    else:
+        raise ValueError(f"Error: Player type '{player.type}' not recognized.")
+
+    # Execute action
+    action_array = [action_num, action, pos]
+    reward_upd = golf.take_action(player_id=player_id, action_array=action_array)
+    
+    # Get new state
+    golf.players[player_id].gather_game_state(golf)
+    new_state = golf.players[player_id].game_state
+    
+    # Update Q-table for RL player
+    if player.type == 'RL':
+        update_q_table(Q, action_num, state_, new_state, action, pos, reward_upd)
+    
+    return new_state
+
+def update_q_table(Q, action_num, state, new_state, action, pos, reward):
+    old_q_value = Q.get(f'{action_num}'+state, {}).get(f"{action}|{pos}", 0)
+    next_max_q_value = max(Q.get(f'{action_num}'+new_state, {}).values(), default=0)
+    new_q_value = old_q_value + alpha * (reward + gamma * next_max_q_value - old_q_value)
+    Q.setdefault(f'{action_num}'+state, {})[f"{action}|{pos}"] = new_q_value
+
+def play_game(golf, game_num, hole, Q):
+    # Add this line
+    max_num_rounds = 100  # or whatever maximum number of rounds you want to allow
+    golf.shuffle()
+    golf.deal()
+    
+    # Initialize CountingHeuristic players
+    for player in golf.players:
+        if player.type == 'CountingHeuristic':
+            player.initialize_card_counts()
+            for other_player in golf.players:
+                player.update_card_counts(other_player.cards[0] + other_player.cards[1], golf.face_card)
+
+    # Play rounds
+    round_num = 0
+    while round_num < max_num_rounds and not golf.last_turn:
+        # iterate over all players
+        for player_id in range(golf.num_players):
+            if not golf.last_turn and golf.end_game_player_id != player_id:
+                #check if there are cards left in the deck create a new deck otherwise use the discard pile
+                if len(golf.deck) < golf.num_players + 2:
+                    print(f"Deck is empty, creating new deck {player_id}")
+                    golf.deck = GolfDeck(cards="French")
+                    golf.shuffle()
+                    golf.deal()
+
+                # Get initial state
+                golf.players[player_id].gather_game_state(golf)
+                state_ = golf.players[player_id].game_state
+                
+                # Play first action (action_num = 0)
+                upd_state_0 = play_single_turn(golf, player_id, 0, Q, state_)
+                
+                # Play second action (action_num = 1)
+                #if golf.players[player_id].type != 'RL':  # RL handled separately
+                play_single_turn(golf, player_id, 1, Q, upd_state_0)
+                
+                if verbose:
+                    print(game_num, hole, round_num, len(golf.deck), player_id, upd_state_0)
+        
+        round_num += 1
+    
+    # Calculate final scores
+    game_results = []
+    for player in golf.players:
+        player.calculate_score(final=True)
+        game_results.append(dict(
+            player_id=player.id,
+            score=player.score,
+            hole=hole,
+            game=game_num
+        ))
+    
+    return game_results
+
+# Main execution
 Q = {}
-
-max_num_rounds = 100
-
 ledger = []
 rank_cutoff = 5
 verbose = False
-# action = max(Q.get(state, {}).items(), key=lambda x: x[1])[0]
-random_actions = False
-for game_num in range(1000):
+num_gems_to_simulate = 50
+
+all_game_results = []
+for game_num in range(num_gems_to_simulate):
     for hole in range(10):
-        players = [Player(name="PL1", id=0, type='RL'), Player(name="PL2", id=1, type='RL'), Player(name="PL3", id=2, type='RL'), Player(name="PL3", id=3, type='RL')]
-        golf = Golf(players=players)
-        golf.shuffle()
-        golf.deal()
-        
-        round_num = 0
-        while round_num < max_num_rounds and not golf.last_turn:
-            for player_id in range(3):
-                if not golf.last_turn and golf.end_game_player_id != player_id:
-                    golf.players[player_id].gather_game_state(golf)
-                    state_ = golf.players[player_id].game_state
+        # Initialize players as a deque for easy rotation
+        players = deque([
+            Player(name="PL1", id=0, type='Random'),
+            Player(name="PL2", id=1, type='Heuristic'),
+            Player(name="PL3", id=2, type='CountingHeuristic'),
+            Player(name="PL3", id=3, type='RL')
+        ])
+        # Convert deque back to list when passing to Golf
+        golf = Golf(players=list(players))
+        game_results = play_game(golf, game_num, hole, Q)
+        ledger.extend(game_results)
 
-                    #print(game_num, hole, round_num, len(golf.deck), player_id, state_)
-                    # Action 1
-                    # TODO: Move this to player class
-                    if golf.players[player_id].type == 'Heuristic':
-                        action, pos, reward = get_player_action(deepcopy(golf), player_id, 0, rank_cutoff, take_random_action=False)
-                    elif golf.players[player_id].type == 'Random':
-                        action, pos, reward = get_player_action(deepcopy(golf), player_id, 0, rank_cutoff, take_random_action=True)
-                    elif golf.players[player_id].type == 'RL':
-                        q_state_ = Q.get('0'+state_, {}).items()
-                        if q_state_:
-                            action_pos = max(q_state_, key=lambda x: x[1])[0]
-                            action, pos = action_pos.split("|")
-                            action = int(action)
-                            if pos == 'None':
-                                pos = None
-                            else:
-                                pos = int(pos)
-                        else:
-                            action, pos, reward = get_player_action(deepcopy(golf), player_id, 0, rank_cutoff, take_random_action=True) 
-                    else:
-                        raise TypeError
-
-                    action_array = [0, action, pos]
-                    try:
-                        reward_upd = golf.take_action(player_id=player_id, action_array=action_array)
-                    except IndexError as e:
-                        print(action_array)
-                        raise e
-                    golf.players[player_id].gather_game_state(golf)
-                    upd_state_0 = golf.players[player_id].game_state
-
-                    # Update Q-value using Q-learning formula
-                    if golf.players[player_id].type == 'RL':
-                        old_q_value = Q.get('0'+state_, {}).get(f"{action}|{pos}", 0)
-                        next_max_q_value = max(Q.get('0'+upd_state_0, {}).values(), default=0)
-                        new_q_value = old_q_value + alpha * (reward + gamma * next_max_q_value - old_q_value)
-                        Q.setdefault('0'+state_, {})[f"{action}|{pos}"] = new_q_value
-
-                    #print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward_upd)
-                    
-                    
-                    # Action 2
-                    if golf.players[player_id].type == 'Heuristic':
-                        action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=False)
-                    elif golf.players[player_id].type == 'Random':
-                        action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=True)
-                    elif golf.players[player_id].type == 'RL':
-                        q_state_ = Q.get('1'+state_, {}).items()
-                        if q_state_:
-                            action_pos = max(q_state_, key=lambda x: x[1])[0]
-                            action, pos = action_pos.split("|")
-                            action = int(action)
-                            if pos == 'None':
-                                pos = None
-                            else:
-                                pos = int(pos)
-                        else:
-                            action, pos, reward = get_player_action(deepcopy(golf), player_id, 1, rank_cutoff, take_random_action=True) 
-                    else:
-                        raise TypeError
-                    
-                    action_array = [1, action, pos]
-                    try:
-                        reward_upd = golf.take_action(player_id=player_id, action_array=action_array)
-                    except TypeError as e:
-                        print(action_array)
-                        raise e
-                    #print(game_num, hole, round_num, len(golf.deck), player_id, action_array, reward_upd)
-
-
-                    # act_, pos_, reward = take_turn(player_id, golf, rank_cutoff, take_random_action=random_actions)
-                    
-                    golf.players[player_id].gather_game_state(golf)
-                    upd_state_1 = golf.players[player_id].game_state
-
-
-                    if verbose: print(game_num, hole, round_num,len(golf.deck), player_id, upd_state_1)
-                    
-                    # Gather updated state
-
-                    # Update Q-value using Q-learning formula
-                    if golf.players[player_id].type == 'RL':
-                        old_q_value = Q.get('1'+upd_state_0, {}).get(f"{action}|{pos}", 0)
-                        next_max_q_value = max(Q.get('1'+upd_state_1, {}).values(), default=0)
-                        new_q_value = old_q_value + alpha * (reward + gamma * next_max_q_value - old_q_value)
-                        Q.setdefault('1'+upd_state_0, {})[f"{action}|{pos}"] = new_q_value
-
-            round_num += 1
-                    
-        for player in golf.players:
-            player.calculate_score(final=True)
-            ledger.append(dict(player_id=player.id, score=player.score, hole=hole, game=game_num))
+        # Rotate players after each turn
+        players.rotate(-1)
+    
+    # Print game statistics
     game_result_df = pd.DataFrame.from_dict(ledger)
     res = game_result_df.groupby(["player_id","game"])['score'].sum().reset_index().groupby("player_id")['score'].mean()
+    all_game_results.append(res)
     print(f"Game {game_num}: result")
     print(res)
     print(f"RL Q-table size: {len(Q)}")
     print("="*20)
 
+
+# print all game results, average score per player and standard deviation
+# print title
+print("Average score per player and standard deviation")
+all_game_results_df = pd.DataFrame(all_game_results)
+print(all_game_results_df.mean().rename("mean").reset_index().merge(all_game_results_df.std().rename("std").reset_index()))
+
+# Save Q-table
 with open('q_table.json', 'w') as fp:
     json.dump(Q, fp)
 
