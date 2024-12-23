@@ -18,14 +18,19 @@ class GolfDeck(MutableSequence):
     
     def __init__(self, cards="French"):
         if cards == "French":
-            ranks = [str(n) for n in range(2, 11)] + list('JQKA')
+            ranks = [str(n) for n in range(2, 9)] + list('XJQKA')
             suits = 'spades diamonds clubs hearts'.split()
             cards = [Card(rank, suit) for suit in suits for rank in ranks]
             self._cards = cards
+        elif cards == "2xFrench":
+            ranks = [str(n) for n in range(2, 9)] + list('XJQKA')
+            suits = 'spades diamonds clubs hearts'.split()
+            cards = [Card(rank, suit) for suit in suits for rank in ranks]
+            self._cards = cards * 2
         elif cards == "Blank":
             self._cards = []
-        elif cards:
-            self._cards = cards
+        else:
+            raise ValueError(f"Invalid deck type: {cards}")
 
     def __len__(self):
         return len(self._cards)
@@ -50,32 +55,32 @@ class Player:
         self.type = type
         self.score= 10 # TODO: Initialize with maximum value? 10
         self.cards = [
-            ["X", "X", "X"],
-            ["X", "X", "X"]
+            ["?", "?", "?"],
+            ["?", "?", "?"]
             ]
         self.open_cards = [
-            ["X", "X", "X"],
-            ["X", "X", "X"]
+            ["?", "?", "?"],
+            ["?", "?", "?"]
             ]
         self.scores = [
-            ["X", "X", "X"],
-            ["X", "X", "X"]
+            ["?", "?", "?"],
+            ["?", "?", "?"]
             ]
         self.open_ranks = [
-            ["X", "X", "X"],
-            ["X", "X", "X"]
+            ["?", "?", "?"],
+            ["?", "?", "?"]
             ]
         self.holding = None
         self.last_action = None
         self.action_num = 0
-        card_to_score = dict(zip([str(n) for n in range(3, 11)] + list("JQKA"), list(range(3, 11))+[10, 10, 0, 1]))
+        card_to_score = dict(zip([str(n) for n in range(3, 10)] + list("XJQKA"), list(range(3, 10))+[10, 10, 10, 0, 1]))
         card_to_score["2"] = -2
-        card_to_score["X"] = np.nan
+        card_to_score["?"] = np.nan
         self.card_to_score = card_to_score
         self.calculate_score()
         self.open_ranks = [
-            ["X", "X", "X"],
-            ["X", "X", "X"]
+            ["?", "?", "?"],
+            ["?", "?", "?"]
             ]
         self.game_state = []
 
@@ -86,17 +91,17 @@ class Player:
 
     def initialize_card_counts(self):
         self.card_counts = collections.Counter()
-        ranks = [str(n) for n in range(2, 11)] + list('JQKA')
+        ranks = [str(n) for n in range(2, 10)] + list('XJQKA')
         for rank in ranks:
             self.card_counts[rank] = 4
 
     def update_card_counts(self, cards, face_card):
         for card in cards:
-            if card != 'X':
+            if card != '?':
                 rank = card[0]
                 self.card_counts[rank] -= 1
                 self.total_cards -= 1
-        if face_card != 'X':
+        if face_card != '?':
             rank = face_card[0]
             self.card_counts[rank] -= 1
             self.total_cards -= 1
@@ -108,7 +113,7 @@ class Player:
         return probabilities
 
     def card2rank(self, card):
-        if card is None or card == "X":
+        if card is None or card == "?":
             return card
         else:
             return card[0]
@@ -122,7 +127,7 @@ class Player:
     def score_cards(self, cards):
         scores = deepcopy(cards)
         for i in range(3):
-            if cards[0][i] == cards[1][i] != "X":
+            if cards[0][i] == cards[1][i] != "?":
                 scores[0][i] = 0
                 scores[1][i] = 0
             else:
@@ -161,8 +166,8 @@ class Player:
 
 
 class Golf:
-    def __init__(self, players=None):
-        self.deck = GolfDeck(cards="French")
+    def __init__(self, players=None, deck_type="French"):
+        self.deck = GolfDeck(cards=deck_type)
         self.discard = GolfDeck(cards="Blank")
         self.face_card = None
         self.players = players
@@ -243,7 +248,7 @@ class Golf:
 
             elif action_term == "discard" and pos_tuple:
                 # Do not place a card, instead flip a new card
-                if self.players[player_id].open_cards[pos_tuple[0]][pos_tuple[1]] != "X":
+                if self.players[player_id].open_cards[pos_tuple[0]][pos_tuple[1]] != "?":
                     print("ERROR Already flipped this card")
                 else:
                     self.discard.append(self.players[player_id].holding)
@@ -294,7 +299,7 @@ def calc_opt_heuristic_position(player, holding_card, random_action=False):
 
     for row in range(2):
         for col in range(3):
-            if player.open_cards[row][col] == "X":
+            if player.open_cards[row][col] == "?":
                 available_pos.append((row, col))
                 player_cards_copy = deepcopy(player.open_cards)
                 player_cards_copy[row][col] = holding_card
@@ -453,7 +458,7 @@ def play_game(golf, game_num, hole, Q):
                 #check if there are cards left in the deck create a new deck otherwise use the discard pile
                 if len(golf.deck) < golf.num_players + 2:
                     print(f"Deck is empty, creating new deck {player_id}")
-                    golf.deck = GolfDeck(cards="French")
+                    golf.deck = GolfDeck()
                     golf.shuffle()
                     golf.deal()
 
@@ -490,8 +495,8 @@ def play_game(golf, game_num, hole, Q):
 Q = {}
 ledger = []
 rank_cutoff = 5
-verbose = False
-num_gems_to_simulate = 50
+verbose = True
+num_gems_to_simulate = 1
 
 all_game_results = []
 for game_num in range(num_gems_to_simulate):
@@ -504,7 +509,7 @@ for game_num in range(num_gems_to_simulate):
             Player(name="PL3", id=3, type='RL')
         ])
         # Convert deque back to list when passing to Golf
-        golf = Golf(players=list(players))
+        golf = Golf(players=list(players), deck_type="French")
         game_results = play_game(golf, game_num, hole, Q)
         ledger.extend(game_results)
 
