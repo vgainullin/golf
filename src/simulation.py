@@ -5,32 +5,48 @@ import random
 import numpy as np
 import pandas as pd
 import json
+import torch
+
 
 import collections
 from collections.abc import MutableSequence
 from collections import namedtuple
 from collections import deque
-
+from src.qtransformer import QTransformer, ReplayBuffer, CardEmbedding, train_episode
 
 Card = namedtuple('Card', ['rank', 'suit'])
 
 class GolfDeck(MutableSequence):
     
     def __init__(self, cards="French"):
+        self.ranks = [str(n) for n in range(2, 10)] + list('XJQKA')
+        self.suits = 'spades diamonds clubs hearts'.split()
+        
         if cards == "French":
-            ranks = [str(n) for n in range(2, 9)] + list('XJQKA')
-            suits = 'spades diamonds clubs hearts'.split()
-            cards = [Card(rank, suit) for suit in suits for rank in ranks]
-            self._cards = cards
+            self._cards = [Card(rank, suit) for suit in self.suits for rank in self.ranks]
         elif cards == "2xFrench":
-            ranks = [str(n) for n in range(2, 9)] + list('XJQKA')
-            suits = 'spades diamonds clubs hearts'.split()
-            cards = [Card(rank, suit) for suit in suits for rank in ranks]
-            self._cards = cards * 2
+            self._cards = [Card(rank, suit) for suit in self.suits for rank in self.ranks] * 2
         elif cards == "Blank":
             self._cards = []
         else:
             raise ValueError(f"Invalid deck type: {cards}")
+
+    def card2index(self, card, ignore_suit=False):
+        """Convert a card to its unique original index in the unshuffled deck.
+        
+        If ignore_suit is True, return the index based only on the rank.
+        If the card is unknown, return an index outside the normal range.
+        """
+        try:
+            rank_index = self.ranks.index(card.rank)
+            if ignore_suit:
+                return rank_index
+            else:
+                suit_index = self.suits.index(card.suit)
+                return suit_index * len(self.ranks) + rank_index
+        except (AttributeError, ValueError):
+            # Return an index outside the normal range for unknown cards
+            return len(self.ranks) * len(self.suits) + 1
 
     def __len__(self):
         return len(self._cards)
@@ -54,6 +70,7 @@ class Player:
         self.id = id
         self.type = type
         self.score= 10 # TODO: Initialize with maximum value? 10
+        self.reward = 0
         self.cards = [
             ["?", "?", "?"],
             ["?", "?", "?"]
@@ -152,12 +169,18 @@ class Player:
             self.open_ranks = self.get_card_ranks(self.open_cards)
         self.score, self.scores = self.score_cards(self.open_ranks)
     
-    def gather_game_state(self, game):
+    def gather_game_state(self, game=None):
         self.game_state = list(np.array(self.open_ranks).flatten())
-
-        # add next player id
-        #self.game_state += list(np.array(game.players[(self.id + 1) % game.num_players].open_ranks).flatten())
-        self.game_state.append(self.card2rank(game.face_card))
+        self.game_state_tokens = self.open_cards
+        # flatten a nested list
+        self.game_state_tokens = [item for sublist in self.game_state_tokens for item in sublist]
+        if game:
+            self.game_state_tokens = [game.deck.card2index(card) for card in self.game_state_tokens]
+            self.game_state_tokens.append(game.deck.card2index(game.face_card))
+            self.game_state.append(self.card2rank(game.face_card))
+            # add next player id
+            #self.game_state += list(np.array(game.players[(self.id + 1) % game.num_players].open_ranks).flatten())
+            
         if self.holding:
             self.game_state.append(self.card2rank(self.holding))
         else:
@@ -166,7 +189,7 @@ class Player:
 
 
 class Golf:
-    def __init__(self, players=None, deck_type="French"):
+    def __init__(self, players=None, deck_type="French", verbose=False):
         self.deck = GolfDeck(cards=deck_type)
         self.discard = GolfDeck(cards="Blank")
         self.face_card = None
@@ -175,6 +198,7 @@ class Golf:
         self.last_turn = False
         self.game_over = False
         self.end_game_player_id = None
+        self.verbose = verbose
         
     def shuffle(self):
         random.shuffle(self.deck)
@@ -261,13 +285,6 @@ class Golf:
                 return 0  # Return a default reward
         self.players[player_id].calculate_score()
         reward = score_before_action - self.players[player_id].score
-        if not self.game_over:
-            if not np.isnan(self.players[player_id].scores).any():
-                
-                self.last_turn = True
-                self.end_game_player_id = player_id
-                #print(f'last turn, player_id:{player_id}')
-
         return reward
 
 def encode_pos_tuple(pos):
@@ -418,7 +435,7 @@ def play_single_turn(golf, player_id, action_num, Q, state_):
 
     # Execute action
     action_array = [action_num, action, pos]
-    reward_upd = golf.take_action(player_id=player_id, action_array=action_array)
+    reward = golf.take_action(player_id=player_id, action_array=action_array)
     
     # Get new state
     golf.players[player_id].gather_game_state(golf)
@@ -426,9 +443,11 @@ def play_single_turn(golf, player_id, action_num, Q, state_):
     
     # Update Q-table for RL player
     if player.type == 'RL':
-        update_q_table(Q, action_num, state_, new_state, action, pos, reward_upd)
-    
-    return new_state
+        update_q_table(Q, action_num, state_, new_state, action, pos, reward)
+        player.reward += reward
+    else:
+        player.reward += reward
+    return new_state, reward, action_num
 
 def update_q_table(Q, action_num, state, new_state, action, pos, reward):
     old_q_value = Q.get(f'{action_num}'+state, {}).get(f"{action}|{pos}", 0)
@@ -436,10 +455,10 @@ def update_q_table(Q, action_num, state, new_state, action, pos, reward):
     new_q_value = old_q_value + alpha * (reward + gamma * next_max_q_value - old_q_value)
     Q.setdefault(f'{action_num}'+state, {})[f"{action}|{pos}"] = new_q_value
 
-def play_game(golf, game_num, hole, Q):
+def play_game(golf, game_num, hole, Q, model, shuffle=True):
     # Add this line
-    max_num_rounds = 100  # or whatever maximum number of rounds you want to allow
-    golf.shuffle()
+    if shuffle:
+        golf.shuffle()
     golf.deal()
     
     # Initialize CountingHeuristic players
@@ -451,31 +470,57 @@ def play_game(golf, game_num, hole, Q):
 
     # Play rounds
     round_num = 0
-    while round_num < max_num_rounds and not golf.last_turn:
+    while not golf.game_over:
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        replay_buffer = ReplayBuffer(capacity=10000)
+        
+        epsilon = 0.5
+        batch_size = 32
+        episode_rewards = []
+
         # iterate over all players
         for player_id in range(golf.num_players):
-            if not golf.last_turn and golf.end_game_player_id != player_id:
-                #check if there are cards left in the deck create a new deck otherwise use the discard pile
-                if len(golf.deck) < golf.num_players + 2:
-                    print(f"Deck is empty, creating new deck {player_id}")
-                    golf.deck = GolfDeck()
-                    golf.shuffle()
-                    golf.deal()
+            # Get initial state
+            golf.players[player_id].gather_game_state(golf)
+            state_ = golf.players[player_id].game_state
+            init_state_tokens = np.array(golf.players[player_id].game_state_tokens)
+            
+            if '?' not in golf.players[player_id].game_state:
+                golf.game_over = True
+                break
+            
+            # Play first action (action_num = 0)
+            upd_state_0, reward_0, action_0 = play_single_turn(golf, player_id, 0, Q, state_)
+            
+            golf.players[player_id].gather_game_state(golf)
 
-                # Get initial state
-                golf.players[player_id].gather_game_state(golf)
-                state_ = golf.players[player_id].game_state
-                
-                # Play first action (action_num = 0)
-                upd_state_0 = play_single_turn(golf, player_id, 0, Q, state_)
-                
-                # Play second action (action_num = 1)
-                #if golf.players[player_id].type != 'RL':  # RL handled separately
-                play_single_turn(golf, player_id, 1, Q, upd_state_0)
-                
+            #replay_buffer.push(init_state_tokens, action_0, reward_0, np.array(golf.players[player_id].game_state_tokens), golf.game_over)
+            # Play second action (action_num = 1)
+            #if golf.players[player_id].type != 'RL':  # RL handled separately
+            #loss = train_episode(model, optimizer, replay_buffer, batch_size)
+            #print(loss)
+            upd_state_1, reward_1, action_1 = play_single_turn(golf, player_id, 1, Q, upd_state_0)
+            #check if there are cards left in the deck create a new deck otherwise use the discard pile
+            if len(golf.deck) < golf.num_players + 2:
                 if verbose:
-                    print(game_num, hole, round_num, len(golf.deck), player_id, upd_state_0)
-        
+                    print(f"Deck is empty, creating new deck {player_id}")
+                golf.deck = GolfDeck()
+                golf.shuffle() 
+                golf.deal()
+
+            # if np.random.random() < epsilon:
+            #     action = np.random.randint(1)  # Random action
+            # else:
+            #     with torch.no_grad():
+            #         state_tensor = torch.tensor(init_state_tokens[None, :], dtype=torch.long)
+            #         q_values = model(state_tensor[:, :6], state_tensor[:, 6:])
+            #         action = q_values.argmax().item()
+            if verbose:
+                print(game_num, hole, round_num, len(golf.deck), player_id,golf.players[player_id].score, golf.players[player_id].game_state)
+            if '?' not in golf.players[player_id].game_state:
+                golf.last_turn = True
+                golf.end_game_player_id = player_id
+            
         round_num += 1
     
     # Calculate final scores
@@ -486,7 +531,8 @@ def play_game(golf, game_num, hole, Q):
             player_id=player.id,
             score=player.score,
             hole=hole,
-            game=game_num
+            game=game_num,
+            reward=player.reward
         ))
     
     return game_results
@@ -494,31 +540,36 @@ def play_game(golf, game_num, hole, Q):
 # Main execution
 Q = {}
 ledger = []
-rank_cutoff = 5
+rank_cutoff = 4
 verbose = True
-num_gems_to_simulate = 1
+num_games_to_simulate = 10
+holes_per_game = 9
+shuffle = True
 
 all_game_results = []
-for game_num in range(num_gems_to_simulate):
-    for hole in range(10):
+model = QTransformer()
+for game_num in range(num_games_to_simulate):
+    for hole in range(1, holes_per_game + 1):
         # Initialize players as a deque for easy rotation
         players = deque([
-            Player(name="PL1", id=0, type='Random'),
-            Player(name="PL2", id=1, type='Heuristic'),
-            Player(name="PL3", id=2, type='CountingHeuristic'),
-            Player(name="PL3", id=3, type='RL')
+            Player(name="PL1", id=0, type='Random'), # Random
+            Player(name="PL2", id=1, type='Heuristic'), # Heuristic
+            Player(name="PL3", id=2, type='Random'), # CountingHeuristic
+            Player(name="PL3", id=3, type='Heuristic') # RL
         ])
         # Convert deque back to list when passing to Golf
-        golf = Golf(players=list(players), deck_type="French")
-        game_results = play_game(golf, game_num, hole, Q)
+        golf = Golf(players=list(players), deck_type="French", verbose=verbose)
+        game_results = play_game(golf, game_num, hole, Q, model, shuffle=shuffle)
         ledger.extend(game_results)
-
         # Rotate players after each turn
         players.rotate(-1)
     
     # Print game statistics
     game_result_df = pd.DataFrame.from_dict(ledger)
     res = game_result_df.groupby(["player_id","game"])['score'].sum().reset_index().groupby("player_id")['score'].mean()
+
+    res['size_Q'] = len(Q)
+    #res['x_reward'] = game_result_df.groupby(["player_id","game"])['reward'].sum().reset_index().groupby("player_id")['reward'].mean()
     all_game_results.append(res)
     print(f"Game {game_num}: result")
     print(res)
@@ -529,9 +580,11 @@ for game_num in range(num_gems_to_simulate):
 # print all game results, average score per player and standard deviation
 # print title
 print("Average score per player and standard deviation")
+#print(all_game_results)
 all_game_results_df = pd.DataFrame(all_game_results)
-print(all_game_results_df.mean().rename("mean").reset_index().merge(all_game_results_df.std().rename("std").reset_index()))
-
+#print(all_game_results_df)
+#print(all_game_results_df.mean().rename("mean").reset_index().merge(all_game_results_df.std().rename("std").reset_index()))
+all_game_results_df.to_csv("all_game_results.csv")
 # Save Q-table
 with open('q_table.json', 'w') as fp:
     json.dump(Q, fp)
