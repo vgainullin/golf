@@ -1,18 +1,19 @@
 from copy import copy, deepcopy
 from dataclasses import dataclass
-from collections import namedtuple
+from collections import namedtuple, Counter
 import random
 import numpy as np
 import pandas as pd
 import json
 import torch
 
-
 import collections
 from collections.abc import MutableSequence
 from collections import namedtuple
 from collections import deque
 from src.qtransformer import QTransformer, ReplayBuffer, CardEmbedding, train_episode
+
+from abc import ABC, abstractmethod
 
 Card = namedtuple('Card', ['rank', 'suit'])
 
@@ -188,76 +189,224 @@ class Player:
         self.game_state = ''.join(self.game_state)
 
 
+
+class Player(ABC):
+    """Base class for all player types."""
+    
+    def __init__(self, name, id):
+        self.name = name
+        self.id = id
+        self.score = 10  # Initialize with maximum value
+        self.reward = 0
+        self.cards = [["?", "?", "?"], ["?", "?", "?"]]
+        self.open_cards = [["?", "?", "?"], ["?", "?", "?"]]
+        self.scores = [["?", "?", "?"], ["?", "?", "?"]]
+        self.open_ranks = [["?", "?", "?"], ["?", "?", "?"]]
+        self.holding = None
+        self.last_action = None
+        self.action_num = 0
+        self.card_to_score = self._initialize_card_to_score()
+        self.game_state = []
+
+    def _initialize_card_to_score(self):
+        """Initialize the mapping of card ranks to scores."""
+        card_to_score = dict(zip([str(n) for n in range(3, 10)] + list("XJQKA"), list(range(3, 10)) + [10, 10, 10, 0, 1]))
+        card_to_score["2"] = -2
+        card_to_score["?"] = np.nan
+        return card_to_score
+
+    def card2rank(self, card):
+        """Convert a card to its rank."""
+        if card is None or card == "?":
+            return card
+        else:
+            return card[0]
+
+    def get_card_ranks(self, cards):
+        """Convert a list of cards to their ranks."""
+        return [[self.card2rank(j) for j in i] for i in cards]
+
+    def score_cards(self, cards):
+        """Calculate the score for a set of cards."""
+        scores = deepcopy(cards)
+        for i in range(3):
+            if cards[0][i] == cards[1][i] != "?":
+                scores[0][i] = 0
+                scores[1][i] = 0
+            else:
+                if cards[0][i] is not None:
+                    scores[0][i] = self.card_to_score.get(cards[0][i], np.nan)
+                else:
+                    scores[0][i] = np.nan
+
+                if cards[1][i] is not None:
+                    scores[1][i] = self.card_to_score.get(cards[1][i], np.nan)
+                else:
+                    scores[1][i] = np.nan
+
+        scores = np.array(scores)
+        score = np.nansum(scores)
+        return score, scores
+
+    def calculate_score(self, final=False):
+        """Calculate the player's current score."""
+        if final:
+            self.open_ranks = self.get_card_ranks(self.cards)
+        else:
+            self.open_ranks = self.get_card_ranks(self.open_cards)
+        self.score, self.scores = self.score_cards(self.open_ranks)
+
+    def gather_game_state(self, game=None):
+        """Gather the current game state for the player."""
+        self.game_state = list(np.array(self.open_ranks).flatten())
+        self.game_state_tokens = [item for sublist in self.open_cards for item in sublist]
+        if game:
+            self.game_state_tokens = [game.deck.card2index(card) for card in self.game_state_tokens]
+            self.game_state_tokens.append(game.deck.card2index(game.face_card))
+            self.game_state.append(self.card2rank(game.face_card))
+        if self.holding:
+            self.game_state.append(self.card2rank(self.holding))
+        else:
+            self.game_state.append('0')
+        self.game_state = ''.join(self.game_state)
+
+    @abstractmethod
+    def choose_action(self, game, action_num):
+        """Choose an action based on the player's strategy."""
+        pass
+
+
+class RandomPlayer(Player):
+    """A player who chooses actions randomly."""
+    
+    def choose_action(self, game, action_num):
+        if action_num == 0:
+            return random.choice([0, 1]), None, 0  # Randomly choose to take face card or new card
+        elif action_num == 1:
+            available_pos = [(row, col) for row in range(2) for col in range(3) if self.open_cards[row][col] == "?"]
+            if available_pos:
+                rand_pos = random.choice(available_pos)
+                return 0, encode_pos_tuple(rand_pos), 0  # Randomly place the card
+            else:
+                return 1, None, 0  # Discard the card
+        else:
+            raise ValueError(f"Invalid action number: {action_num}")
+
+
+class HeuristicPlayer(Player):
+    """A player who uses a heuristic strategy to choose actions."""
+    
+    def choose_action(self, game, action_num, rank_cutoff=5):
+        if action_num == 0:
+            rank_of_face_card = self.card2rank(game.face_card)
+            rank_match = np.argwhere(self.open_ranks == rank_of_face_card)
+            if self.card_to_score[game.face_card[0]] < rank_cutoff or rank_match.size > 0:
+                return 0, None, 0  # Take the face card
+            else:
+                return 1, None, 0  # Take a new card from the deck
+        elif action_num == 1:
+            current_score = self.score
+            opt_pos, upd_score = calc_opt_heuristic_position(self, self.holding)
+            reward = current_score - upd_score
+            return 0, encode_pos_tuple(opt_pos), reward
+        else:
+            raise ValueError(f"Invalid action number: {action_num}")
+
+
+class CountingHeuristicPlayer(Player):
+    """A player who uses card counting and probability-based heuristics."""
+    
+    def __init__(self, name, id):
+        super().__init__(name, id)
+        self.card_counts = None
+        self.total_cards = 52
+        self.probability_threshold = 0.4
+
+    def initialize_card_counts(self):
+        """Initialize the card counts for the deck."""
+        self.card_counts = Counter()
+        ranks = [str(n) for n in range(2, 10)] + list('XJQKA')
+        for rank in ranks:
+            self.card_counts[rank] = 4
+
+    def update_card_counts(self, cards, face_card):
+        """Update the card counts based on visible cards."""
+        for card in cards:
+            if card != '?':
+                rank = card[0]
+                self.card_counts[rank] -= 1
+                self.total_cards -= 1
+        if face_card != '?':
+            rank = face_card[0]
+            self.card_counts[rank] -= 1
+            self.total_cards -= 1
+
+    def get_card_probabilities(self):
+        """Calculate the probabilities of drawing each rank."""
+        probabilities = {}
+        for rank, count in self.card_counts.items():
+            probabilities[rank] = count / self.total_cards
+        return probabilities
+
+    def choose_action(self, game, action_num):
+        if action_num == 0:
+            card_probabilities = self.get_card_probabilities()
+            rank_of_face_card = self.card2rank(game.face_card)
+            face_card_probability = card_probabilities[rank_of_face_card]
+            lower_rank_probability = sum(
+                card_probabilities[rank] for rank in card_probabilities
+                if self.card_to_score[rank] < self.card_to_score[rank_of_face_card]
+            )
+            if lower_rank_probability > self.probability_threshold:
+                return 1, None, 0  # Take a new card from the deck
+            else:
+                return 0, None, 0  # Take the face card
+        elif action_num == 1:
+            current_score = self.score
+            opt_pos, upd_score = calc_opt_heuristic_position(self, self.holding)
+            reward = current_score - upd_score
+            return 0, encode_pos_tuple(opt_pos), reward
+        else:
+            raise ValueError(f"Invalid action number: {action_num}")
+
+
+class QPlayer(Player):
+    """A player who uses Q-learning to choose actions."""
+    
+    def __init__(self, name, id, Q, alpha=0.1, gamma=0.9, epsilon=0.1):
+        super().__init__(name, id)
+        self.Q = Q
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+
+    def choose_action(self, game, action_num):
+        state = self.game_state
+        if random.random() < self.epsilon:
+            # Explore: choose a random action
+            if action_num == 0:
+                return random.choice([0, 1]), None, 0
+            elif action_num == 1:
+                available_pos = [(row, col) for row in range(2) for col in range(3) if self.open_cards[row][col] == "?"]
+                if available_pos:
+                    rand_pos = random.choice(available_pos)
+                    return 0, encode_pos_tuple(rand_pos), 0
+                else:
+                    return 1, None, 0
+        else:
+            # Exploit: choose the best action from the Q-table
+            q_state = self.Q.get(f'{action_num}' + state, {})
+            if q_state:
+                action_pos = max(q_state.items(), key=lambda x: x[1])[0]
+                action, pos = action_pos.split("|")
+                action = int(action)
+                pos = None if pos == 'None' else int(pos)
+                return action, pos, 0
+            else:
+                # Fallback to random action if state is not in Q-table
+                return random.choice([0, 1]), None, 0
+
 class Golf:
-    @staticmethod
-    def pos_index(player_idx, row, col):
-        """Map (player, row, col) to flat position index."""
-        return player_idx * 7 + (row * 3 + col)
-
-    def encode_golf_tensor(self):
-        """
-        Returns a tensor (numpy array) of shape (num_ranks, num_positions, num_suits), where:
-        - num_ranks: number of unique ranks (13 for standard deck)
-        - num_positions: 7 per player (6 slots + 1 holding) + 3 (deck, discard, face)
-        - num_suits: number of suits (4 for standard deck)
-        Each cell [rank, pos, suit] is 1 if that card is at that position, else 0.
-        Helper functions are used for clarity.
-        """
-        num_ranks = len(self.deck.ranks)
-        num_suits = len(self.deck.suits)
-        num_players = self.num_players
-        num_positions = num_players * 7 + 3
-        tensor = np.zeros((num_ranks, num_positions, num_suits), dtype=np.int8)
-
-        def get_indices(card):
-            if card == "?" or card is None:
-                return None, None
-            try:
-                rank_idx = self.deck.ranks.index(card.rank)
-                suit_idx = self.deck.suits.index(card.suit)
-                return rank_idx, suit_idx
-            except Exception:
-                return None, None
-
-
-        # Player open slots
-        for p, player in enumerate(self.players):
-            for row in range(2):
-                for col in range(3):
-                    card = player.cards[row][col]
-                    rank_idx, suit_idx = get_indices(card)
-                    if rank_idx is not None and suit_idx is not None:
-                        col_idx = Golf.pos_index(p, row, col)
-                        tensor[rank_idx, col_idx, suit_idx] = 1
-            # Player holding
-            if player.holding and player.holding != "?":
-                rank_idx, suit_idx = get_indices(player.holding)
-                if rank_idx is not None and suit_idx is not None:
-                    col_idx = p * 7 + 6
-                    tensor[rank_idx, col_idx, suit_idx] = 1
-
-        # Deck
-        for card in self.deck:
-            rank_idx, suit_idx = get_indices(card)
-            if rank_idx is not None and suit_idx is not None:
-                tensor[rank_idx, num_players * 7, suit_idx] = 1
-
-        # Discard pile (all except face card)
-        if len(self.discard) > 0:
-            for card in self.discard:
-                if card == self.face_card:
-                    continue
-                rank_idx, suit_idx = get_indices(card)
-                if rank_idx is not None and suit_idx is not None:
-                    tensor[rank_idx, num_players * 7 + 1, suit_idx] = 1
-
-        # Face card (top of discard)
-        if self.face_card:
-            rank_idx, suit_idx = get_indices(self.face_card)
-            if rank_idx is not None and suit_idx is not None:
-                tensor[rank_idx, num_players * 7 + 2, suit_idx] = 1
-
-        return tensor
     def __init__(self, players=None, deck_type="French", verbose=False):
         self.deck = GolfDeck(cards=deck_type)
         self.discard = GolfDeck(cards="Blank")
@@ -611,8 +760,8 @@ Q = {}
 ledger = []
 rank_cutoff = 4
 verbose = True
-num_games_to_simulate = 1
-holes_per_game = 1
+num_games_to_simulate = 10
+holes_per_game = 9
 shuffle = True
 
 all_game_results = []
