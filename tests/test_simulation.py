@@ -135,3 +135,35 @@ def test_player_holding_card(player):
     assert player.holding == card
     player.holding = None
     assert player.holding is None
+
+def test_encode_golf_tensor_simple():
+    """Test Golf.encode_golf_tensor for a simple deterministic state."""
+    from src.simulation import Golf, Player, Card
+    # 2 players, each with known cards, no holding, deck/discard/face empty
+    players = [
+        Player(name="P0", id=0),
+        Player(name="P1", id=1)
+    ]
+    # Use the Golf.pos_index static method for position mapping
+
+    players[0].cards = [
+        [Card(rank='2', suit='spades'), "?", "?"],
+        ["?", "?", "?"]
+    ]
+    players[1].cards = [
+        ["?", "?", "?"],
+        ["?", "?", Card(rank='3', suit='hearts')]
+    ]
+    golf = Golf(players=players)
+    golf.deck = GolfDeck(cards="Blank")  # No cards in deck
+    golf.discard = GolfDeck(cards="Blank")
+    golf.face_card = None
+    tensor = golf.encode_golf_tensor()
+    # Check shape
+    assert tensor.shape == (13, 2*7+3, 4)
+    # 2 of spades should be at [0,0,0] (rank 2, player 0 slot 0, spades)
+    assert tensor[golf.deck.ranks.index('2'), Golf.pos_index(0, 0, 0), golf.deck.suits.index('spades')] == 1
+    # 3 of hearts should be at [1,13,3] (rank 3, player 1 slot 6, hearts)
+    assert tensor[golf.deck.ranks.index('3'), Golf.pos_index(1, 1, 2), golf.deck.suits.index('hearts')] == 1
+    # All other entries should be 0
+    assert tensor.sum() == 2
