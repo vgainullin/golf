@@ -1,30 +1,21 @@
 from copy import copy, deepcopy
 from dataclasses import dataclass
-from collections import namedtuple
-import argparse
+from collections import namedtuple, Counter
 import random
-from pathlib import Path
 import numpy as np
 import pandas as pd
 import json
 import torch
-
 
 import collections
 from collections.abc import MutableSequence
 from collections import namedtuple
 from collections import deque
 from src.qtransformer import QTransformer, ReplayBuffer, CardEmbedding, train_episode
-from src.tensor_logger import TensorTransitionLogger
+
+from abc import ABC, abstractmethod
 
 Card = namedtuple('Card', ['rank', 'suit'])
-
-DEFAULT_NUM_GAMES = 1
-DEFAULT_HOLES_PER_GAME = 1
-DEFAULT_TENSOR_LOG_PREFIX = "tensor_transitions"
-
-rank_cutoff = 4
-verbose = True
 
 class GolfDeck(MutableSequence):
     
@@ -198,76 +189,224 @@ class Player:
         self.game_state = ''.join(self.game_state)
 
 
+
+class Player(ABC):
+    """Base class for all player types."""
+    
+    def __init__(self, name, id):
+        self.name = name
+        self.id = id
+        self.score = 10  # Initialize with maximum value
+        self.reward = 0
+        self.cards = [["?", "?", "?"], ["?", "?", "?"]]
+        self.open_cards = [["?", "?", "?"], ["?", "?", "?"]]
+        self.scores = [["?", "?", "?"], ["?", "?", "?"]]
+        self.open_ranks = [["?", "?", "?"], ["?", "?", "?"]]
+        self.holding = None
+        self.last_action = None
+        self.action_num = 0
+        self.card_to_score = self._initialize_card_to_score()
+        self.game_state = []
+
+    def _initialize_card_to_score(self):
+        """Initialize the mapping of card ranks to scores."""
+        card_to_score = dict(zip([str(n) for n in range(3, 10)] + list("XJQKA"), list(range(3, 10)) + [10, 10, 10, 0, 1]))
+        card_to_score["2"] = -2
+        card_to_score["?"] = np.nan
+        return card_to_score
+
+    def card2rank(self, card):
+        """Convert a card to its rank."""
+        if card is None or card == "?":
+            return card
+        else:
+            return card[0]
+
+    def get_card_ranks(self, cards):
+        """Convert a list of cards to their ranks."""
+        return [[self.card2rank(j) for j in i] for i in cards]
+
+    def score_cards(self, cards):
+        """Calculate the score for a set of cards."""
+        scores = deepcopy(cards)
+        for i in range(3):
+            if cards[0][i] == cards[1][i] != "?":
+                scores[0][i] = 0
+                scores[1][i] = 0
+            else:
+                if cards[0][i] is not None:
+                    scores[0][i] = self.card_to_score.get(cards[0][i], np.nan)
+                else:
+                    scores[0][i] = np.nan
+
+                if cards[1][i] is not None:
+                    scores[1][i] = self.card_to_score.get(cards[1][i], np.nan)
+                else:
+                    scores[1][i] = np.nan
+
+        scores = np.array(scores)
+        score = np.nansum(scores)
+        return score, scores
+
+    def calculate_score(self, final=False):
+        """Calculate the player's current score."""
+        if final:
+            self.open_ranks = self.get_card_ranks(self.cards)
+        else:
+            self.open_ranks = self.get_card_ranks(self.open_cards)
+        self.score, self.scores = self.score_cards(self.open_ranks)
+
+    def gather_game_state(self, game=None):
+        """Gather the current game state for the player."""
+        self.game_state = list(np.array(self.open_ranks).flatten())
+        self.game_state_tokens = [item for sublist in self.open_cards for item in sublist]
+        if game:
+            self.game_state_tokens = [game.deck.card2index(card) for card in self.game_state_tokens]
+            self.game_state_tokens.append(game.deck.card2index(game.face_card))
+            self.game_state.append(self.card2rank(game.face_card))
+        if self.holding:
+            self.game_state.append(self.card2rank(self.holding))
+        else:
+            self.game_state.append('0')
+        self.game_state = ''.join(self.game_state)
+
+    @abstractmethod
+    def choose_action(self, game, action_num):
+        """Choose an action based on the player's strategy."""
+        pass
+
+
+class RandomPlayer(Player):
+    """A player who chooses actions randomly."""
+    
+    def choose_action(self, game, action_num):
+        if action_num == 0:
+            return random.choice([0, 1]), None, 0  # Randomly choose to take face card or new card
+        elif action_num == 1:
+            available_pos = [(row, col) for row in range(2) for col in range(3) if self.open_cards[row][col] == "?"]
+            if available_pos:
+                rand_pos = random.choice(available_pos)
+                return 0, encode_pos_tuple(rand_pos), 0  # Randomly place the card
+            else:
+                return 1, None, 0  # Discard the card
+        else:
+            raise ValueError(f"Invalid action number: {action_num}")
+
+
+class HeuristicPlayer(Player):
+    """A player who uses a heuristic strategy to choose actions."""
+    
+    def choose_action(self, game, action_num, rank_cutoff=5):
+        if action_num == 0:
+            rank_of_face_card = self.card2rank(game.face_card)
+            rank_match = np.argwhere(self.open_ranks == rank_of_face_card)
+            if self.card_to_score[game.face_card[0]] < rank_cutoff or rank_match.size > 0:
+                return 0, None, 0  # Take the face card
+            else:
+                return 1, None, 0  # Take a new card from the deck
+        elif action_num == 1:
+            current_score = self.score
+            opt_pos, upd_score = calc_opt_heuristic_position(self, self.holding)
+            reward = current_score - upd_score
+            return 0, encode_pos_tuple(opt_pos), reward
+        else:
+            raise ValueError(f"Invalid action number: {action_num}")
+
+
+class CountingHeuristicPlayer(Player):
+    """A player who uses card counting and probability-based heuristics."""
+    
+    def __init__(self, name, id):
+        super().__init__(name, id)
+        self.card_counts = None
+        self.total_cards = 52
+        self.probability_threshold = 0.4
+
+    def initialize_card_counts(self):
+        """Initialize the card counts for the deck."""
+        self.card_counts = Counter()
+        ranks = [str(n) for n in range(2, 10)] + list('XJQKA')
+        for rank in ranks:
+            self.card_counts[rank] = 4
+
+    def update_card_counts(self, cards, face_card):
+        """Update the card counts based on visible cards."""
+        for card in cards:
+            if card != '?':
+                rank = card[0]
+                self.card_counts[rank] -= 1
+                self.total_cards -= 1
+        if face_card != '?':
+            rank = face_card[0]
+            self.card_counts[rank] -= 1
+            self.total_cards -= 1
+
+    def get_card_probabilities(self):
+        """Calculate the probabilities of drawing each rank."""
+        probabilities = {}
+        for rank, count in self.card_counts.items():
+            probabilities[rank] = count / self.total_cards
+        return probabilities
+
+    def choose_action(self, game, action_num):
+        if action_num == 0:
+            card_probabilities = self.get_card_probabilities()
+            rank_of_face_card = self.card2rank(game.face_card)
+            face_card_probability = card_probabilities[rank_of_face_card]
+            lower_rank_probability = sum(
+                card_probabilities[rank] for rank in card_probabilities
+                if self.card_to_score[rank] < self.card_to_score[rank_of_face_card]
+            )
+            if lower_rank_probability > self.probability_threshold:
+                return 1, None, 0  # Take a new card from the deck
+            else:
+                return 0, None, 0  # Take the face card
+        elif action_num == 1:
+            current_score = self.score
+            opt_pos, upd_score = calc_opt_heuristic_position(self, self.holding)
+            reward = current_score - upd_score
+            return 0, encode_pos_tuple(opt_pos), reward
+        else:
+            raise ValueError(f"Invalid action number: {action_num}")
+
+
+class QPlayer(Player):
+    """A player who uses Q-learning to choose actions."""
+    
+    def __init__(self, name, id, Q, alpha=0.1, gamma=0.9, epsilon=0.1):
+        super().__init__(name, id)
+        self.Q = Q
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+
+    def choose_action(self, game, action_num):
+        state = self.game_state
+        if random.random() < self.epsilon:
+            # Explore: choose a random action
+            if action_num == 0:
+                return random.choice([0, 1]), None, 0
+            elif action_num == 1:
+                available_pos = [(row, col) for row in range(2) for col in range(3) if self.open_cards[row][col] == "?"]
+                if available_pos:
+                    rand_pos = random.choice(available_pos)
+                    return 0, encode_pos_tuple(rand_pos), 0
+                else:
+                    return 1, None, 0
+        else:
+            # Exploit: choose the best action from the Q-table
+            q_state = self.Q.get(f'{action_num}' + state, {})
+            if q_state:
+                action_pos = max(q_state.items(), key=lambda x: x[1])[0]
+                action, pos = action_pos.split("|")
+                action = int(action)
+                pos = None if pos == 'None' else int(pos)
+                return action, pos, 0
+            else:
+                # Fallback to random action if state is not in Q-table
+                return random.choice([0, 1]), None, 0
+
 class Golf:
-    @staticmethod
-    def pos_index(player_idx, row, col):
-        """Map (player, row, col) to flat position index."""
-        return player_idx * 7 + (row * 3 + col)
-
-    def encode_golf_tensor(self):
-        """
-        Returns a tensor (numpy array) of shape (num_ranks, num_positions, num_suits), where:
-        - num_ranks: number of unique ranks (13 for standard deck)
-        - num_positions: 7 per player (6 slots + 1 holding) + 3 (deck, discard, face)
-        - num_suits: number of suits (4 for standard deck)
-        Each cell [rank, pos, suit] is 1 if that card is at that position, else 0.
-        Helper functions are used for clarity.
-        """
-        num_ranks = len(self.deck.ranks)
-        num_suits = len(self.deck.suits)
-        num_players = self.num_players
-        num_positions = num_players * 7 + 3
-        tensor = np.zeros((num_ranks, num_positions, num_suits), dtype=np.int8)
-
-        def get_indices(card):
-            if card == "?" or card is None:
-                return None, None
-            try:
-                rank_idx = self.deck.ranks.index(card.rank)
-                suit_idx = self.deck.suits.index(card.suit)
-                return rank_idx, suit_idx
-            except Exception:
-                return None, None
-
-
-        # Player open slots
-        for p, player in enumerate(self.players):
-            for row in range(2):
-                for col in range(3):
-                    card = player.cards[row][col]
-                    rank_idx, suit_idx = get_indices(card)
-                    if rank_idx is not None and suit_idx is not None:
-                        col_idx = Golf.pos_index(p, row, col)
-                        tensor[rank_idx, col_idx, suit_idx] = 1
-            # Player holding
-            if player.holding and player.holding != "?":
-                rank_idx, suit_idx = get_indices(player.holding)
-                if rank_idx is not None and suit_idx is not None:
-                    col_idx = p * 7 + 6
-                    tensor[rank_idx, col_idx, suit_idx] = 1
-
-        # Deck
-        for card in self.deck:
-            rank_idx, suit_idx = get_indices(card)
-            if rank_idx is not None and suit_idx is not None:
-                tensor[rank_idx, num_players * 7, suit_idx] = 1
-
-        # Discard pile (all except face card)
-        if len(self.discard) > 0:
-            for card in self.discard:
-                if card == self.face_card:
-                    continue
-                rank_idx, suit_idx = get_indices(card)
-                if rank_idx is not None and suit_idx is not None:
-                    tensor[rank_idx, num_players * 7 + 1, suit_idx] = 1
-
-        # Face card (top of discard)
-        if self.face_card:
-            rank_idx, suit_idx = get_indices(self.face_card)
-            if rank_idx is not None and suit_idx is not None:
-                tensor[rank_idx, num_players * 7 + 2, suit_idx] = 1
-
-        return tensor
     def __init__(self, players=None, deck_type="French", verbose=False):
         self.deck = GolfDeck(cards=deck_type)
         self.discard = GolfDeck(cards="Blank")
@@ -490,23 +629,9 @@ epsilon = 0.1  # Exploration rate
 alpha = 0.1  # Learning rate
 gamma = 0.9  # Discount factor
 
-def play_single_turn(
-    golf,
-    player_id,
-    action_num,
-    Q,
-    state_,
-    *,
-    game_num,
-    hole,
-    round_num,
-    transition_logger: TensorTransitionLogger | None = None,
-):
+def play_single_turn(golf, player_id, action_num, Q, state_):
     player = golf.players[player_id]
-    state_tensor = None
-    if transition_logger is not None:
-        state_tensor = golf.encode_golf_tensor()
-
+    
     # Determine action based on player type
     if player.type == 'Heuristic':
         action, pos, reward = get_player_action(deepcopy(golf), player_id, action_num, rank_cutoff, take_random_action=False)
@@ -529,29 +654,11 @@ def play_single_turn(
     # Execute action
     action_array = [action_num, action, pos]
     reward = golf.take_action(player_id=player_id, action_array=action_array)
-
+    
     # Get new state
     golf.players[player_id].gather_game_state(golf)
     new_state = golf.players[player_id].game_state
-
-    if transition_logger is not None and state_tensor is not None:
-        next_state_tensor = golf.encode_golf_tensor()
-        transition_logger.log(
-            state=state_tensor,
-            next_state=next_state_tensor,
-            reward=reward,
-            done=golf.game_over,
-            metadata={
-                "game": game_num,
-                "hole": hole,
-                "round": round_num,
-                "player_id": player_id,
-                "action_num": action_num,
-                "action": action,
-                "position": pos,
-            },
-        )
-
+    
     # Update Q-table for RL player
     if player.type == 'RL':
         update_q_table(Q, action_num, state_, new_state, action, pos, reward)
@@ -566,7 +673,7 @@ def update_q_table(Q, action_num, state, new_state, action, pos, reward):
     new_q_value = old_q_value + alpha * (reward + gamma * next_max_q_value - old_q_value)
     Q.setdefault(f'{action_num}'+state, {})[f"{action}|{pos}"] = new_q_value
 
-def play_game(golf, game_num, hole, Q, model, shuffle=True, transition_logger: TensorTransitionLogger | None = None):
+def play_game(golf, game_num, hole, Q, model, shuffle=True):
     # Add this line
     if shuffle:
         golf.shuffle()
@@ -601,17 +708,7 @@ def play_game(golf, game_num, hole, Q, model, shuffle=True, transition_logger: T
                 break
             
             # Play first action (action_num = 0)
-            upd_state_0, reward_0, action_0 = play_single_turn(
-                golf,
-                player_id,
-                0,
-                Q,
-                state_,
-                game_num=game_num,
-                hole=hole,
-                round_num=round_num,
-                transition_logger=transition_logger,
-            )
+            upd_state_0, reward_0, action_0 = play_single_turn(golf, player_id, 0, Q, state_)
             
             golf.players[player_id].gather_game_state(golf)
 
@@ -620,17 +717,7 @@ def play_game(golf, game_num, hole, Q, model, shuffle=True, transition_logger: T
             #if golf.players[player_id].type != 'RL':  # RL handled separately
             #loss = train_episode(model, optimizer, replay_buffer, batch_size)
             #print(loss)
-            upd_state_1, reward_1, action_1 = play_single_turn(
-                golf,
-                player_id,
-                1,
-                Q,
-                upd_state_0,
-                game_num=game_num,
-                hole=hole,
-                round_num=round_num,
-                transition_logger=transition_logger,
-            )
+            upd_state_1, reward_1, action_1 = play_single_turn(golf, player_id, 1, Q, upd_state_0)
             #check if there are cards left in the deck create a new deck otherwise use the discard pile
             if len(golf.deck) < golf.num_players + 2:
                 if verbose:
@@ -668,153 +755,55 @@ def play_game(golf, game_num, hole, Q, model, shuffle=True, transition_logger: T
     
     return game_results
 
-def run_simulation(
-    *,
-    num_games: int = DEFAULT_NUM_GAMES,
-    holes_per_game: int = DEFAULT_HOLES_PER_GAME,
-    shuffle: bool = True,
-    log_tensors: bool = False,
-    tensor_log_dir: Path | str = Path("data"),
-    tensor_log_prefix: str = DEFAULT_TENSOR_LOG_PREFIX,
-):
-    """Run a full simulation and optionally persist tensor transitions."""
+# Main execution
+Q = {}
+ledger = []
+rank_cutoff = 4
+verbose = True
+num_games_to_simulate = 10
+holes_per_game = 9
+shuffle = True
 
-    transition_logger = TensorTransitionLogger(tensor_log_dir) if log_tensors else None
+all_game_results = []
+model = QTransformer()
+for game_num in range(num_games_to_simulate):
+    for hole in range(1, holes_per_game + 1):
+        # Initialize players as a deque for easy rotation
+        players = deque([
+            Player(name="PL1", id=0, type='Random'), # Random
+            Player(name="PL2", id=1, type='Heuristic'), # Heuristic
+            Player(name="PL3", id=2, type='Random'), # CountingHeuristic
+            Player(name="PL3", id=3, type='Heuristic') # RL
+        ])
+        # Convert deque back to list when passing to Golf
+        golf = Golf(players=list(players), deck_type="French", verbose=verbose)
+        game_results = play_game(golf, game_num, hole, Q, model, shuffle=shuffle)
+        ledger.extend(game_results)
+        # Rotate players after each turn
+        players.rotate(-1)
+    
+    # Print game statistics
+    game_result_df = pd.DataFrame.from_dict(ledger)
+    res = game_result_df.groupby(["player_id","game"])['score'].sum().reset_index().groupby("player_id")['score'].mean()
 
-    Q = {}
-    ledger = []
-    all_game_results = []
-    model = QTransformer()
-
-    for game_num in range(num_games):
-        for hole in range(1, holes_per_game + 1):
-            players = deque([
-                Player(name="PL1", id=0, type='Random'),  # Random
-                Player(name="PL2", id=1, type='Heuristic'),  # Heuristic
-                Player(name="PL3", id=2, type='Random'),  # CountingHeuristic
-                Player(name="PL3", id=3, type='Heuristic'),  # RL
-            ])
-            golf = Golf(players=list(players), deck_type="French", verbose=verbose)
-            game_results = play_game(
-                golf,
-                game_num,
-                hole,
-                Q,
-                model,
-                shuffle=shuffle,
-                transition_logger=transition_logger,
-            )
-            ledger.extend(game_results)
-            players.rotate(-1)
-
-        game_result_df = pd.DataFrame.from_dict(ledger)
-        res = (
-            game_result_df.groupby(["player_id", "game"])["score"]
-            .sum()
-            .reset_index()
-            .groupby("player_id")["score"]
-            .mean()
-        )
-        res['size_Q'] = len(Q)
-        all_game_results.append(res)
-        print(f"Game {game_num}: result")
-        print(res)
-        print(f"RL Q-table size: {len(Q)}")
-        print("=" * 20)
-
-    print("Average score per player and standard deviation")
-    all_game_results_df = pd.DataFrame(all_game_results)
-    all_game_results_df.to_csv("all_game_results.csv")
-    with open('q_table.json', 'w') as fp:
-        json.dump(Q, fp)
-
-    if transition_logger is not None:
-        transition_logger.save(prefix=tensor_log_prefix)
-
-    return {
-        "Q": Q,
-        "ledger": ledger,
-        "all_game_results": all_game_results,
-        "transition_logger": transition_logger,
-    }
+    res['size_Q'] = len(Q)
+    #res['x_reward'] = game_result_df.groupby(["player_id","game"])['reward'].sum().reset_index().groupby("player_id")['reward'].mean()
+    all_game_results.append(res)
+    print(f"Game {game_num}: result")
+    print(res)
+    print(f"RL Q-table size: {len(Q)}")
+    print("="*20)
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command line arguments for the simulation runner."""
+# print all game results, average score per player and standard deviation
+# print title
+print("Average score per player and standard deviation")
+#print(all_game_results)
+all_game_results_df = pd.DataFrame(all_game_results)
+#print(all_game_results_df)
+#print(all_game_results_df.mean().rename("mean").reset_index().merge(all_game_results_df.std().rename("std").reset_index()))
+all_game_results_df.to_csv("all_game_results.csv")
+# Save Q-table
+with open('q_table.json', 'w') as fp:
+    json.dump(Q, fp)
 
-    parser = argparse.ArgumentParser(description="Run Golf simulations with optional tensor logging.")
-    parser.add_argument(
-        "--num-games",
-        type=int,
-        default=DEFAULT_NUM_GAMES,
-        help="Number of games to simulate.",
-    )
-    parser.add_argument(
-        "--holes-per-game",
-        type=int,
-        default=DEFAULT_HOLES_PER_GAME,
-        help="Number of holes per game.",
-    )
-    parser.add_argument(
-        "--shuffle",
-        dest="shuffle",
-        action="store_true",
-        default=True,
-        help="Shuffle the deck before each game (default).",
-    )
-    parser.add_argument(
-        "--no-shuffle",
-        dest="shuffle",
-        action="store_false",
-        help="Disable deck shuffling between games.",
-    )
-    parser.add_argument(
-        "--log-tensors",
-        action="store_true",
-        help="Enable tensor transition logging.",
-    )
-    parser.add_argument(
-        "--tensor-log-dir",
-        type=Path,
-        default=Path("data"),
-        help="Directory where tensor transition artifacts will be written.",
-    )
-    parser.add_argument(
-        "--tensor-log-prefix",
-        default=DEFAULT_TENSOR_LOG_PREFIX,
-        help="Filename prefix for tensor transition artifacts.",
-    )
-    parser.add_argument(
-        "--verbose",
-        dest="verbose",
-        action="store_true",
-        default=verbose,
-        help="Enable verbose logging during simulations.",
-    )
-    parser.add_argument(
-        "--quiet",
-        dest="verbose",
-        action="store_false",
-        help="Silence verbose simulation logging.",
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
-
-    global verbose
-    verbose = args.verbose
-
-    run_simulation(
-        num_games=args.num_games,
-        holes_per_game=args.holes_per_game,
-        shuffle=args.shuffle,
-        log_tensors=args.log_tensors,
-        tensor_log_dir=args.tensor_log_dir,
-        tensor_log_prefix=args.tensor_log_prefix,
-    )
-
-
-if __name__ == "__main__":
-    main()
