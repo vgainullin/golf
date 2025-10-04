@@ -70,6 +70,10 @@ class TensorTransitionLogger:
         self._rewards.append(float(reward))
         self._dones.append(bool(done))
         self._unique_hashes.add(state_arr.tobytes())
+        self._reward_sum += float(reward)
+        self._reward_sq_sum += float(reward) ** 2
+        self._reward_count += 1
+
 
         if self._rank_counts is None:
             rank_dim, pos_dim, suit_dim = state_arr.shape
@@ -127,6 +131,10 @@ class TensorTransitionLogger:
         with metadata_path.open("w", encoding="utf-8") as fh:
             json.dump([asdict(item) for item in self._metadata], fh, indent=2)
 
+        metrics_path = base_path.with_name(f'{base_path.name}_metrics.json')
+        with metrics_path.open("w", encoding="utf-8") as fh:
+            json.dump(self.metrics, fh, indent=2)
+
     def clear(self) -> None:
         """Reset the logger state (useful for tests)."""
         self._states.clear()
@@ -165,15 +173,26 @@ class TensorTransitionLogger:
             else 0.0
         )
 
+
         def _entropy(counts: Optional[np.ndarray]) -> float:
             if counts is None:
                 return 0.0
-            total = counts.sum()
+            total = counts.sum() if counts.size else 0
             if not total:
                 return 0.0
             probs = counts / total
             non_zero = probs[probs > 0]
             return float(-(non_zero * np.log2(non_zero)).sum())
+
+        def _min_or_none(values):
+            return min(values) if values else None
+
+        def _max_or_none(values):
+            return max(values) if values else None
+
+        rounds = [m.round_num for m in self._metadata if m.round_num >= 0]
+        games = [m.game for m in self._metadata if m.game >= 0]
+        holes = [m.hole for m in self._metadata if m.hole >= 0]
 
         return {
             "unique_states": len(self._unique_hashes),
@@ -188,4 +207,10 @@ class TensorTransitionLogger:
             ),
             "reward_mean": reward_mean,
             "reward_variance": reward_var,
+            "round_min": _min_or_none(rounds),
+            "round_max": _max_or_none(rounds),
+            "game_min": _min_or_none(games),
+            "game_max": _max_or_none(games),
+            "hole_min": _min_or_none(holes),
+            "hole_max": _max_or_none(holes),
         }

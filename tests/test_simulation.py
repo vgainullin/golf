@@ -279,6 +279,48 @@ def test_tensor_transition_logger_transition_distance(tmp_path):
     assert logger.metrics["avg_transition_hamming"] > 0
 
 
+def test_tensor_transition_logger_reward_metrics_and_save(tmp_path):
+    """Reward stats and metrics file should be generated on save."""
+    logger = simulation_mod.TensorTransitionLogger(tmp_path)
+
+    state = np.zeros((2, 2, 2), dtype=np.int8)
+    next_state = np.zeros_like(state)
+    logger.log(
+        state=state,
+        next_state=next_state,
+        reward=1.0,
+        done=False,
+        metadata={"round": 0, "game": 0, "hole": 1},
+    )
+
+    alt_state = state.copy()
+    alt_state[0, 0, 0] = 1
+    logger.log(
+        state=alt_state,
+        next_state=alt_state,
+        reward=-1.0,
+        done=True,
+        metadata={"round": 1, "game": 0, "hole": 1},
+    )
+
+    metrics = logger.metrics
+    assert metrics["reward_mean"] == pytest.approx(0.0)
+    assert metrics["reward_variance"] == pytest.approx(1.0)
+    assert metrics["round_min"] == 0
+    assert metrics["round_max"] == 1
+
+    logger.save(prefix="metrics_case")
+    metrics_path = tmp_path / "metrics_case_metrics.json"
+    assert metrics_path.exists()
+    payload = json.loads(metrics_path.read_text())
+    assert payload["reward_mean"] == pytest.approx(0.0)
+    assert payload["reward_variance"] == pytest.approx(1.0)
+    assert payload["game_min"] == 0
+    assert payload["game_max"] == 0
+    assert payload["hole_min"] == 1
+    assert payload["hole_max"] == 1
+
+
 def test_play_game_logs_tensor_transitions(tmp_path):
     """play_game should log tensor transitions when a logger is provided."""
     original_verbose = simulation_mod.verbose
