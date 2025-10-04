@@ -214,6 +214,19 @@ def test_tensor_transition_logger_roundtrip(tmp_path):
     assert metadata[0]["done"] is False
 
 
+def test_tensor_transition_logger_initial_metrics(tmp_path):
+    """Metrics snapshot should expose default zero values."""
+    logger = simulation_mod.TensorTransitionLogger(tmp_path)
+    metrics = logger.metrics
+
+    assert metrics["unique_states"] == 0
+    assert metrics["total_states"] == 0
+    assert metrics["entropy_rank"] == 0
+    assert metrics["avg_transition_hamming"] == 0
+    assert metrics["reward_mean"] == 0
+    assert metrics["reward_variance"] == 0
+
+
 def test_play_game_logs_tensor_transitions(tmp_path):
     """play_game should log tensor transitions when a logger is provided."""
     original_verbose = simulation_mod.verbose

@@ -38,6 +38,16 @@ class TensorTransitionLogger:
         self._dones: List[bool] = []
         self._metadata: List[TransitionMetadata] = []
 
+        # Metric tracking placeholders; populated as logging occurs.
+        self._unique_hashes: set[bytes] = set()
+        self._rank_counts: Optional[np.ndarray] = None
+        self._position_counts: Optional[np.ndarray] = None
+        self._suit_counts: Optional[np.ndarray] = None
+        self._transition_hamming: List[int] = []
+        self._reward_sum: float = 0.0
+        self._reward_sq_sum: float = 0.0
+        self._reward_count: int = 0
+
     def log(
         self,
         *,
@@ -124,3 +134,41 @@ class TensorTransitionLogger:
     @property
     def metadata(self) -> Iterable[TransitionMetadata]:
         return tuple(self._metadata)
+
+    @property
+    def metrics(self) -> Dict[str, Any]:
+        """Return a snapshot of accumulated metrics."""
+
+        reward_mean = (
+            self._reward_sum / self._reward_count if self._reward_count else 0.0
+        )
+        reward_var = (
+            (self._reward_sq_sum / self._reward_count) - reward_mean ** 2
+            if self._reward_count
+            else 0.0
+        )
+
+        def _entropy(counts: Optional[np.ndarray]) -> float:
+            if counts is None:
+                return 0.0
+            total = counts.sum()
+            if not total:
+                return 0.0
+            probs = counts / total
+            non_zero = probs[probs > 0]
+            return float(-(non_zero * np.log2(non_zero)).sum())
+
+        return {
+            "unique_states": len(self._unique_hashes),
+            "total_states": len(self._states),
+            "entropy_rank": _entropy(self._rank_counts),
+            "entropy_position": _entropy(self._position_counts),
+            "entropy_suit": _entropy(self._suit_counts),
+            "avg_transition_hamming": (
+                float(np.mean(self._transition_hamming))
+                if self._transition_hamming
+                else 0.0
+            ),
+            "reward_mean": reward_mean,
+            "reward_variance": reward_var,
+        }
