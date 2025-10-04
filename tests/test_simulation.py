@@ -1,4 +1,5 @@
 # tests/test_simulation.py
+import os
 import json
 import random
 
@@ -362,3 +363,35 @@ def test_play_game_logs_tensor_transitions(tmp_path):
 
     metadata = json.loads((tmp_path / "play_game.json").read_text())
     assert len(metadata) == len(metadata_entries)
+
+def test_run_simulation_writes_metrics_summary(tmp_path):
+    """End-to-end simulation should write tensor metrics artifacts."""
+    original_verbose = simulation_mod.verbose
+    original_cwd = os.getcwd()
+    simulation_mod.verbose = False
+    os.chdir(tmp_path)
+    try:
+        result = simulation_mod.run_simulation(
+            num_games=1,
+            holes_per_game=1,
+            shuffle=False,
+            log_tensors=True,
+            tensor_log_dir=tmp_path,
+            tensor_log_prefix="integration",
+        )
+    finally:
+        os.chdir(original_cwd)
+        simulation_mod.verbose = original_verbose
+
+    expected_npz = tmp_path / "integration.npz"
+    expected_metadata = tmp_path / "integration.json"
+    expected_metrics = tmp_path / "integration_metrics.json"
+
+    assert expected_npz.exists()
+    assert expected_metadata.exists()
+    assert expected_metrics.exists()
+
+    metrics_payload = json.loads(expected_metrics.read_text())
+    assert "unique_states" in metrics_payload
+    assert "reward_mean" in metrics_payload
+    assert metrics_payload["total_states"] == len(result["transition_logger"]._states)
