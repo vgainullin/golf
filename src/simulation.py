@@ -1,7 +1,9 @@
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from collections import namedtuple
+import argparse
 import random
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import json
@@ -16,6 +18,13 @@ from src.qtransformer import QTransformer, ReplayBuffer, CardEmbedding, train_ep
 from src.tensor_logger import TensorTransitionLogger
 
 Card = namedtuple('Card', ['rank', 'suit'])
+
+DEFAULT_NUM_GAMES = 1
+DEFAULT_HOLES_PER_GAME = 1
+DEFAULT_TENSOR_LOG_PREFIX = "tensor_transitions"
+
+rank_cutoff = 4
+verbose = True
 
 class GolfDeck(MutableSequence):
     
@@ -659,54 +668,153 @@ def play_game(golf, game_num, hole, Q, model, shuffle=True, transition_logger: T
     
     return game_results
 
-# Main execution
-Q = {}
-ledger = []
-rank_cutoff = 4
-verbose = True
-num_games_to_simulate = 1
-holes_per_game = 1
-shuffle = True
+def run_simulation(
+    *,
+    num_games: int = DEFAULT_NUM_GAMES,
+    holes_per_game: int = DEFAULT_HOLES_PER_GAME,
+    shuffle: bool = True,
+    log_tensors: bool = False,
+    tensor_log_dir: Path | str = Path("data"),
+    tensor_log_prefix: str = DEFAULT_TENSOR_LOG_PREFIX,
+):
+    """Run a full simulation and optionally persist tensor transitions."""
 
-all_game_results = []
-model = QTransformer()
-for game_num in range(num_games_to_simulate):
-    for hole in range(1, holes_per_game + 1):
-        # Initialize players as a deque for easy rotation
-        players = deque([
-            Player(name="PL1", id=0, type='Random'), # Random
-            Player(name="PL2", id=1, type='Heuristic'), # Heuristic
-            Player(name="PL3", id=2, type='Random'), # CountingHeuristic
-            Player(name="PL3", id=3, type='Heuristic') # RL
-        ])
-        # Convert deque back to list when passing to Golf
-        golf = Golf(players=list(players), deck_type="French", verbose=verbose)
-        game_results = play_game(golf, game_num, hole, Q, model, shuffle=shuffle)
-        ledger.extend(game_results)
-        # Rotate players after each turn
-        players.rotate(-1)
-    
-    # Print game statistics
-    game_result_df = pd.DataFrame.from_dict(ledger)
-    res = game_result_df.groupby(["player_id","game"])['score'].sum().reset_index().groupby("player_id")['score'].mean()
+    transition_logger = TensorTransitionLogger(tensor_log_dir) if log_tensors else None
 
-    res['size_Q'] = len(Q)
-    #res['x_reward'] = game_result_df.groupby(["player_id","game"])['reward'].sum().reset_index().groupby("player_id")['reward'].mean()
-    all_game_results.append(res)
-    print(f"Game {game_num}: result")
-    print(res)
-    print(f"RL Q-table size: {len(Q)}")
-    print("="*20)
+    Q = {}
+    ledger = []
+    all_game_results = []
+    model = QTransformer()
+
+    for game_num in range(num_games):
+        for hole in range(1, holes_per_game + 1):
+            players = deque([
+                Player(name="PL1", id=0, type='Random'),  # Random
+                Player(name="PL2", id=1, type='Heuristic'),  # Heuristic
+                Player(name="PL3", id=2, type='Random'),  # CountingHeuristic
+                Player(name="PL3", id=3, type='Heuristic'),  # RL
+            ])
+            golf = Golf(players=list(players), deck_type="French", verbose=verbose)
+            game_results = play_game(
+                golf,
+                game_num,
+                hole,
+                Q,
+                model,
+                shuffle=shuffle,
+                transition_logger=transition_logger,
+            )
+            ledger.extend(game_results)
+            players.rotate(-1)
+
+        game_result_df = pd.DataFrame.from_dict(ledger)
+        res = (
+            game_result_df.groupby(["player_id", "game"])["score"]
+            .sum()
+            .reset_index()
+            .groupby("player_id")["score"]
+            .mean()
+        )
+        res['size_Q'] = len(Q)
+        all_game_results.append(res)
+        print(f"Game {game_num}: result")
+        print(res)
+        print(f"RL Q-table size: {len(Q)}")
+        print("=" * 20)
+
+    print("Average score per player and standard deviation")
+    all_game_results_df = pd.DataFrame(all_game_results)
+    all_game_results_df.to_csv("all_game_results.csv")
+    with open('q_table.json', 'w') as fp:
+        json.dump(Q, fp)
+
+    if transition_logger is not None:
+        transition_logger.save(prefix=tensor_log_prefix)
+
+    return {
+        "Q": Q,
+        "ledger": ledger,
+        "all_game_results": all_game_results,
+        "transition_logger": transition_logger,
+    }
 
 
-# print all game results, average score per player and standard deviation
-# print title
-print("Average score per player and standard deviation")
-#print(all_game_results)
-all_game_results_df = pd.DataFrame(all_game_results)
-#print(all_game_results_df)
-#print(all_game_results_df.mean().rename("mean").reset_index().merge(all_game_results_df.std().rename("std").reset_index()))
-all_game_results_df.to_csv("all_game_results.csv")
-# Save Q-table
-with open('q_table.json', 'w') as fp:
-    json.dump(Q, fp)
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments for the simulation runner."""
+
+    parser = argparse.ArgumentParser(description="Run Golf simulations with optional tensor logging.")
+    parser.add_argument(
+        "--num-games",
+        type=int,
+        default=DEFAULT_NUM_GAMES,
+        help="Number of games to simulate.",
+    )
+    parser.add_argument(
+        "--holes-per-game",
+        type=int,
+        default=DEFAULT_HOLES_PER_GAME,
+        help="Number of holes per game.",
+    )
+    parser.add_argument(
+        "--shuffle",
+        dest="shuffle",
+        action="store_true",
+        default=True,
+        help="Shuffle the deck before each game (default).",
+    )
+    parser.add_argument(
+        "--no-shuffle",
+        dest="shuffle",
+        action="store_false",
+        help="Disable deck shuffling between games.",
+    )
+    parser.add_argument(
+        "--log-tensors",
+        action="store_true",
+        help="Enable tensor transition logging.",
+    )
+    parser.add_argument(
+        "--tensor-log-dir",
+        type=Path,
+        default=Path("data"),
+        help="Directory where tensor transition artifacts will be written.",
+    )
+    parser.add_argument(
+        "--tensor-log-prefix",
+        default=DEFAULT_TENSOR_LOG_PREFIX,
+        help="Filename prefix for tensor transition artifacts.",
+    )
+    parser.add_argument(
+        "--verbose",
+        dest="verbose",
+        action="store_true",
+        default=verbose,
+        help="Enable verbose logging during simulations.",
+    )
+    parser.add_argument(
+        "--quiet",
+        dest="verbose",
+        action="store_false",
+        help="Silence verbose simulation logging.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+
+    global verbose
+    verbose = args.verbose
+
+    run_simulation(
+        num_games=args.num_games,
+        holes_per_game=args.holes_per_game,
+        shuffle=args.shuffle,
+        log_tensors=args.log_tensors,
+        tensor_log_dir=args.tensor_log_dir,
+        tensor_log_prefix=args.tensor_log_prefix,
+    )
+
+
+if __name__ == "__main__":
+    main()
