@@ -70,6 +70,16 @@ class TensorTransitionLogger:
         self._rewards.append(float(reward))
         self._dones.append(bool(done))
         self._unique_hashes.add(state_arr.tobytes())
+
+        if self._rank_counts is None:
+            rank_dim, pos_dim, suit_dim = state_arr.shape
+            self._rank_counts = np.zeros(rank_dim, dtype=np.int64)
+            self._position_counts = np.zeros(pos_dim, dtype=np.int64)
+            self._suit_counts = np.zeros(suit_dim, dtype=np.int64)
+
+        self._rank_counts += state_arr.sum(axis=(1, 2))
+        self._position_counts += state_arr.sum(axis=(0, 2))
+        self._suit_counts += state_arr.sum(axis=(0, 1))
         self._metadata.append(
             TransitionMetadata(
                 index=index,
