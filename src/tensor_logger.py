@@ -80,6 +80,9 @@ class TensorTransitionLogger:
         self._rank_counts += state_arr.sum(axis=(1, 2))
         self._position_counts += state_arr.sum(axis=(0, 2))
         self._suit_counts += state_arr.sum(axis=(0, 1))
+
+        delta = int(np.count_nonzero(state_arr != next_state_arr))
+        self._transition_hamming.append(delta)
         self._metadata.append(
             TransitionMetadata(
                 index=index,

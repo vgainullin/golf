@@ -265,6 +265,20 @@ def test_tensor_transition_logger_entropy_metrics(tmp_path):
     assert metrics["entropy_suit"] > 0
 
 
+def test_tensor_transition_logger_transition_distance(tmp_path):
+    """Hamming distance metric should reflect state deltas."""
+    logger = simulation_mod.TensorTransitionLogger(tmp_path)
+
+    state = np.zeros((2, 2, 2), dtype=np.int8)
+    logger.log(state=state, next_state=state, reward=0.0, done=False, metadata={})
+    assert logger.metrics["avg_transition_hamming"] == 0
+
+    next_state = state.copy()
+    next_state[0, 0, 0] = 1
+    logger.log(state=state, next_state=next_state, reward=0.0, done=False, metadata={})
+    assert logger.metrics["avg_transition_hamming"] > 0
+
+
 def test_play_game_logs_tensor_transitions(tmp_path):
     """play_game should log tensor transitions when a logger is provided."""
     original_verbose = simulation_mod.verbose
