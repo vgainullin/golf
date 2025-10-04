@@ -1,5 +1,5 @@
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from collections import namedtuple
 import argparse
 import random
@@ -7,8 +7,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import json
-import torch
+import multiprocessing as mp
+from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    import torch
+except ImportError:  # pragma: no cover - torch is optional for certain test environments
+    torch = None
 
 import collections
 from collections.abc import MutableSequence
@@ -16,6 +21,9 @@ from collections import namedtuple
 from collections import deque
 from src.qtransformer import QTransformer, ReplayBuffer, CardEmbedding, train_episode
 from src.tensor_logger import TensorTransitionLogger
+
+
+
 
 Card = namedtuple('Card', ['rank', 'suit'])
 
@@ -25,6 +33,38 @@ DEFAULT_TENSOR_LOG_PREFIX = "tensor_transitions"
 
 rank_cutoff = 4
 verbose = True
+
+@dataclass(frozen=True)
+class SimulationConfig:
+    num_games: int = DEFAULT_NUM_GAMES
+    holes_per_game: int = DEFAULT_HOLES_PER_GAME
+    shuffle: bool = True
+    verbose: bool = False
+    rank_cutoff: int = 4
+    output_dir: Optional[str] = None
+    log_tensors: bool = False
+    tensor_log_dir: Path | str = Path("data")
+    tensor_log_prefix: str = DEFAULT_TENSOR_LOG_PREFIX
+
+
+@dataclass
+class SimulationResult:
+    worker_id: int
+    seed: int
+    ledger: List[Dict[str, Any]]
+    q_table: Dict[str, Dict[str, float]]
+    metrics: Dict[str, Any] = field(default_factory=dict)
+    artifact_paths: List[str] = field(default_factory=list)
+    shuffle_history: List[Tuple[Tuple[str, str], ...]] = field(default_factory=list)
+
+
+@dataclass
+class AggregationResult:
+    ledger: List[Dict[str, Any]]
+    avg_scores: Dict[int, float]
+    artifact_paths: List[str]
+    worker_count: int
+    worker_metrics: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
 class GolfDeck(MutableSequence):
     
@@ -278,9 +318,11 @@ class Golf:
         self.game_over = False
         self.end_game_player_id = None
         self.verbose = verbose
+        self.last_shuffle_signature: Tuple[Tuple[str, str], ...] = tuple()
         
     def shuffle(self):
         random.shuffle(self.deck)
+        self.last_shuffle_signature = tuple((card.rank, card.suit) for card in list(self.deck)[:5])
 
     def deal(self):
         for player in self.players:
@@ -496,6 +538,7 @@ def play_single_turn(
     action_num,
     Q,
     state_,
+    rank_cutoff,
     *,
     game_num,
     hole,
@@ -504,7 +547,7 @@ def play_single_turn(
 ):
     player = golf.players[player_id]
     state_tensor = None
-    if transition_logger is not None:
+    if transition_logger is not None and hasattr(golf, "encode_golf_tensor"):
         state_tensor = golf.encode_golf_tensor()
 
     # Determine action based on player type
@@ -534,7 +577,7 @@ def play_single_turn(
     golf.players[player_id].gather_game_state(golf)
     new_state = golf.players[player_id].game_state
 
-    if transition_logger is not None and state_tensor is not None:
+    if transition_logger is not None and state_tensor is not None and hasattr(golf, "encode_golf_tensor"):
         next_state_tensor = golf.encode_golf_tensor()
         transition_logger.log(
             state=state_tensor,
@@ -566,12 +609,23 @@ def update_q_table(Q, action_num, state, new_state, action, pos, reward):
     new_q_value = old_q_value + alpha * (reward + gamma * next_max_q_value - old_q_value)
     Q.setdefault(f'{action_num}'+state, {})[f"{action}|{pos}"] = new_q_value
 
-def play_game(golf, game_num, hole, Q, model, shuffle=True, transition_logger: TensorTransitionLogger | None = None):
-    # Add this line
+def play_game(
+    golf,
+    game_num,
+    hole,
+    Q,
+    model,
+    rank_cutoff,
+    verbose=False,
+    shuffle=True,
+    transition_logger: TensorTransitionLogger | None = None,
+):
+    initial_shuffle_signature: Tuple[Tuple[str, str], ...] = tuple()
     if shuffle:
         golf.shuffle()
+        initial_shuffle_signature = golf.last_shuffle_signature
     golf.deal()
-    
+
     # Initialize CountingHeuristic players
     for player in golf.players:
         if player.type == 'CountingHeuristic':
@@ -582,178 +636,385 @@ def play_game(golf, game_num, hole, Q, model, shuffle=True, transition_logger: T
     # Play rounds
     round_num = 0
     while not golf.game_over:
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-        replay_buffer = ReplayBuffer(capacity=10000)
-        
+        if torch is not None and model is not None:
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            replay_buffer = ReplayBuffer(capacity=10000)
+        else:
+            optimizer = None
+            replay_buffer = None
+
         epsilon = 0.5
         batch_size = 32
         episode_rewards = []
 
         # iterate over all players
         for player_id in range(golf.num_players):
-            # Get initial state
             golf.players[player_id].gather_game_state(golf)
             state_ = golf.players[player_id].game_state
-            init_state_tokens = np.array(golf.players[player_id].game_state_tokens)
-            
+
             if '?' not in golf.players[player_id].game_state:
                 golf.game_over = True
                 break
-            
-            # Play first action (action_num = 0)
+
             upd_state_0, reward_0, action_0 = play_single_turn(
                 golf,
                 player_id,
                 0,
                 Q,
                 state_,
+                rank_cutoff,
                 game_num=game_num,
                 hole=hole,
                 round_num=round_num,
                 transition_logger=transition_logger,
             )
-            
+
             golf.players[player_id].gather_game_state(golf)
 
-            #replay_buffer.push(init_state_tokens, action_0, reward_0, np.array(golf.players[player_id].game_state_tokens), golf.game_over)
-            # Play second action (action_num = 1)
-            #if golf.players[player_id].type != 'RL':  # RL handled separately
-            #loss = train_episode(model, optimizer, replay_buffer, batch_size)
-            #print(loss)
             upd_state_1, reward_1, action_1 = play_single_turn(
                 golf,
                 player_id,
                 1,
                 Q,
                 upd_state_0,
+                rank_cutoff,
                 game_num=game_num,
                 hole=hole,
                 round_num=round_num,
                 transition_logger=transition_logger,
             )
-            #check if there are cards left in the deck create a new deck otherwise use the discard pile
+
             if len(golf.deck) < golf.num_players + 2:
                 if verbose:
                     print(f"Deck is empty, creating new deck {player_id}")
                 golf.deck = GolfDeck()
-                golf.shuffle() 
+                golf.shuffle()
                 golf.deal()
 
-            # if np.random.random() < epsilon:
-            #     action = np.random.randint(1)  # Random action
-            # else:
-            #     with torch.no_grad():
-            #         state_tensor = torch.tensor(init_state_tokens[None, :], dtype=torch.long)
-            #         q_values = model(state_tensor[:, :6], state_tensor[:, 6:])
-            #         action = q_values.argmax().item()
             if verbose:
-                print(game_num, hole, round_num, len(golf.deck), player_id,golf.players[player_id].score, golf.players[player_id].game_state)
+                print(
+                    game_num,
+                    hole,
+                    round_num,
+                    len(golf.deck),
+                    player_id,
+                    golf.players[player_id].score,
+                    golf.players[player_id].game_state,
+                )
             if '?' not in golf.players[player_id].game_state:
                 golf.last_turn = True
                 golf.end_game_player_id = player_id
-            
+
         round_num += 1
-    
-    # Calculate final scores
-    game_results = []
+
+    game_results: List[Dict[str, Any]] = []
     for player in golf.players:
         player.calculate_score(final=True)
-        game_results.append(dict(
-            player_id=player.id,
-            score=player.score,
-            hole=hole,
-            game=game_num,
-            reward=player.reward
-        ))
-    
-    return game_results
+        game_results.append(
+            dict(
+                player_id=player.id,
+                score=player.score,
+                hole=hole,
+                game=game_num,
+                reward=player.reward,
+            )
+        )
+
+    return game_results, initial_shuffle_signature
+
+def _init_random_seed(seed: Optional[int]) -> None:
+    if seed is None:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    if torch is not None:
+        torch.manual_seed(seed)
+
+
+def _default_player_roster() -> List[Player]:
+    return [
+        Player(name="PL1", id=0, type='Random'),
+        Player(name="PL2", id=1, type='Heuristic'),
+        Player(name="PL3", id=2, type='Random'),
+        Player(name="PL4", id=3, type='Heuristic'),
+    ]
+
 
 def run_simulation(
-    *,
-    num_games: int = DEFAULT_NUM_GAMES,
-    holes_per_game: int = DEFAULT_HOLES_PER_GAME,
-    shuffle: bool = True,
-    log_tensors: bool = False,
-    tensor_log_dir: Path | str = Path("data"),
-    tensor_log_prefix: str = DEFAULT_TENSOR_LOG_PREFIX,
-):
-    """Run a full simulation and optionally persist tensor transitions."""
+    config: SimulationConfig,
+    seed: Optional[int] = None,
+    worker_id: int = 0,
+    game_offset: int = 0,
+    output_dir: Optional[str] = None,
+) -> SimulationResult:
+    effective_seed = seed if seed is not None else random.randint(0, 2**32 - 1)
+    _init_random_seed(effective_seed)
 
-    transition_logger = TensorTransitionLogger(tensor_log_dir) if log_tensors else None
+    effective_output = output_dir if output_dir is not None else config.output_dir
 
-    Q = {}
-    ledger = []
-    all_game_results = []
-    model = QTransformer()
+    ledger: List[Dict[str, Any]] = []
+    q_table: Dict[str, Dict[str, float]] = {}
+    shuffle_history: List[Tuple[Tuple[str, str], ...]] = []
 
-    for game_num in range(num_games):
-        for hole in range(1, holes_per_game + 1):
-            players = deque([
-                Player(name="PL1", id=0, type='Random'),  # Random
-                Player(name="PL2", id=1, type='Heuristic'),  # Heuristic
-                Player(name="PL3", id=2, type='Random'),  # CountingHeuristic
-                Player(name="PL3", id=3, type='Heuristic'),  # RL
-            ])
-            golf = Golf(players=list(players), deck_type="French", verbose=verbose)
-            game_results = play_game(
+    model = QTransformer() if torch is not None else None
+
+    tensor_logger: TensorTransitionLogger | None = None
+    tensor_log_dir: Path | None = None
+    tensor_log_prefix: str | None = None
+    if config.log_tensors:
+        tensor_log_dir = Path(config.tensor_log_dir)
+        tensor_log_dir.mkdir(parents=True, exist_ok=True)
+        tensor_logger = TensorTransitionLogger(tensor_log_dir)
+        tensor_log_prefix = f"{config.tensor_log_prefix}_worker_{worker_id}"
+
+    total_games = max(config.num_games, 0)
+    for local_game in range(total_games):
+        game_number = game_offset + local_game
+        for hole in range(1, config.holes_per_game + 1):
+            players = _default_player_roster()
+            golf = Golf(players=list(players), deck_type="French", verbose=config.verbose)
+            game_results, shuffle_signature = play_game(
                 golf,
-                game_num,
+                game_number,
                 hole,
-                Q,
+                q_table,
                 model,
-                shuffle=shuffle,
-                transition_logger=transition_logger,
+                rank_cutoff=config.rank_cutoff,
+                verbose=config.verbose,
+                shuffle=config.shuffle,
+                transition_logger=tensor_logger,
             )
             ledger.extend(game_results)
-            players.rotate(-1)
+            if shuffle_signature:
+                shuffle_history.append(shuffle_signature)
 
-        game_result_df = pd.DataFrame.from_dict(ledger)
-        res = (
-            game_result_df.groupby(["player_id", "game"])["score"]
-            .sum()
-            .reset_index()
-            .groupby("player_id")["score"]
-            .mean()
-        )
-        res['size_Q'] = len(Q)
-        all_game_results.append(res)
-        print(f"Game {game_num}: result")
-        print(res)
-        print(f"RL Q-table size: {len(Q)}")
-        print("=" * 20)
-
-    print("Average score per player and standard deviation")
-    all_game_results_df = pd.DataFrame(all_game_results)
-    all_game_results_df.to_csv("all_game_results.csv")
-    with open('q_table.json', 'w') as fp:
-        json.dump(Q, fp)
-
-    if transition_logger is not None:
-        transition_logger.save(prefix=tensor_log_prefix)
-
-    return {
-        "Q": Q,
-        "ledger": ledger,
-        "all_game_results": all_game_results,
-        "transition_logger": transition_logger,
+    metrics = {
+        "num_games": total_games,
+        "holes_per_game": config.holes_per_game,
+        "records": len(ledger),
     }
+    if tensor_logger is not None:
+        metrics["tensor_transitions"] = len(tensor_logger)
+
+    artifact_paths: List[str] = []
+    if effective_output:
+        out_dir = Path(effective_output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if ledger:
+            ledger_path = out_dir / f"ledger_worker_{worker_id}.csv"
+            pd.DataFrame(ledger).to_csv(ledger_path, index=False)
+            artifact_paths.append(str(ledger_path))
+        q_path = out_dir / f"q_table_worker_{worker_id}.json"
+        with open(q_path, "w") as fp:
+            json.dump(q_table, fp)
+        artifact_paths.append(str(q_path))
+
+    if tensor_logger is not None and tensor_log_dir is not None and tensor_log_prefix is not None:
+        tensor_logger.save(prefix=tensor_log_prefix)
+        base = tensor_log_dir / tensor_log_prefix
+        artifact_paths.extend(
+            [
+                str(base.with_suffix(".npz")),
+                str(base.with_suffix(".json")),
+                str(base.with_name(f"{tensor_log_prefix}_metrics.json")),
+                str(base.with_name(f"{tensor_log_prefix}_metrics_series.json")),
+            ]
+        )
+
+    return SimulationResult(
+        worker_id=worker_id,
+        seed=effective_seed,
+        ledger=ledger,
+        q_table=q_table,
+        metrics=metrics,
+        artifact_paths=artifact_paths,
+        shuffle_history=shuffle_history,
+    )
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command line arguments for the simulation runner."""
+def _worker_entry(
+    worker_id: int,
+    config: SimulationConfig,
+    seed: int,
+    game_offset: int,
+    output_dir: Optional[str],
+    queue: mp.Queue,
+) -> None:
+    result = run_simulation(
+        config=config,
+        seed=seed,
+        worker_id=worker_id,
+        game_offset=game_offset,
+        output_dir=output_dir,
+    )
+    queue.put(result)
 
-    parser = argparse.ArgumentParser(description="Run Golf simulations with optional tensor logging.")
+
+def _resolve_worker_seed(base_seed: Optional[int], worker_id: int) -> int:
+    if base_seed is None:
+        return random.randint(0, 2**32 - 1)
+    return base_seed + worker_id
+
+
+def run_simulations_concurrently(
+    config: SimulationConfig,
+    num_workers: int = 1,
+    base_seed: Optional[int] = None,
+    output_dir: Optional[str] = None,
+) -> List[SimulationResult]:
+    if num_workers < 1:
+        raise ValueError("num_workers must be at least 1")
+
+    effective_output = output_dir if output_dir is not None else config.output_dir
+
+    if num_workers == 1:
+        seed = _resolve_worker_seed(base_seed, 0)
+        return [
+            run_simulation(
+                config=config,
+                seed=seed,
+                worker_id=0,
+                game_offset=0,
+                output_dir=effective_output,
+            )
+        ]
+
+    total_games = max(config.num_games, 0)
+    games_per_worker = [total_games // num_workers] * num_workers
+    for idx in range(total_games % num_workers):
+        games_per_worker[idx] += 1
+
+    ctx = None
+    queue = None
+    if hasattr(mp, "get_context"):
+        try:
+            ctx = mp.get_context("spawn")
+            queue = ctx.Queue()
+        except (PermissionError, OSError):
+            ctx = None
+    if ctx is None:
+        results: List[SimulationResult] = []
+        game_offset = 0
+        for worker_id, worker_games in enumerate(games_per_worker):
+            seed = _resolve_worker_seed(base_seed, worker_id)
+            worker_config = replace(config, num_games=worker_games)
+            results.append(
+                run_simulation(
+                    config=worker_config,
+                    seed=seed,
+                    worker_id=worker_id,
+                    game_offset=game_offset,
+                    output_dir=effective_output,
+                )
+            )
+            game_offset += worker_games
+        results.sort(key=lambda item: item.worker_id)
+        return results
+
+    processes = []
+    results: List[SimulationResult] = []
+    game_offset = 0
+
+    for worker_id, worker_games in enumerate(games_per_worker):
+        seed = _resolve_worker_seed(base_seed, worker_id)
+        worker_config = replace(config, num_games=worker_games)
+        if worker_games == 0:
+            results.append(
+                run_simulation(
+                    config=worker_config,
+                    seed=seed,
+                    worker_id=worker_id,
+                    game_offset=game_offset,
+                    output_dir=effective_output,
+                )
+            )
+            continue
+
+        process = ctx.Process(
+            target=_worker_entry,
+            args=(worker_id, worker_config, seed, game_offset, effective_output, queue),
+        )
+        processes.append(process)
+        process.start()
+        game_offset += worker_games
+
+    for _ in processes:
+        results.append(queue.get())
+
+    for process in processes:
+        process.join()
+
+    results.sort(key=lambda item: item.worker_id)
+    return results
+
+
+def aggregate_worker_results(results: List[SimulationResult]) -> AggregationResult:
+    combined_ledger: List[Dict[str, Any]] = []
+    artifact_paths: List[str] = []
+    worker_metrics: Dict[int, Dict[str, Any]] = {}
+    for result in results:
+        combined_ledger.extend(result.ledger)
+        artifact_paths.extend(result.artifact_paths)
+        worker_metrics[result.worker_id] = result.metrics
+
+    if combined_ledger:
+        df = pd.DataFrame(combined_ledger)
+        avg_scores_series = df.groupby("player_id")["score"].mean()
+        avg_scores = {int(k): float(v) for k, v in avg_scores_series.items()}
+    else:
+        avg_scores = {}
+
+    return AggregationResult(
+        ledger=combined_ledger,
+        avg_scores=avg_scores,
+        artifact_paths=artifact_paths,
+        worker_count=len(results),
+        worker_metrics=worker_metrics,
+    )
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run Golf simulations sequentially or with multiprocessing workers and optional tensor logging.",
+    )
+    parser.set_defaults(verbose=verbose)
     parser.add_argument(
+        "--games",
         "--num-games",
+        dest="games",
         type=int,
         default=DEFAULT_NUM_GAMES,
         help="Number of games to simulate.",
     )
     parser.add_argument(
+        "--holes",
         "--holes-per-game",
+        dest="holes",
         type=int,
         default=DEFAULT_HOLES_PER_GAME,
         help="Number of holes per game.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="Number of worker processes to spawn.",
+    )
+    parser.add_argument(
+        "--base-seed",
+        type=int,
+        help="Base seed for deterministic worker seeding.",
+    )
+    parser.add_argument(
+        "--rank-cutoff",
+        type=int,
+        default=4,
+        help="Rank cutoff heuristic for actions.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Optional directory to write aggregated artifacts.",
     )
     parser.add_argument(
         "--shuffle",
@@ -767,6 +1028,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="shuffle",
         action="store_false",
         help="Disable deck shuffling between games.",
+    )
+    parser.add_argument(
+        "--verbose",
+        dest="verbose",
+        action="store_true",
+        help="Enable verbose logging during simulations.",
+    )
+    parser.add_argument(
+        "--quiet",
+        dest="verbose",
+        action="store_false",
+        help="Silence verbose simulation logging.",
     )
     parser.add_argument(
         "--log-tensors",
@@ -784,37 +1057,56 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_TENSOR_LOG_PREFIX,
         help="Filename prefix for tensor transition artifacts.",
     )
-    parser.add_argument(
-        "--verbose",
-        dest="verbose",
-        action="store_true",
-        default=verbose,
-        help="Enable verbose logging during simulations.",
-    )
-    parser.add_argument(
-        "--quiet",
-        dest="verbose",
-        action="store_false",
-        help="Silence verbose simulation logging.",
-    )
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
 
     global verbose
     verbose = args.verbose
 
-    run_simulation(
-        num_games=args.num_games,
-        holes_per_game=args.holes_per_game,
+    output_dir = args.output_dir
+    config = SimulationConfig(
+        num_games=max(args.games, 0),
+        holes_per_game=max(args.holes, 0),
         shuffle=args.shuffle,
+        verbose=bool(args.verbose),
+        rank_cutoff=args.rank_cutoff,
+        output_dir=str(output_dir) if output_dir else None,
         log_tensors=args.log_tensors,
         tensor_log_dir=args.tensor_log_dir,
         tensor_log_prefix=args.tensor_log_prefix,
     )
 
+    results = run_simulations_concurrently(
+        config=config,
+        num_workers=max(args.num_workers, 1),
+        base_seed=args.base_seed,
+        output_dir=str(output_dir) if output_dir else None,
+    )
+    aggregation = aggregate_worker_results(results)
 
-if __name__ == "__main__":
-    main()
+    if output_dir:
+        out_dir = output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if aggregation.ledger:
+            combined_path = out_dir / "all_game_results.csv"
+            pd.DataFrame(aggregation.ledger).to_csv(combined_path, index=False)
+        consolidated_q_table = {f"worker_{res.worker_id}": res.q_table for res in results}
+        q_path = out_dir / "q_table.json"
+        with open(q_path, "w") as fp:
+            json.dump(consolidated_q_table, fp)
+
+    if aggregation.avg_scores:
+        print("Average score per player:")
+        for player_id in sorted(aggregation.avg_scores):
+            score = aggregation.avg_scores[player_id]
+            print(f"  Player {player_id}: {score:.2f}")
+    else:
+        print("No simulation data generated.")
+
+    if config.log_tensors:
+        tensor_path = Path(config.tensor_log_dir)
+        print(f"Tensor transitions saved under: {tensor_path}")
+
