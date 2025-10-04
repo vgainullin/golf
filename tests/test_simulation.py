@@ -227,6 +227,24 @@ def test_tensor_transition_logger_initial_metrics(tmp_path):
     assert metrics["reward_variance"] == 0
 
 
+def test_tensor_transition_logger_unique_state_metric(tmp_path):
+    """Unique state metric should count distinct tensors only once."""
+    logger = simulation_mod.TensorTransitionLogger(tmp_path)
+
+    base = np.zeros((2, 2, 2), dtype=np.int8)
+    logger.log(state=base, next_state=base, reward=0.0, done=False, metadata={})
+    assert logger.metrics["unique_states"] == 1
+
+    # Logging identical state again should not increase unique count
+    logger.log(state=base, next_state=base, reward=0.0, done=False, metadata={})
+    assert logger.metrics["unique_states"] == 1
+
+    varied = base.copy()
+    varied[0, 0, 0] = 1
+    logger.log(state=varied, next_state=varied, reward=0.0, done=False, metadata={})
+    assert logger.metrics["unique_states"] == 2
+
+
 def test_play_game_logs_tensor_transitions(tmp_path):
     """play_game should log tensor transitions when a logger is provided."""
     original_verbose = simulation_mod.verbose
