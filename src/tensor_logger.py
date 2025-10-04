@@ -183,11 +183,63 @@ class TensorTransitionLogger:
             merged_record = TransitionMetadata(**asdict(record))
             merged_record.index += offset
             self._metadata.append(merged_record)
+        for state in other._states:
+            self._states.append(np.asarray(state, dtype=np.int8))
+        for next_state in other._next_states:
+            self._next_states.append(np.asarray(next_state, dtype=np.int8))
+        self._rewards.extend(float(reward) for reward in other._rewards)
+        self._dones.extend(bool(done) for done in other._dones)
 
-        self._states.extend(other._states)
-        self._next_states.extend(other._next_states)
-        self._rewards.extend(other._rewards)
-        self._dones.extend(other._dones)
+        self._recompute_tracking()
+
+    def _recompute_tracking(self) -> None:
+        """Rebuild derived statistics from the stored transitions."""
+        self._unique_hashes = set()
+        self._reward_sum = 0.0
+        self._reward_sq_sum = 0.0
+        self._reward_count = 0
+        self._cumulative_unique_counts = []
+        self._running_reward_mean = []
+        self._running_reward_variance = []
+        self._transition_hamming = []
+        self._rank_counts = None
+        self._position_counts = None
+        self._suit_counts = None
+
+        if not self._states:
+            return
+
+        for state_arr, next_state_arr, reward in zip(
+            self._states, self._next_states, self._rewards
+        ):
+            state_arr = np.asarray(state_arr, dtype=np.int8)
+            next_state_arr = np.asarray(next_state_arr, dtype=np.int8)
+
+            self._unique_hashes.add(state_arr.tobytes())
+
+            if self._rank_counts is None:
+                rank_dim, pos_dim, suit_dim = state_arr.shape
+                self._rank_counts = np.zeros(rank_dim, dtype=np.int64)
+                self._position_counts = np.zeros(pos_dim, dtype=np.int64)
+                self._suit_counts = np.zeros(suit_dim, dtype=np.int64)
+
+            self._rank_counts += state_arr.sum(axis=(1, 2))
+            self._position_counts += state_arr.sum(axis=(0, 2))
+            self._suit_counts += state_arr.sum(axis=(0, 1))
+
+            delta = int(np.count_nonzero(state_arr != next_state_arr))
+            self._transition_hamming.append(delta)
+
+            reward_value = float(reward)
+            self._reward_sum += reward_value
+            self._reward_sq_sum += reward_value ** 2
+            self._reward_count += 1
+
+            mean = self._reward_sum / self._reward_count
+            var = (self._reward_sq_sum / self._reward_count) - mean ** 2
+            self._running_reward_mean.append(mean)
+            self._running_reward_variance.append(max(var, 0.0))
+            self._cumulative_unique_counts.append(len(self._unique_hashes))
 
     @property
     def metadata(self) -> Iterable[TransitionMetadata]:

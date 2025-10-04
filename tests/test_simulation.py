@@ -389,6 +389,42 @@ def test_tensor_transition_logger_series_outputs(tmp_path):
     assert metrics["reward_variance"] == pytest.approx(1.0)
 
 
+def test_tensor_transition_logger_extend_updates_statistics(tmp_path):
+    """Logger.extend should recompute derived statistics for combined logs."""
+    first = TensorTransitionLogger(tmp_path / "first")
+    second = TensorTransitionLogger(tmp_path / "second")
+
+    state_a = np.zeros((2, 2, 2), dtype=np.int8)
+    state_a[0, 0, 0] = 1
+    first.log(
+        state=state_a,
+        next_state=state_a,
+        reward=1.0,
+        done=False,
+        metadata={"game": 0, "hole": 0, "round": 0, "player_id": 0, "action_num": 0},
+    )
+
+    state_b = np.zeros((2, 2, 2), dtype=np.int8)
+    state_b[1, 1, 1] = 1
+    second.log(
+        state=state_b,
+        next_state=state_b,
+        reward=-1.0,
+        done=True,
+        metadata={"game": 1, "hole": 1, "round": 1, "player_id": 1, "action_num": 1},
+    )
+
+    first.extend(second)
+
+    metrics = first.metrics
+    assert metrics["unique_states"] == 2
+    assert metrics["reward_mean"] == pytest.approx(0.0)
+    assert metrics["reward_variance"] == pytest.approx(1.0)
+    assert metrics["cumulative_unique_states"][-1] == 2
+    assert len(first.metadata) == 2
+    assert first.metadata[-1].index == 1
+
+
 def test_play_game_logs_tensor_transitions(tmp_path):
     """play_game should log tensor transitions when a logger is provided."""
     original_verbose = simulation_mod.verbose
