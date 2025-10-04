@@ -1,6 +1,11 @@
 # tests/test_simulation.py
-import pytest
+import json
 import random
+
+import numpy as np
+import pytest
+
+import src.simulation as simulation_mod
 from src.simulation import Player, GolfDeck, Card
 
 @pytest.fixture
@@ -167,3 +172,86 @@ def test_encode_golf_tensor_simple():
     assert tensor[golf.deck.ranks.index('3'), Golf.pos_index(1, 1, 2), golf.deck.suits.index('hearts')] == 1
     # All other entries should be 0
     assert tensor.sum() == 2
+
+
+def test_tensor_transition_logger_roundtrip(tmp_path):
+    """TensorTransitionLogger should persist tensors and metadata."""
+    logger = simulation_mod.TensorTransitionLogger(tmp_path)
+    state = np.zeros((13, 10, 4), dtype=np.int8)
+    next_state = state.copy()
+    logger.log(
+        state=state,
+        next_state=next_state,
+        reward=1.5,
+        done=False,
+        metadata={
+            "game": 0,
+            "hole": 1,
+            "round": 0,
+            "player_id": 0,
+            "action_num": 0,
+            "action": 1,
+            "position": None,
+        },
+    )
+
+    logger.save(prefix="test_log")
+    archive = tmp_path / "test_log.npz"
+    metadata_path = tmp_path / "test_log.json"
+
+    assert archive.exists()
+    assert metadata_path.exists()
+
+    payload = np.load(archive)
+    assert payload["states"].shape == (1, 13, 10, 4)
+    assert payload["next_states"].shape == (1, 13, 10, 4)
+    assert payload["rewards"][0] == pytest.approx(1.5)
+    assert payload["dones"][0] == False
+
+    metadata = json.loads(metadata_path.read_text())
+    assert metadata[0]["game"] == 0
+    assert metadata[0]["position"] is None
+    assert metadata[0]["done"] is False
+
+
+def test_play_game_logs_tensor_transitions(tmp_path):
+    """play_game should log tensor transitions when a logger is provided."""
+    original_verbose = simulation_mod.verbose
+    simulation_mod.verbose = False
+    random.seed(0)
+
+    players = [
+        Player(name="P0", id=0, type='Heuristic'),
+        Player(name="P1", id=1, type='Heuristic'),
+    ]
+    golf = simulation_mod.Golf(players=players, deck_type="French", verbose=False)
+    logger = simulation_mod.TensorTransitionLogger(tmp_path)
+
+    Q = {}
+    model = simulation_mod.QTransformer()
+
+    try:
+        results = simulation_mod.play_game(
+            golf,
+            game_num=0,
+            hole=1,
+            Q=Q,
+            model=model,
+            shuffle=False,
+            transition_logger=logger,
+        )
+    finally:
+        simulation_mod.verbose = original_verbose
+
+    assert results
+    metadata_entries = tuple(logger.metadata)
+    assert metadata_entries
+
+    logger.save(prefix="play_game")
+    archive = tmp_path / "play_game.npz"
+    payload = np.load(archive)
+    assert payload["states"].shape[0] == len(metadata_entries)
+    assert payload["states"].shape[1:] == (13, len(players) * 7 + 3, 4)
+
+    metadata = json.loads((tmp_path / "play_game.json").read_text())
+    assert len(metadata) == len(metadata_entries)
