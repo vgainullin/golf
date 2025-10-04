@@ -47,6 +47,9 @@ class TensorTransitionLogger:
         self._reward_sum: float = 0.0
         self._reward_sq_sum: float = 0.0
         self._reward_count: int = 0
+        self._cumulative_unique_counts: List[int] = []
+        self._running_reward_mean: List[float] = []
+        self._running_reward_variance: List[float] = []
 
     def log(
         self,
@@ -73,6 +76,17 @@ class TensorTransitionLogger:
         self._reward_sum += float(reward)
         self._reward_sq_sum += float(reward) ** 2
         self._reward_count += 1
+
+        # Update cumulative metrics
+        self._cumulative_unique_counts.append(len(self._unique_hashes))
+        if self._reward_count:
+            mean = self._reward_sum / self._reward_count
+            var = (self._reward_sq_sum / self._reward_count) - mean ** 2
+            self._running_reward_mean.append(mean)
+            self._running_reward_variance.append(max(var, 0.0))
+        else:
+            self._running_reward_mean.append(0.0)
+            self._running_reward_variance.append(0.0)
 
 
         if self._rank_counts is None:
@@ -135,6 +149,14 @@ class TensorTransitionLogger:
         with metrics_path.open("w", encoding="utf-8") as fh:
             json.dump(self.metrics, fh, indent=2)
 
+        series_path = base_path.with_name(f'{base_path.name}_metrics_series.json')
+        with series_path.open("w", encoding="utf-8") as fh:
+            json.dump({
+                "cumulative_unique_states": self._cumulative_unique_counts,
+                "running_reward_mean": self._running_reward_mean,
+                "running_reward_variance": self._running_reward_variance,
+            }, fh, indent=2)
+
     def clear(self) -> None:
         """Reset the logger state (useful for tests)."""
         self._states.clear()
@@ -142,6 +164,17 @@ class TensorTransitionLogger:
         self._rewards.clear()
         self._dones.clear()
         self._metadata.clear()
+        self._unique_hashes.clear()
+        self._rank_counts = None
+        self._position_counts = None
+        self._suit_counts = None
+        self._transition_hamming.clear()
+        self._reward_sum = 0.0
+        self._reward_sq_sum = 0.0
+        self._reward_count = 0
+        self._cumulative_unique_counts.clear()
+        self._running_reward_mean.clear()
+        self._running_reward_variance.clear()
 
     def extend(self, other: "TensorTransitionLogger") -> None:
         """Merge records from another logger into this one."""
@@ -194,7 +227,7 @@ class TensorTransitionLogger:
         games = [m.game for m in self._metadata if m.game >= 0]
         holes = [m.hole for m in self._metadata if m.hole >= 0]
 
-        return {
+        metrics = {
             "unique_states": len(self._unique_hashes),
             "total_states": len(self._states),
             "entropy_rank": _entropy(self._rank_counts),
@@ -214,3 +247,12 @@ class TensorTransitionLogger:
             "hole_min": _min_or_none(holes),
             "hole_max": _max_or_none(holes),
         }
+
+        if self._cumulative_unique_counts:
+            metrics["cumulative_unique_states"] = self._cumulative_unique_counts
+        if self._running_reward_mean:
+            metrics["running_reward_mean"] = self._running_reward_mean
+        if self._running_reward_variance:
+            metrics["running_reward_variance"] = self._running_reward_variance
+
+        return metrics

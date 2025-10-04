@@ -6,6 +6,8 @@ import random
 import numpy as np
 import pytest
 
+from src.tensor_logger import TensorTransitionLogger
+
 import src.simulation as simulation_mod
 from src.simulation import Player, GolfDeck, Card
 
@@ -271,8 +273,29 @@ def test_tensor_transition_logger_transition_distance(tmp_path):
     logger = simulation_mod.TensorTransitionLogger(tmp_path)
 
     state = np.zeros((2, 2, 2), dtype=np.int8)
-    logger.log(state=state, next_state=state, reward=0.0, done=False, metadata={})
-    assert logger.metrics["avg_transition_hamming"] == 0
+    next_state = np.zeros_like(state)
+    logger.log(
+        state=state,
+        next_state=next_state,
+        reward=2.0,
+        done=False,
+        metadata={"round": 0, "game": 0, "hole": 1},
+    )
+
+    alt_state = state.copy()
+    alt_state[0, 0, 0] = 1
+    logger.log(
+        state=alt_state,
+        next_state=alt_state,
+        reward=-2.0,
+        done=True,
+        metadata={"round": 1, "game": 0, "hole": 1},
+    )
+
+    metrics = logger.metrics
+    assert metrics["reward_mean"] == pytest.approx(0.0)
+    assert metrics["reward_variance"] == pytest.approx(4.0)
+
 
     next_state = state.copy()
     next_state[0, 0, 0] = 1
@@ -320,6 +343,50 @@ def test_tensor_transition_logger_reward_metrics_and_save(tmp_path):
     assert payload["game_max"] == 0
     assert payload["hole_min"] == 1
     assert payload["hole_max"] == 1
+
+
+def test_tensor_transition_logger_series_outputs(tmp_path):
+    """Series files should capture cumulative unique states and reward trends."""
+    logger = TensorTransitionLogger(tmp_path)
+
+    base = np.zeros((2, 2, 2), dtype=np.int8)
+    logger.log(state=base, next_state=base, reward=0.0, done=False, metadata={})
+    logger.log(state=base, next_state=base, reward=1.0, done=False, metadata={})
+    logger.log(state=base, next_state=base, reward=-1.0, done=False, metadata={})
+
+    logger.save(prefix='series_case')
+    series_path = tmp_path / 'series_case_metrics_series.json'
+    assert series_path.exists()
+    series_payload = json.loads(series_path.read_text())
+    assert series_payload['cumulative_unique_states'] == [1, 1, 1]
+    assert series_payload['running_reward_mean'][-1] == pytest.approx(0.0)
+    assert len(series_payload['running_reward_variance']) == 3
+
+    logger.clear()
+
+    state = np.zeros((2, 2, 2), dtype=np.int8)
+    next_state = np.zeros_like(state)
+    logger.log(
+        state=state,
+        next_state=next_state,
+        reward=1.0,
+        done=False,
+        metadata={"round": 0, "game": 0, "hole": 1},
+    )
+
+    alt_state = state.copy()
+    alt_state[0, 0, 0] = 1
+    logger.log(
+        state=alt_state,
+        next_state=alt_state,
+        reward=-1.0,
+        done=True,
+        metadata={"round": 1, "game": 0, "hole": 1},
+    )
+
+    metrics = logger.metrics
+    assert metrics["reward_mean"] == pytest.approx(0.0)
+    assert metrics["reward_variance"] == pytest.approx(1.0)
 
 
 def test_play_game_logs_tensor_transitions(tmp_path):
