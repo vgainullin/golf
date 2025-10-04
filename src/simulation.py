@@ -13,6 +13,7 @@ from collections.abc import MutableSequence
 from collections import namedtuple
 from collections import deque
 from src.qtransformer import QTransformer, ReplayBuffer, CardEmbedding, train_episode
+from src.tensor_logger import TensorTransitionLogger
 
 Card = namedtuple('Card', ['rank', 'suit'])
 
@@ -480,9 +481,23 @@ epsilon = 0.1  # Exploration rate
 alpha = 0.1  # Learning rate
 gamma = 0.9  # Discount factor
 
-def play_single_turn(golf, player_id, action_num, Q, state_):
+def play_single_turn(
+    golf,
+    player_id,
+    action_num,
+    Q,
+    state_,
+    *,
+    game_num,
+    hole,
+    round_num,
+    transition_logger: TensorTransitionLogger | None = None,
+):
     player = golf.players[player_id]
-    
+    state_tensor = None
+    if transition_logger is not None:
+        state_tensor = golf.encode_golf_tensor()
+
     # Determine action based on player type
     if player.type == 'Heuristic':
         action, pos, reward = get_player_action(deepcopy(golf), player_id, action_num, rank_cutoff, take_random_action=False)
@@ -505,11 +520,29 @@ def play_single_turn(golf, player_id, action_num, Q, state_):
     # Execute action
     action_array = [action_num, action, pos]
     reward = golf.take_action(player_id=player_id, action_array=action_array)
-    
+
     # Get new state
     golf.players[player_id].gather_game_state(golf)
     new_state = golf.players[player_id].game_state
-    
+
+    if transition_logger is not None and state_tensor is not None:
+        next_state_tensor = golf.encode_golf_tensor()
+        transition_logger.log(
+            state=state_tensor,
+            next_state=next_state_tensor,
+            reward=reward,
+            done=golf.game_over,
+            metadata={
+                "game": game_num,
+                "hole": hole,
+                "round": round_num,
+                "player_id": player_id,
+                "action_num": action_num,
+                "action": action,
+                "position": pos,
+            },
+        )
+
     # Update Q-table for RL player
     if player.type == 'RL':
         update_q_table(Q, action_num, state_, new_state, action, pos, reward)
@@ -524,7 +557,7 @@ def update_q_table(Q, action_num, state, new_state, action, pos, reward):
     new_q_value = old_q_value + alpha * (reward + gamma * next_max_q_value - old_q_value)
     Q.setdefault(f'{action_num}'+state, {})[f"{action}|{pos}"] = new_q_value
 
-def play_game(golf, game_num, hole, Q, model, shuffle=True):
+def play_game(golf, game_num, hole, Q, model, shuffle=True, transition_logger: TensorTransitionLogger | None = None):
     # Add this line
     if shuffle:
         golf.shuffle()
@@ -559,7 +592,17 @@ def play_game(golf, game_num, hole, Q, model, shuffle=True):
                 break
             
             # Play first action (action_num = 0)
-            upd_state_0, reward_0, action_0 = play_single_turn(golf, player_id, 0, Q, state_)
+            upd_state_0, reward_0, action_0 = play_single_turn(
+                golf,
+                player_id,
+                0,
+                Q,
+                state_,
+                game_num=game_num,
+                hole=hole,
+                round_num=round_num,
+                transition_logger=transition_logger,
+            )
             
             golf.players[player_id].gather_game_state(golf)
 
@@ -568,7 +611,17 @@ def play_game(golf, game_num, hole, Q, model, shuffle=True):
             #if golf.players[player_id].type != 'RL':  # RL handled separately
             #loss = train_episode(model, optimizer, replay_buffer, batch_size)
             #print(loss)
-            upd_state_1, reward_1, action_1 = play_single_turn(golf, player_id, 1, Q, upd_state_0)
+            upd_state_1, reward_1, action_1 = play_single_turn(
+                golf,
+                player_id,
+                1,
+                Q,
+                upd_state_0,
+                game_num=game_num,
+                hole=hole,
+                round_num=round_num,
+                transition_logger=transition_logger,
+            )
             #check if there are cards left in the deck create a new deck otherwise use the discard pile
             if len(golf.deck) < golf.num_players + 2:
                 if verbose:
@@ -657,4 +710,3 @@ all_game_results_df.to_csv("all_game_results.csv")
 # Save Q-table
 with open('q_table.json', 'w') as fp:
     json.dump(Q, fp)
-
