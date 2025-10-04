@@ -62,10 +62,14 @@ class TensorTransitionLogger:
             raise ValueError("State and next_state tensors must share the same shape")
 
         index = len(self._states)
-        self._states.append(state.astype(np.int8, copy=False))
-        self._next_states.append(next_state.astype(np.int8, copy=False))
+        state_arr = np.asarray(state, dtype=np.int8)
+        next_state_arr = np.asarray(next_state, dtype=np.int8)
+
+        self._states.append(state_arr)
+        self._next_states.append(next_state_arr)
         self._rewards.append(float(reward))
         self._dones.append(bool(done))
+        self._unique_hashes.add(state_arr.tobytes())
         self._metadata.append(
             TransitionMetadata(
                 index=index,
