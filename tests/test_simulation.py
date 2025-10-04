@@ -245,6 +245,26 @@ def test_tensor_transition_logger_unique_state_metric(tmp_path):
     assert logger.metrics["unique_states"] == 2
 
 
+def test_tensor_transition_logger_entropy_metrics(tmp_path):
+    """Entropy metrics should increase with diversified states."""
+    logger = simulation_mod.TensorTransitionLogger(tmp_path)
+
+    state_a = np.zeros((2, 2, 2), dtype=np.int8)
+    state_a[0, 0, 0] = 1
+    state_b = np.zeros_like(state_a)
+    state_b[1, 1, 1] = 1
+
+    logger.log(state=state_a, next_state=state_a, reward=0.0, done=False, metadata={})
+    first_metrics = logger.metrics
+    assert first_metrics["entropy_rank"] == 0
+
+    logger.log(state=state_b, next_state=state_b, reward=0.0, done=False, metadata={})
+    metrics = logger.metrics
+    assert metrics["entropy_rank"] > 0
+    assert metrics["entropy_position"] > 0
+    assert metrics["entropy_suit"] > 0
+
+
 def test_play_game_logs_tensor_transitions(tmp_path):
     """play_game should log tensor transitions when a logger is provided."""
     original_verbose = simulation_mod.verbose
