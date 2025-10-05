@@ -1,5 +1,8 @@
+import json
 import pytest
 from pathlib import Path
+
+import numpy as np
 
 from src import simulation
 from src.simulation import (
@@ -7,6 +10,7 @@ from src.simulation import (
     SimulationResult,
     aggregate_worker_results,
     run_simulations_concurrently,
+    collect_tensor_artifacts,
 )
 
 
@@ -233,3 +237,76 @@ def test_cli_main_generates_combined_outputs(tmp_path, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert 'Average score per player' in out
+
+def test_collect_tensor_artifacts_merges_worker_logs(tmp_path):
+    prefix0 = "tensor_worker_0"
+    logger0 = simulation.TensorTransitionLogger(tmp_path)
+    logger0.log(
+        state=np.zeros((2, 2, 2), dtype=np.int8),
+        next_state=np.ones((2, 2, 2), dtype=np.int8),
+        reward=1.5,
+        done=False,
+        metadata={"game": 0, "hole": 1, "round": 0, "player_id": 0, "action_num": 0},
+    )
+    logger0.save(prefix=prefix0)
+
+    prefix1 = "tensor_worker_1"
+    logger1 = simulation.TensorTransitionLogger(tmp_path)
+    logger1.log(
+        state=np.ones((2, 2, 2), dtype=np.int8),
+        next_state=np.zeros((2, 2, 2), dtype=np.int8),
+        reward=-2.0,
+        done=True,
+        metadata={"game": 1, "hole": 1, "round": 0, "player_id": 1, "action_num": 1},
+    )
+    logger1.save(prefix=prefix1)
+
+    def build_result(worker_id: int, base: str) -> SimulationResult:
+        base_path = tmp_path / base
+        return SimulationResult(
+            worker_id=worker_id,
+            seed=worker_id,
+            ledger=[],
+            q_table={},
+            metrics={},
+            artifact_paths=[
+                str(base_path.with_suffix('.npz')),
+                str(base_path.with_suffix('.json')),
+                str(base_path.with_name(f"{base}_metrics.json")),
+                str(base_path.with_name(f"{base}_metrics_series.json")),
+            ],
+            shuffle_history=[],
+        )
+
+    results = [build_result(0, prefix0), build_result(1, prefix1)]
+
+    combined = collect_tensor_artifacts(results, tmp_path, prefix="combined")
+
+    assert combined is not None
+    combined_npz = tmp_path / "combined.npz"
+    assert combined_npz.exists()
+    data = np.load(combined_npz)
+    assert data['states'].shape[0] == 2
+    combined_metadata = json.loads((tmp_path / "combined.json").read_text())
+    assert len(combined_metadata) == 2
+    assert combined.metrics['unique_states'] == 2
+
+def test_cli_collect_tensors(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    simulation.main([
+        '--games', '1',
+        '--holes', '1',
+        '--num-workers', '1',
+        '--log-tensors',
+        '--tensor-log-dir', str(tmp_path),
+        '--output-dir', str(tmp_path),
+    ])
+
+    out = capsys.readouterr().out
+    assert 'Collected' in out
+    assert 'unique' in out
+
+    combined_npz = tmp_path / f"{simulation.DEFAULT_TENSOR_LOG_PREFIX}.npz"
+    assert combined_npz.exists()
+    metadata = tmp_path / f"{simulation.DEFAULT_TENSOR_LOG_PREFIX}.json"
+    assert metadata.exists()

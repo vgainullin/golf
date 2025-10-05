@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import json
 import multiprocessing as mp
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     import torch
@@ -1010,6 +1010,60 @@ def aggregate_worker_results(results: List[SimulationResult]) -> AggregationResu
     )
 
 
+def collect_tensor_artifacts(
+    results: Iterable[SimulationResult],
+    destination: Path,
+    prefix: str = DEFAULT_TENSOR_LOG_PREFIX,
+) -> Optional[TensorTransitionLogger]:
+    bases: List[Path] = []
+    seen: set[Path] = set()
+    for result in results:
+        for artifact in result.artifact_paths:
+            path = Path(artifact)
+            if path.suffix != '.npz':
+                continue
+            base = path.with_suffix('')
+            if base in seen:
+                continue
+            metadata_path = base.with_suffix('.json')
+            if not metadata_path.exists():
+                continue
+            seen.add(base)
+            bases.append(base)
+
+    if not bases:
+        return None
+
+    destination.mkdir(parents=True, exist_ok=True)
+    combined_logger = TensorTransitionLogger(destination)
+
+    for base in bases:
+        npz_path = base.with_suffix('.npz')
+        metadata_path = base.with_suffix('.json')
+        if not npz_path.exists() or not metadata_path.exists():
+            continue
+        data = np.load(npz_path)
+        states = data['states']
+        next_states = data['next_states']
+        rewards = data['rewards']
+        dones = data['dones']
+        metadata_entries = json.loads(metadata_path.read_text())
+
+        for state, next_state, reward, done, meta in zip(
+            states, next_states, rewards, dones, metadata_entries
+        ):
+            combined_logger.log(
+                state=state,
+                next_state=next_state,
+                reward=float(reward),
+                done=bool(done),
+                metadata=meta,
+            )
+
+    combined_logger.save(prefix=prefix)
+    return combined_logger
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Golf simulations sequentially or with multiprocessing workers and optional tensor logging.",
@@ -1139,7 +1193,25 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if config.log_tensors:
         tensor_path = Path(config.tensor_log_dir)
-        print(f"Tensor transitions saved under: {tensor_path}")
+        for result in results:
+            tensor_files = [Path(p) for p in result.artifact_paths if Path(p).suffix == '.npz']
+            for tensor_file in tensor_files:
+                print(f"Worker {result.worker_id} tensor log: {tensor_file}")
+        combined_prefix = (
+            config.tensor_log_prefix
+            if args.num_workers <= 1
+            else f"{config.tensor_log_prefix}_combined"
+        )
+        collected_logger = collect_tensor_artifacts(results, tensor_path, combined_prefix)
+        if collected_logger is not None:
+            metrics = collected_logger.metrics
+            unique_count = metrics.get('unique_states', len(collected_logger))
+            total_count = metrics.get('total_states', len(collected_logger))
+            print(
+                f"Collected {unique_count} unique transitions (total={total_count}) saved as '{combined_prefix}' in {tensor_path}"
+            )
+        else:
+            print(f"No tensor artifacts found to collect in {tensor_path}")
 
 
 
