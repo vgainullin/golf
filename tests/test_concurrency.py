@@ -172,3 +172,64 @@ def test_worker_entry_places_result_on_queue(monkeypatch):
     )
 
     assert queue.items == [expected]
+
+def test_cli_main_generates_combined_outputs(tmp_path, monkeypatch, capsys):
+    captured_args = {}
+
+    def stub_run_simulations_concurrently(config, num_workers, base_seed, output_dir):
+        captured_args['config'] = config
+        captured_args['num_workers'] = num_workers
+        captured_args['base_seed'] = base_seed
+        captured_args['output_dir'] = output_dir
+        return [
+            SimulationResult(
+                worker_id=0,
+                seed=base_seed or 0,
+                ledger=[{'player_id': 1, 'score': 3}],
+                q_table={'A': 1},
+                metrics={},
+                artifact_paths=[],
+                shuffle_history=[],
+            ),
+            SimulationResult(
+                worker_id=1,
+                seed=(base_seed or 0) + 1,
+                ledger=[{'player_id': 1, 'score': 5}],
+                q_table={'B': 2},
+                metrics={},
+                artifact_paths=[],
+                shuffle_history=[],
+            ),
+        ]
+
+    monkeypatch.setattr(simulation, 'run_simulations_concurrently', stub_run_simulations_concurrently)
+
+    simulation.main([
+        '--games', '1',
+        '--holes', '1',
+        '--num-workers', '2',
+        '--base-seed', '5',
+        '--output-dir', str(tmp_path),
+        '--no-shuffle',
+    ])
+
+    assert captured_args['num_workers'] == 2
+    assert captured_args['base_seed'] == 5
+    assert captured_args['output_dir'] == str(tmp_path)
+    config = captured_args['config']
+    assert config.num_games == 1
+    assert config.holes_per_game == 1
+    assert config.shuffle is False
+
+    combined_path = tmp_path / 'all_game_results.csv'
+    q_table_path = tmp_path / 'q_table.json'
+    assert combined_path.exists()
+    assert q_table_path.exists()
+
+    contents = combined_path.read_text().strip().splitlines()
+    assert len(contents) == 3  # header + two rows
+    data = q_table_path.read_text()
+    assert 'worker_0' in data and 'worker_1' in data
+
+    out = capsys.readouterr().out
+    assert 'Average score per player' in out
