@@ -133,3 +133,42 @@ def test_run_simulation_writes_artifacts(tmp_path, monkeypatch):
     assert len(contents) == 2  # header + one record
     assert 'score' in contents[0]
     assert '5' in contents[1]
+
+def test_worker_entry_places_result_on_queue(monkeypatch):
+    expected = SimulationResult(
+        worker_id=2,
+        seed=99,
+        ledger=[],
+        q_table={},
+        metrics={},
+        artifact_paths=[],
+        shuffle_history=[],
+    )
+
+    def stub_run_simulation(*, config, seed, worker_id, game_offset, output_dir):
+        assert seed == 11
+        assert worker_id == 2
+        assert game_offset == 5
+        assert output_dir == 'out'
+        return expected
+
+    class DummyQueue:
+        def __init__(self):
+            self.items = []
+
+        def put(self, item):
+            self.items.append(item)
+
+    queue = DummyQueue()
+    monkeypatch.setattr(simulation, 'run_simulation', stub_run_simulation)
+
+    simulation._worker_entry(
+        worker_id=2,
+        config=SimulationConfig(),
+        seed=11,
+        game_offset=5,
+        output_dir='out',
+        queue=queue,
+    )
+
+    assert queue.items == [expected]
