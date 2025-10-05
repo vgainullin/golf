@@ -1014,7 +1014,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Golf simulations sequentially or with multiprocessing workers and optional tensor logging.",
     )
-    parser.set_defaults(verbose=verbose)
+    parser.set_defaults(verbose=False)
     parser.add_argument(
         "--games",
         "--num-games",
@@ -1071,12 +1071,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         dest="verbose",
         action="store_true",
         help="Enable verbose logging during simulations.",
-    )
-    parser.add_argument(
-        "--quiet",
-        dest="verbose",
-        action="store_false",
-        help="Silence verbose simulation logging.",
     )
     parser.add_argument(
         "--log-tensors",
@@ -1147,3 +1141,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         tensor_path = Path(config.tensor_log_dir)
         print(f"Tensor transitions saved under: {tensor_path}")
 
+
+
+if __name__ == "__main__":
+    main()
