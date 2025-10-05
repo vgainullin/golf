@@ -615,9 +615,9 @@ def play_game(
     hole,
     Q,
     model,
-    rank_cutoff,
-    verbose=False,
-    shuffle=True,
+    rank_cutoff: int = 4,
+    verbose: bool = False,
+    shuffle: bool = True,
     transition_logger: TensorTransitionLogger | None = None,
 ):
     initial_shuffle_signature: Tuple[Tuple[str, str], ...] = tuple()
@@ -741,12 +741,35 @@ def _default_player_roster() -> List[Player]:
 
 
 def run_simulation(
-    config: SimulationConfig,
+    config: SimulationConfig | None = None,
+    *,
+    num_games: Optional[int] = None,
+    holes_per_game: Optional[int] = None,
+    shuffle: Optional[bool] = None,
+    log_tensors: Optional[bool] = None,
+    tensor_log_dir: Path | str = Path("data"),
+    tensor_log_prefix: str = DEFAULT_TENSOR_LOG_PREFIX,
+    rank_cutoff_override: Optional[int] = None,
+    verbose_override: Optional[bool] = None,
     seed: Optional[int] = None,
     worker_id: int = 0,
     game_offset: int = 0,
     output_dir: Optional[str] = None,
-) -> SimulationResult:
+) -> SimulationResult | Dict[str, Any]:
+    config_provided = config is not None
+    if config is None:
+        config = SimulationConfig(
+            num_games=num_games if num_games is not None else DEFAULT_NUM_GAMES,
+            holes_per_game=holes_per_game if holes_per_game is not None else DEFAULT_HOLES_PER_GAME,
+            shuffle=True if shuffle is None else shuffle,
+            verbose=verbose_override if verbose_override is not None else bool(verbose),
+            rank_cutoff=rank_cutoff_override if rank_cutoff_override is not None else 4,
+            output_dir=str(output_dir) if output_dir else None,
+            log_tensors=bool(log_tensors),
+            tensor_log_dir=tensor_log_dir,
+            tensor_log_prefix=tensor_log_prefix,
+        )
+
     effective_seed = seed if seed is not None else random.randint(0, 2**32 - 1)
     _init_random_seed(effective_seed)
 
@@ -759,13 +782,16 @@ def run_simulation(
     model = QTransformer() if torch is not None else None
 
     tensor_logger: TensorTransitionLogger | None = None
-    tensor_log_dir: Path | None = None
-    tensor_log_prefix: str | None = None
+    tensor_log_dir_path: Path | None = None
+    tensor_log_prefix_val: str | None = None
     if config.log_tensors:
-        tensor_log_dir = Path(config.tensor_log_dir)
-        tensor_log_dir.mkdir(parents=True, exist_ok=True)
-        tensor_logger = TensorTransitionLogger(tensor_log_dir)
-        tensor_log_prefix = f"{config.tensor_log_prefix}_worker_{worker_id}"
+        tensor_log_dir_path = Path(config.tensor_log_dir)
+        tensor_log_dir_path.mkdir(parents=True, exist_ok=True)
+        tensor_logger = TensorTransitionLogger(tensor_log_dir_path)
+        if config_provided:
+            tensor_log_prefix_val = f"{config.tensor_log_prefix}_worker_{worker_id}"
+        else:
+            tensor_log_prefix_val = config.tensor_log_prefix
 
     total_games = max(config.num_games, 0)
     for local_game in range(total_games):
@@ -809,19 +835,19 @@ def run_simulation(
             json.dump(q_table, fp)
         artifact_paths.append(str(q_path))
 
-    if tensor_logger is not None and tensor_log_dir is not None and tensor_log_prefix is not None:
-        tensor_logger.save(prefix=tensor_log_prefix)
-        base = tensor_log_dir / tensor_log_prefix
+    if tensor_logger is not None and tensor_log_dir_path is not None and tensor_log_prefix_val is not None:
+        tensor_logger.save(prefix=tensor_log_prefix_val)
+        base = tensor_log_dir_path / tensor_log_prefix_val
         artifact_paths.extend(
             [
                 str(base.with_suffix(".npz")),
                 str(base.with_suffix(".json")),
-                str(base.with_name(f"{tensor_log_prefix}_metrics.json")),
-                str(base.with_name(f"{tensor_log_prefix}_metrics_series.json")),
+                str(base.with_name(f"{tensor_log_prefix_val}_metrics.json")),
+                str(base.with_name(f"{tensor_log_prefix_val}_metrics_series.json")),
             ]
         )
 
-    return SimulationResult(
+    result = SimulationResult(
         worker_id=worker_id,
         seed=effective_seed,
         ledger=ledger,
@@ -830,6 +856,17 @@ def run_simulation(
         artifact_paths=artifact_paths,
         shuffle_history=shuffle_history,
     )
+
+    if config_provided:
+        return result
+
+    legacy_payload = {
+        "Q": q_table,
+        "ledger": ledger,
+        "all_game_results": [],
+        "transition_logger": tensor_logger,
+    }
+    return legacy_payload
 
 
 def _worker_entry(
