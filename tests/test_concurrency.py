@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 
 from src import simulation
 from src.simulation import (
@@ -95,3 +96,40 @@ def test_run_simulations_concurrently_falls_back_to_sequential(monkeypatch):
     assert len(results) == 2
     assert [res.worker_id for res in results] == [0, 1]
     assert recorded_calls == results
+
+def test_run_simulation_writes_artifacts(tmp_path, monkeypatch):
+    config = SimulationConfig(num_games=1, holes_per_game=1)
+
+    def stub_play_game(golf, game_num, hole, q_table, model, rank_cutoff, **kwargs):
+        return ([{
+            'worker_id': 3,
+            'score': 5,
+            'hole': hole,
+            'game': game_num,
+            'reward': 0,
+        }], (('sig', 'value'),))
+
+    monkeypatch.setattr(simulation, 'torch', None)
+    monkeypatch.setattr(simulation, 'play_game', stub_play_game)
+
+    result = simulation.run_simulation(
+        config,
+        seed=7,
+        worker_id=3,
+        game_offset=0,
+        output_dir=str(tmp_path),
+    )
+
+    ledger_path = tmp_path / 'ledger_worker_3.csv'
+    q_table_path = tmp_path / 'q_table_worker_3.json'
+
+    assert ledger_path.exists()
+    assert q_table_path.exists()
+    artifact_set = {Path(p) for p in result.artifact_paths}
+    assert ledger_path in artifact_set
+    assert q_table_path in artifact_set
+
+    contents = ledger_path.read_text().strip().splitlines()
+    assert len(contents) == 2  # header + one record
+    assert 'score' in contents[0]
+    assert '5' in contents[1]
