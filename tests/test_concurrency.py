@@ -1,5 +1,6 @@
 import pytest
 
+from src import simulation
 from src.simulation import (
     SimulationConfig,
     SimulationResult,
@@ -64,3 +65,33 @@ def test_run_simulations_concurrently_produces_unique_shuffles(num_workers, num_
     expected_rows = num_games * config.holes_per_game * 4  # 4 default players
     assert len(aggregation.ledger) == expected_rows
     assert aggregation.worker_count == num_workers
+
+def test_run_simulations_concurrently_falls_back_to_sequential(monkeypatch):
+    config = SimulationConfig(num_games=2, holes_per_game=1)
+
+    def fake_get_context(method):
+        raise PermissionError('queue creation blocked')
+
+    recorded_calls = []
+
+    def stub_run_simulation(*, config, seed, worker_id, game_offset, output_dir):
+        result = SimulationResult(
+            worker_id=worker_id,
+            seed=seed,
+            ledger=[{'worker': worker_id, 'offset': game_offset}],
+            q_table={},
+            metrics={'num_games': config.num_games},
+            artifact_paths=[],
+            shuffle_history=[],
+        )
+        recorded_calls.append(result)
+        return result
+
+    monkeypatch.setattr(simulation.mp, 'get_context', fake_get_context)
+    monkeypatch.setattr(simulation, 'run_simulation', stub_run_simulation)
+
+    results = run_simulations_concurrently(config, num_workers=2, base_seed=42)
+
+    assert len(results) == 2
+    assert [res.worker_id for res in results] == [0, 1]
+    assert recorded_calls == results
