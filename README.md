@@ -37,6 +37,49 @@ To start the AI training simulation:
 python simulation.py
 ```
 
+### Collecting Tensor Transitions for Offline RL
+
+Enable the optional tensor logger to persist state/action/reward transitions that
+can be replayed when training offline agents:
+
+```bash
+python -m src.simulation --games 100 --holes 9 --log-tensors --tensor-log-dir data
+```
+
+Each worker writes four files per prefix (`.npz`, `.json`, `_metrics.json`,
+`_metrics_series.json`). The compressed archive stores:
+
+- `states`: one-hot tensors with shape `(ranks, positions, suits)`
+- `next_states`: successor tensors with identical shape
+- `actions`: canonical action ids (0: take face card, 1: draw deck, 2-15: place/discard variants)
+- `rewards`, `dones`: scalar outcomes per transition
+
+Any run that enables logging prints a short diagnostics block highlighting
+skewed action distributions or flat reward signals so you can catch degenerate
+datasets early.
+
+### Loading Tensor Datasets
+
+Use `TensorTransitionDataset` to load and prepare artifacts for learning:
+
+```python
+from src.tensor_dataset import TensorTransitionDataset
+
+dataset = TensorTransitionDataset("data/tensor_transitions")
+batch = dataset.as_qtransformer_arrays()
+
+# batch contains numpy arrays ready for torch/jax:
+#   player_cards, holding_cards, discard_top,
+#   next_player_cards, next_holding_cards, next_discard_top,
+#   actions, rewards, dones
+```
+
+The helper automatically converts the 3D one-hot tensors to the token format
+expected by `QTransformer` (six visible cards plus the current discard top,
+with 52 representing an unknown card). Each `TensorTransitionRecord` also
+exposes the original metadata and decoded `(action_num, action, position)`
+tuple via `record.action_tuple()` when you need human-readable actions.
+
 ## Game Parameters
 
 You can modify various game parameters in the simulation:

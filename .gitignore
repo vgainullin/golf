@@ -7,3 +7,7 @@ __pycache__/
 .DS_Store
 .env
 .venv
+data/tensor_transitions*.npz
+data/tensor_transitions*.json
+data/tensor_transitions*_metrics.json
+data/tensor_transitions*_metrics_series.json

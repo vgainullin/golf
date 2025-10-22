@@ -208,6 +208,8 @@ def test_tensor_transition_logger_roundtrip(tmp_path):
     payload = np.load(archive)
     assert payload["states"].shape == (1, 13, 10, 4)
     assert payload["next_states"].shape == (1, 13, 10, 4)
+    assert payload["actions"].shape == (1,)
+    assert payload["actions"][0] == 1  # draw action: take from deck
     assert payload["rewards"][0] == pytest.approx(1.5)
     assert payload["dones"][0] == False
 
@@ -215,6 +217,7 @@ def test_tensor_transition_logger_roundtrip(tmp_path):
     assert metadata[0]["game"] == 0
     assert metadata[0]["position"] is None
     assert metadata[0]["done"] is False
+    assert metadata[0]["action_id"] == 1
 
 
 def test_tensor_transition_logger_initial_metrics(tmp_path):
@@ -228,6 +231,7 @@ def test_tensor_transition_logger_initial_metrics(tmp_path):
     assert metrics["avg_transition_hamming"] == 0
     assert metrics["reward_mean"] == 0
     assert metrics["reward_variance"] == 0
+    assert metrics["action_counts"] == {}
 
 
 def test_tensor_transition_logger_unique_state_metric(tmp_path):
@@ -236,16 +240,20 @@ def test_tensor_transition_logger_unique_state_metric(tmp_path):
 
     base = np.zeros((2, 2, 2), dtype=np.int8)
     logger.log(state=base, next_state=base, reward=0.0, done=False, metadata={})
-    assert logger.metrics["unique_states"] == 1
+    metrics = logger.metrics
+    assert metrics["unique_states"] == 1
+    assert metrics["action_counts"].get("-1", 0) == 1
 
     # Logging identical state again should not increase unique count
     logger.log(state=base, next_state=base, reward=0.0, done=False, metadata={})
-    assert logger.metrics["unique_states"] == 1
+    metrics = logger.metrics
+    assert metrics["unique_states"] == 1
 
     varied = base.copy()
     varied[0, 0, 0] = 1
     logger.log(state=varied, next_state=varied, reward=0.0, done=False, metadata={})
-    assert logger.metrics["unique_states"] == 2
+    metrics = logger.metrics
+    assert metrics["unique_states"] == 2
 
 
 def test_tensor_transition_logger_entropy_metrics(tmp_path):
@@ -300,7 +308,8 @@ def test_tensor_transition_logger_transition_distance(tmp_path):
     next_state = state.copy()
     next_state[0, 0, 0] = 1
     logger.log(state=state, next_state=next_state, reward=0.0, done=False, metadata={})
-    assert logger.metrics["avg_transition_hamming"] > 0
+    metrics = logger.metrics
+    assert metrics["avg_transition_hamming"] > 0
 
 
 def test_tensor_transition_logger_reward_metrics_and_save(tmp_path):
@@ -343,6 +352,7 @@ def test_tensor_transition_logger_reward_metrics_and_save(tmp_path):
     assert payload["game_max"] == 0
     assert payload["hole_min"] == 1
     assert payload["hole_max"] == 1
+    assert payload["action_counts"]["-1"] == 2
 
 
 def test_tensor_transition_logger_series_outputs(tmp_path):
@@ -401,7 +411,15 @@ def test_tensor_transition_logger_extend_updates_statistics(tmp_path):
         next_state=state_a,
         reward=1.0,
         done=False,
-        metadata={"game": 0, "hole": 0, "round": 0, "player_id": 0, "action_num": 0},
+        metadata={
+            "game": 0,
+            "hole": 0,
+            "round": 0,
+            "player_id": 0,
+            "action_num": 0,
+            "action": 0,
+            "position": None,
+        },
     )
 
     state_b = np.zeros((2, 2, 2), dtype=np.int8)
@@ -411,7 +429,15 @@ def test_tensor_transition_logger_extend_updates_statistics(tmp_path):
         next_state=state_b,
         reward=-1.0,
         done=True,
-        metadata={"game": 1, "hole": 1, "round": 1, "player_id": 1, "action_num": 1},
+        metadata={
+            "game": 1,
+            "hole": 1,
+            "round": 1,
+            "player_id": 1,
+            "action_num": 1,
+            "action": 1,
+            "position": 1,
+        },
     )
 
     first.extend(second)
@@ -423,6 +449,27 @@ def test_tensor_transition_logger_extend_updates_statistics(tmp_path):
     assert metrics["cumulative_unique_states"][-1] == 2
     assert len(first.metadata) == 2
     assert first.metadata[-1].index == 1
+    assert metrics["action_counts"]["0"] == 1
+    assert metrics["action_counts"]["10"] == 1
+
+
+def test_tensor_transition_logger_diagnostics(tmp_path):
+    logger = TensorTransitionLogger(tmp_path)
+    state = np.zeros((2, 2, 2), dtype=np.int8)
+    next_state = np.zeros_like(state)
+
+    for _ in range(10):
+        logger.log(
+            state=state,
+            next_state=next_state,
+            reward=0.0,
+            done=False,
+            metadata={"action_num": 0, "action": 0, "position": None},
+        )
+
+    diag = logger.diagnostics()
+    assert "warnings" in diag
+    assert any("Action distribution" in warning for warning in diag["warnings"])
 
 
 def test_play_game_logs_tensor_transitions(tmp_path):

@@ -246,7 +246,15 @@ def test_collect_tensor_artifacts_merges_worker_logs(tmp_path):
         next_state=np.ones((2, 2, 2), dtype=np.int8),
         reward=1.5,
         done=False,
-        metadata={"game": 0, "hole": 1, "round": 0, "player_id": 0, "action_num": 0},
+        metadata={
+            "game": 0,
+            "hole": 1,
+            "round": 0,
+            "player_id": 0,
+            "action_num": 0,
+            "action": 0,
+            "position": None,
+        },
     )
     logger0.save(prefix=prefix0)
 
@@ -257,7 +265,15 @@ def test_collect_tensor_artifacts_merges_worker_logs(tmp_path):
         next_state=np.zeros((2, 2, 2), dtype=np.int8),
         reward=-2.0,
         done=True,
-        metadata={"game": 1, "hole": 1, "round": 0, "player_id": 1, "action_num": 1},
+        metadata={
+            "game": 1,
+            "hole": 1,
+            "round": 0,
+            "player_id": 1,
+            "action_num": 1,
+            "action": 1,
+            "position": 1,
+        },
     )
     logger1.save(prefix=prefix1)
 
@@ -287,8 +303,11 @@ def test_collect_tensor_artifacts_merges_worker_logs(tmp_path):
     assert combined_npz.exists()
     data = np.load(combined_npz)
     assert data['states'].shape[0] == 2
+    assert 'actions' in data
+    assert sorted(data['actions'].tolist()) == [0, 10]
     combined_metadata = json.loads((tmp_path / "combined.json").read_text())
     assert len(combined_metadata) == 2
+    assert all("action_id" in entry for entry in combined_metadata)
     assert combined.metrics['unique_states'] == 2
 
 def test_cli_collect_tensors(tmp_path, monkeypatch, capsys):

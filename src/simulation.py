@@ -1210,6 +1210,11 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(
                 f"Collected {unique_count} unique transitions (total={total_count}) saved as '{combined_prefix}' in {tensor_path}"
             )
+            diagnostics = collected_logger.diagnostics()
+            if diagnostics.get("warnings"):
+                print("Tensor log diagnostics:")
+                for warning in diagnostics["warnings"]:
+                    print(f"  - {warning}")
         else:
             print(f"No tensor artifacts found to collect in {tensor_path}")
 

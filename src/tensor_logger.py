@@ -1,12 +1,74 @@
 """Utilities for collecting tensor-based Golf transitions."""
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from collections import Counter
+from dataclasses import dataclass, asdict, replace
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import json
 import numpy as np
+
+ActionTuple = Tuple[Optional[int], Optional[int], Optional[int]]
+
+
+def encode_action_id(action_tuple: ActionTuple) -> int:
+    """Encode an action tuple into a compact integer id.
+
+    The mapping is intentionally simple and stable:
+
+    * action_num == 0 (draw decision)
+        - (0, 0, None) -> 0 (take face card)
+        - (0, 1, None) -> 1 (take deck card)
+    * action_num == 1 (place or discard)
+        - action in {0, 1}; position in {0..5, None}
+        - ids start at 2 to keep draw actions separate
+        - layout: 2 + action * 7 + position_index
+          where position_index = position (0..5) or 6 when None
+
+    This yields a dense id space [0, 15] that is easy to expand while
+    remaining backward compatible for existing artifacts.
+    """
+
+    action_num, action, position = action_tuple
+    if action_num is None or action_num < 0:
+        return -1
+    if action_num == 0:
+        if action not in (0, 1):
+            return -1
+        return int(action)
+
+    if action_num == 1:
+        if action not in (0, 1):
+            return -1
+        if position is None:
+            position_index = 6
+        else:
+            position_index = int(position)
+            if position_index < 0 or position_index > 5:
+                return -1
+        return 2 + action * 7 + position_index
+
+    raise ValueError(f"Unsupported action_num in tuple: {action_tuple}")
+
+
+def decode_action_id(action_id: int) -> ActionTuple:
+    """Inverse of :func:`encode_action_id`."""
+
+    if action_id in (0, 1):
+        return (0, action_id, None)
+
+    if action_id >= 2:
+        local = action_id - 2
+        action = local // 7
+        position_index = local % 7
+        position = None if position_index == 6 else position_index
+        return (1, action, position)
+
+    if action_id == -1:
+        return (-1, None, None)
+
+    raise ValueError(f"Cannot decode action id: {action_id}")
 
 
 @dataclass
@@ -21,6 +83,7 @@ class TransitionMetadata:
     action_num: int
     action: Optional[int]
     position: Optional[int]
+    action_id: int
     reward: float
     done: bool
 
@@ -36,6 +99,7 @@ class TensorTransitionLogger:
         self._next_states: List[np.ndarray] = []
         self._rewards: List[float] = []
         self._dones: List[bool] = []
+        self._actions: List[int] = []
         self._metadata: List[TransitionMetadata] = []
 
         # Metric tracking placeholders; populated as logging occurs.
@@ -50,6 +114,7 @@ class TensorTransitionLogger:
         self._cumulative_unique_counts: List[int] = []
         self._running_reward_mean: List[float] = []
         self._running_reward_variance: List[float] = []
+        self._action_counts: Counter[int] = Counter()
 
     def log(
         self,
@@ -72,10 +137,21 @@ class TensorTransitionLogger:
         self._next_states.append(next_state_arr)
         self._rewards.append(float(reward))
         self._dones.append(bool(done))
+        action_num_val = metadata.get("action_num")
+        action_val = metadata.get("action")
+        position_val = metadata.get("position")
+        action_tuple: ActionTuple = (
+            None if action_num_val is None else int(action_num_val),
+            None if action_val is None else int(action_val),
+            None if position_val is None else int(position_val),
+        )
+        action_id = encode_action_id(action_tuple)
+        self._actions.append(action_id)
         self._unique_hashes.add(state_arr.tobytes())
         self._reward_sum += float(reward)
         self._reward_sq_sum += float(reward) ** 2
         self._reward_count += 1
+        self._action_counts[action_id] += 1
 
         # Update cumulative metrics
         self._cumulative_unique_counts.append(len(self._unique_hashes))
@@ -119,6 +195,7 @@ class TensorTransitionLogger:
                     if metadata.get("position") is None
                     else int(metadata["position"])
                 ),
+                action_id=action_id,
                 reward=float(reward),
                 done=bool(done),
             )
@@ -137,6 +214,7 @@ class TensorTransitionLogger:
             base_path.with_suffix(".npz"),
             states=np.stack(self._states, axis=0),
             next_states=np.stack(self._next_states, axis=0),
+            actions=np.asarray(self._actions, dtype=np.int16),
             rewards=np.asarray(self._rewards, dtype=np.float32),
             dones=np.asarray(self._dones, dtype=np.bool_),
         )
@@ -163,6 +241,7 @@ class TensorTransitionLogger:
         self._next_states.clear()
         self._rewards.clear()
         self._dones.clear()
+        self._actions.clear()
         self._metadata.clear()
         self._unique_hashes.clear()
         self._rank_counts = None
@@ -175,6 +254,7 @@ class TensorTransitionLogger:
         self._cumulative_unique_counts.clear()
         self._running_reward_mean.clear()
         self._running_reward_variance.clear()
+        self._action_counts.clear()
 
     def extend(self, other: "TensorTransitionLogger") -> None:
         """Merge records from another logger into this one."""
@@ -189,6 +269,7 @@ class TensorTransitionLogger:
             self._next_states.append(np.asarray(next_state, dtype=np.int8))
         self._rewards.extend(float(reward) for reward in other._rewards)
         self._dones.extend(bool(done) for done in other._dones)
+        self._actions.extend(int(action) for action in other._actions)
 
         self._recompute_tracking()
 
@@ -205,12 +286,13 @@ class TensorTransitionLogger:
         self._rank_counts = None
         self._position_counts = None
         self._suit_counts = None
+        self._action_counts = Counter()
 
         if not self._states:
             return
 
-        for state_arr, next_state_arr, reward in zip(
-            self._states, self._next_states, self._rewards
+        for idx, (state_arr, next_state_arr, reward, action_id) in enumerate(
+            zip(self._states, self._next_states, self._rewards, self._actions)
         ):
             state_arr = np.asarray(state_arr, dtype=np.int8)
             next_state_arr = np.asarray(next_state_arr, dtype=np.int8)
@@ -240,6 +322,12 @@ class TensorTransitionLogger:
             self._running_reward_mean.append(mean)
             self._running_reward_variance.append(max(var, 0.0))
             self._cumulative_unique_counts.append(len(self._unique_hashes))
+            self._action_counts[action_id] += 1
+            if idx < len(self._metadata):
+                # Keep metadata indices consistent if a pre-existing log lacked action ids
+                meta = self._metadata[idx]
+                if meta.action_id != action_id:
+                    self._metadata[idx] = replace(meta, action_id=action_id)
 
     @property
     def metadata(self) -> Iterable[TransitionMetadata]:
@@ -298,6 +386,7 @@ class TensorTransitionLogger:
             "game_max": _max_or_none(games),
             "hole_min": _min_or_none(holes),
             "hole_max": _max_or_none(holes),
+            "action_counts": {str(k): v for k, v in self._action_counts.items()},
         }
 
         if self._cumulative_unique_counts:
@@ -308,3 +397,29 @@ class TensorTransitionLogger:
             metrics["running_reward_variance"] = self._running_reward_variance
 
         return metrics
+
+    def diagnostics(self) -> Dict[str, Any]:
+        """Return heuristic warnings about dataset health."""
+
+        metrics = self.metrics
+        warnings: List[str] = []
+
+        filtered_counts = {k: v for k, v in self._action_counts.items() if k != -1}
+        action_total = sum(filtered_counts.values())
+        if action_total:
+            dominant = max(filtered_counts.values()) / action_total
+            if dominant > 0.95:
+                warnings.append(
+                    "Action distribution heavily skewed (single action >95%)."
+                )
+        if metrics.get("reward_variance", 0.0) < 1e-6:
+            warnings.append("Reward variance ~0; transitions may lack learning signal.")
+        unique = metrics.get("unique_states", 0)
+        total = metrics.get("total_states", 0)
+        if total > 0 and unique / total < 0.05:
+            warnings.append("Unique state ratio below 5%; dataset may be repetitive.")
+
+        return {
+            "metrics": metrics,
+            "warnings": warnings,
+        }
