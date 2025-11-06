@@ -177,12 +177,18 @@ class TensorTransitionLogger:
 
         delta = int(np.count_nonzero(state_arr != next_state_arr))
         self._transition_hamming.append(delta)
+
+        round_value = metadata.get("round")
+        if round_value is None:
+            round_value = metadata.get("round_num")
+        round_num = int(round_value if round_value is not None else -1)
+
         self._metadata.append(
             TransitionMetadata(
                 index=index,
                 game=int(metadata.get("game", -1)),
                 hole=int(metadata.get("hole", -1)),
-                round_num=int(metadata.get("round", -1)),
+                round_num=round_num,
                 player_id=int(metadata.get("player_id", -1)),
                 action_num=int(metadata.get("action_num", -1)),
                 action=(

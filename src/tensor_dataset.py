@@ -37,6 +37,11 @@ def _extract_card_index(column: np.ndarray, num_ranks: int) -> int:
     if present.size == 0:
         return UNKNOWN_CARD_INDEX
     # For deck/discard columns there may be multiple entries; choose the first.
+    if present.shape[1] != 2:
+        raise ValueError(
+            f"Expected 2D coordinates (rank, suit), got shape {present.shape}. "
+            f"Column shape: {column.shape}"
+        )
     rank_idx, suit_idx = present[0]
     return int(suit_idx * num_ranks + rank_idx)
 
@@ -200,6 +205,8 @@ class TensorTransitionDataset(Sequence[TensorTransitionRecord]):
         actions: List[int] = []
         rewards: List[float] = []
         dones: List[bool] = []
+        stages: List[int] = []
+        next_stages: List[int] = []
 
         for record in self.iter_records():
             player_id = int(record.metadata.get("player_id", -1))
@@ -228,6 +235,14 @@ class TensorTransitionDataset(Sequence[TensorTransitionRecord]):
             actions.append(int(record.action_id))
             rewards.append(float(record.reward))
             dones.append(bool(record.done))
+            stage = int(record.metadata.get("action_num", -1))
+            if stage not in (0, 1):
+                raise ValueError(
+                    f"Unsupported action_num '{stage}' encountered in metadata; expected 0 or 1."
+                )
+            stages.append(stage)
+            next_stage = 1 - stage
+            next_stages.append(next_stage)
 
         return {
             "player_cards": np.stack(player_cards, axis=0).astype(np.int64),
@@ -239,4 +254,6 @@ class TensorTransitionDataset(Sequence[TensorTransitionRecord]):
             "actions": np.asarray(actions, dtype=np.int64),
             "rewards": np.asarray(rewards, dtype=np.float32),
             "dones": np.asarray(dones, dtype=np.bool_),
+            "action_stage": np.asarray(stages, dtype=np.int64),
+            "next_action_stage": np.asarray(next_stages, dtype=np.int64),
         }
