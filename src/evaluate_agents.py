@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 import pandas as pd
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,10 +38,10 @@ def evaluate_agent(
     Returns:
         Dict with evaluation metrics
     """
-    print(f"\nEvaluating: {config.experiment_name}")
-    print(f"  Checkpoint: {config.checkpoint_path}")
-    print(f"  Games: {config.num_games} × {config.holes_per_game} holes")
-    print(f"  DQN player seat: {config.dqn_player_id}")
+    print(f"Evaluating: {config.experiment_name} ({config.num_games} games)")
+
+    # Suppress checkpoint loading warning
+    warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*weights_only.*")
 
     # Create simulation config with DQN agent
     sim_config = SimulationConfig(
@@ -122,16 +123,9 @@ def evaluate_agent(
     }
 
     # Print summary
-    print(f"\n{'='*60}")
-    print(f"Results: {config.experiment_name}")
-    print(f"{'='*60}")
-    print(f"DQN Agent ({dqn_stats['player_type']}):")
-    print(f"  Win rate: {dqn_stats['win_rate']:.1%}")
-    print(f"  Avg score: {dqn_stats['score_mean']:.2f} ± {dqn_stats['score_std']:.2f}")
-    print(f"  Avg rank: {dqn_stats['rank_mean']:.2f}")
-    print(f"\nOpponents (aggregated):")
-    print(f"  Avg score: {opponent_stats['score_mean']:.2f} ± {opponent_stats['score_std']:.2f}")
-    print(f"  Avg rank: {opponent_stats['rank_mean']:.2f}")
+    print(f"  → Win rate: {dqn_stats['win_rate']:.1%} | "
+          f"Score: {dqn_stats['score_mean']:.1f}±{dqn_stats['score_std']:.1f} | "
+          f"Rank: {dqn_stats['rank_mean']:.2f}")
 
     # Save detailed results if output dir provided
     if config.output_dir:
@@ -145,8 +139,6 @@ def evaluate_agent(
         summary_json = config.output_dir / f"{config.experiment_name}_summary.json"
         with summary_json.open("w") as f:
             json.dump(summary, f, indent=2)
-
-        print(f"\nSaved results to: {config.output_dir}")
 
     return summary
 
@@ -176,15 +168,13 @@ def evaluate_multiple_agents(
     """
     results = []
 
-    print(f"\n{'#'*80}")
-    print(f"EVALUATING {len(checkpoint_dirs)} AGENTS")
-    print(f"{'#'*80}\n")
+    print(f"\nEvaluating {len(checkpoint_dirs)} agents ({num_games} games each)...\n")
 
     for i, checkpoint_dir in enumerate(checkpoint_dirs, 1):
         checkpoint_path = checkpoint_dir / "offline_dqn.pt"
 
         if not checkpoint_path.exists():
-            print(f"[{i}/{len(checkpoint_dirs)}] SKIP: Checkpoint not found at {checkpoint_path}")
+            print(f"[{i}/{len(checkpoint_dirs)}] SKIP: {checkpoint_dir.name}")
             continue
 
         experiment_name = checkpoint_dir.name
@@ -200,7 +190,7 @@ def evaluate_multiple_agents(
             output_dir=output_dir,
         )
 
-        print(f"\n[{i}/{len(checkpoint_dirs)}] Evaluating: {experiment_name}")
+        print(f"[{i}/{len(checkpoint_dirs)}] ", end="")
 
         try:
             summary = evaluate_agent(eval_config)
