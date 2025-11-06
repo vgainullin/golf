@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import json
 import multiprocessing as mp
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
 
 try:
     import torch
@@ -20,9 +20,11 @@ from collections.abc import MutableSequence
 from collections import namedtuple
 from collections import deque
 from src.qtransformer import QTransformer, ReplayBuffer, CardEmbedding, train_episode
-from src.tensor_logger import TensorTransitionLogger
+from src.tensor_logger import TensorTransitionLogger, decode_action_id
+from src.tensor_dataset import tensor_to_player_tokens
 
-
+if TYPE_CHECKING:  # pragma: no cover
+    from .offline_agent import OfflineDQAgent
 
 
 Card = namedtuple('Card', ['rank', 'suit'])
@@ -45,6 +47,9 @@ class SimulationConfig:
     log_tensors: bool = False
     tensor_log_dir: Path | str = Path("data")
     tensor_log_prefix: str = DEFAULT_TENSOR_LOG_PREFIX
+    dqn_player_id: Optional[int] = None
+    dqn_checkpoint: Optional[str] = None
+    dqn_device: str = "auto"
 
 
 @dataclass
@@ -424,6 +429,7 @@ def encode_pos_tuple(pos):
         pos_int = None
     return pos_int
 
+
 def calc_opt_heuristic_position(player, holding_card, random_action=False):
     """
     Calculates the optimal position to place the holding card for a given player.
@@ -544,10 +550,13 @@ def play_single_turn(
     hole,
     round_num,
     transition_logger: TensorTransitionLogger | None = None,
+    offline_agent: "OfflineDQAgent | None" = None,
 ):
     player = golf.players[player_id]
     state_tensor = None
-    if transition_logger is not None and hasattr(golf, "encode_golf_tensor"):
+    if hasattr(golf, "encode_golf_tensor") and (
+        transition_logger is not None or player.type == 'OfflineDQN'
+    ):
         state_tensor = golf.encode_golf_tensor()
 
     # Determine action based on player type
@@ -566,6 +575,68 @@ def play_single_turn(
             pos = None if pos == 'None' else int(pos)
         else:
             action, pos, reward = get_player_action(deepcopy(golf), player_id, action_num, rank_cutoff, take_random_action=True)
+    elif player.type == 'OfflineDQN':
+        if offline_agent is None:
+            raise RuntimeError("Offline DQN agent not provided. Pass offline_agent parameter to play_single_turn.")
+        if state_tensor is None:
+            if not hasattr(golf, "encode_golf_tensor"):
+                raise RuntimeError("Golf environment does not support tensor encoding required by Offline DQN agent.")
+            state_tensor = golf.encode_golf_tensor()
+        cards, holding, discard_top = tensor_to_player_tokens(
+            state_tensor,
+            player_id=player_id,
+            num_players=golf.num_players,
+        )
+        state_tokens = np.concatenate(
+            (
+                cards.astype(np.int64, copy=False),
+                np.asarray([holding, discard_top], dtype=np.int64),
+            )
+        )
+        action_id = offline_agent.select_action(state_tokens, action_num)
+
+        # Validate action_id range (0-15 for NUM_ACTIONS=16)
+        if not (0 <= action_id < 16):
+            action, pos, reward = get_player_action(
+                deepcopy(golf),
+                player_id,
+                action_num,
+                rank_cutoff,
+                take_random_action=True,
+            )
+        else:
+            sel_action_num, action, position = decode_action_id(action_id)
+            if sel_action_num != action_num:
+                raise RuntimeError(
+                    f"Offline DQN agent produced action for stage {sel_action_num} during stage {action_num}."
+                )
+            pos = None if position is None else int(position)
+            valid = True
+            if action_num == 0:
+                if action == 0 and len(golf.discard) == 0:
+                    valid = False
+                elif action == 1 and len(golf.deck) == 0:
+                    valid = False
+            elif action_num == 1:
+                if action == 0 and pos is None:
+                    valid = False
+                elif action == 1:
+                    if pos is None:
+                        valid = False
+                    else:
+                        row, col = divmod(pos, 3)
+                        if player.open_cards[row][col] != "?":
+                            valid = False
+            if not valid:
+                action, pos, reward = get_player_action(
+                    deepcopy(golf),
+                    player_id,
+                    action_num,
+                    rank_cutoff,
+                    take_random_action=True,
+                )
+            else:
+                reward = 0
     else:
         raise ValueError(f"Error: Player type '{player.type}' not recognized.")
 
@@ -619,6 +690,7 @@ def play_game(
     verbose: bool = False,
     shuffle: bool = True,
     transition_logger: TensorTransitionLogger | None = None,
+    offline_agent: "OfflineDQAgent | None" = None,
 ):
     initial_shuffle_signature: Tuple[Tuple[str, str], ...] = tuple()
     if shuffle:
@@ -667,6 +739,7 @@ def play_game(
                 hole=hole,
                 round_num=round_num,
                 transition_logger=transition_logger,
+                offline_agent=offline_agent,
             )
 
             golf.players[player_id].gather_game_state(golf)
@@ -682,6 +755,7 @@ def play_game(
                 hole=hole,
                 round_num=round_num,
                 transition_logger=transition_logger,
+                offline_agent=offline_agent,
             )
 
             if len(golf.deck) < golf.num_players + 2:
@@ -731,13 +805,22 @@ def _init_random_seed(seed: Optional[int]) -> None:
         torch.manual_seed(seed)
 
 
-def _default_player_roster() -> List[Player]:
-    return [
+def _default_player_roster(dqn_player_id: Optional[int] = None) -> List[Player]:
+    roster = [
         Player(name="PL1", id=0, type='Random'),
         Player(name="PL2", id=1, type='Heuristic'),
         Player(name="PL3", id=2, type='Random'),
         Player(name="PL4", id=3, type='Heuristic'),
     ]
+    if dqn_player_id is not None:
+        if dqn_player_id < 0 or dqn_player_id >= len(roster):
+            raise ValueError(f"dqn_player_id {dqn_player_id} out of range for roster size {len(roster)}")
+        roster[dqn_player_id] = Player(
+            name=f"DQN_{dqn_player_id}",
+            id=dqn_player_id,
+            type='OfflineDQN',
+        )
+    return roster
 
 
 def run_simulation(
@@ -768,6 +851,9 @@ def run_simulation(
             log_tensors=bool(log_tensors),
             tensor_log_dir=tensor_log_dir,
             tensor_log_prefix=tensor_log_prefix,
+            dqn_player_id=None,
+            dqn_checkpoint=None,
+            dqn_device="auto",
         )
 
     effective_seed = seed if seed is not None else random.randint(0, 2**32 - 1)
@@ -792,12 +878,22 @@ def run_simulation(
             tensor_log_prefix_val = f"{config.tensor_log_prefix}_worker_{worker_id}"
         else:
             tensor_log_prefix_val = config.tensor_log_prefix
+    agent = None
+    if config.dqn_checkpoint and config.dqn_player_id is not None:
+        from src.offline_agent import OfflineDQAgent
+
+        agent = OfflineDQAgent(
+            Path(config.dqn_checkpoint),
+            device=config.dqn_device,
+        )
+
+    assigned_dqn_player_id = config.dqn_player_id if agent is not None else None
 
     total_games = max(config.num_games, 0)
     for local_game in range(total_games):
         game_number = game_offset + local_game
         for hole in range(1, config.holes_per_game + 1):
-            players = _default_player_roster()
+            players = _default_player_roster(assigned_dqn_player_id)
             golf = Golf(players=list(players), deck_type="French", verbose=config.verbose)
             game_results, shuffle_signature = play_game(
                 golf,
@@ -809,6 +905,7 @@ def run_simulation(
                 verbose=config.verbose,
                 shuffle=config.shuffle,
                 transition_logger=tensor_logger,
+                offline_agent=agent,
             )
             ledger.extend(game_results)
             if shuffle_signature:
@@ -1142,6 +1239,22 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=DEFAULT_TENSOR_LOG_PREFIX,
         help="Filename prefix for tensor transition artifacts.",
     )
+    parser.add_argument(
+        "--dqn-player-id",
+        type=int,
+        help="Seat index (0-3) to control with the offline DQN agent.",
+    )
+    parser.add_argument(
+        "--dqn-checkpoint",
+        type=Path,
+        help="Path to an offline DQN checkpoint to enable the agent.",
+    )
+    parser.add_argument(
+        "--dqn-device",
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Device on which to run the offline DQN agent.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1152,6 +1265,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     verbose = args.verbose
 
     output_dir = args.output_dir
+    dqn_checkpoint = args.dqn_checkpoint
+    dqn_player_id = args.dqn_player_id
+    if not dqn_checkpoint or dqn_player_id is None:
+        dqn_checkpoint = None
+        dqn_player_id = None
     config = SimulationConfig(
         num_games=max(args.games, 0),
         holes_per_game=max(args.holes, 0),
@@ -1162,6 +1280,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         log_tensors=args.log_tensors,
         tensor_log_dir=args.tensor_log_dir,
         tensor_log_prefix=args.tensor_log_prefix,
+        dqn_player_id=dqn_player_id,
+        dqn_checkpoint=str(dqn_checkpoint) if dqn_checkpoint else None,
+        dqn_device=args.dqn_device,
     )
 
     results = run_simulations_concurrently(
