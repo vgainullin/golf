@@ -80,6 +80,53 @@ with 52 representing an unknown card). Each `TensorTransitionRecord` also
 exposes the original metadata and decoded `(action_num, action, position)`
 tuple via `record.action_tuple()` when you need human-readable actions.
 
+### Offline DQN Training
+
+Train DQN agents on collected transitions:
+
+```bash
+# Single training run
+python -m src.dqn_offline \
+  --archive-prefix tmp/tensor_logs_batch/tensor_transitions_combined \
+  --output-dir tmp/my_model \
+  --epochs 20
+
+# Hyperparameter sweep (train multiple agents)
+python -m src.experiment_runner \
+  --config configs/experiment_quick.json \
+  --output-dir tmp/experiments \
+  --epochs 20
+```
+
+### Evaluating DQN Agents
+
+Test trained agents against baseline players:
+
+```bash
+# Evaluate all experiments
+python -m src.evaluate_agents \
+  --experiments-dir tmp/experiments \
+  --output-dir tmp/evaluations \
+  --games 100
+
+# Evaluate single checkpoint
+python -m src.evaluate_agents \
+  --checkpoint tmp/experiments/exp_001_.../offline_dqn.pt \
+  --games 100
+```
+
+### Analyzing Results
+
+Generate training curves and comparison tables:
+
+```bash
+python -m src.analyze_experiments \
+  --experiments-dir tmp/experiments \
+  --output-dir tmp/analysis
+```
+
+See `configs/README_TRAINING_PIPELINE.md` for detailed documentation.
+
 ## Game Parameters
 
 You can modify various game parameters in the simulation:
