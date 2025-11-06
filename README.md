@@ -115,15 +115,25 @@ python -m src.evaluate_agents \
   --games 100
 ```
 
+This generates:
+- `evaluation_report.txt` - Ranked models with performance, training metrics, and hyperparameters
+- `agent_comparison.csv` - Tabular comparison of all agents
+- Individual game results and summaries per experiment
+
 ### Analyzing Results
 
-Generate training curves and comparison tables:
+Generate training curves and hyperparameter analysis:
 
 ```bash
 python -m src.analyze_experiments \
   --experiments-dir tmp/experiments \
   --output-dir tmp/analysis
 ```
+
+This generates:
+- `training_curves_all.png` - Loss curves for all experiments
+- `hyperparameter_analysis.csv` - Performance vs hyperparameters
+- Heatmaps showing parameter interactions
 
 See `configs/README_TRAINING_PIPELINE.md` for detailed documentation.
 
