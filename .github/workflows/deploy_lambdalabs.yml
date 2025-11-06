@@ -1,0 +1,95 @@
+name: Deploy to LambdaLabs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      LL_API_KEY: ${{secrets.LL_API_KEY}}
+      HUGGING_FACE_HUB_TOKEN: ${{secrets.HUGGING_FACE_HUB_TOKEN}}
+      WANDB_API_KEY: ${{secrets.WANDB_API_KEY}}
+      WANDB_ENTITY: ${{secrets.WANDB_ENTITY}}
+      WANDB_PROJECT: ${{secrets.WANDB_PROJECT}}
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Provision LambdaLabs Instance
+      run: |
+        # Launch an instance
+        curl https://cloud.lambdalabs.com/api/v1/ssh-keys --fail -u $LL_API_KEY: -X POST -d '{"name": "dynamic_ssh"}'   | jq -r '.data.private_key' > key.pem
+
+        chmod 400 key.pem
+        ls -lht key.pem
+
+        echo "---"
+        launch_response=$(curl -X POST -H "Authorization: Bearer $LL_API_KEY" \
+                        -H "Content-Type: application/json" \
+                        -d '{"instance_type_name": "gpu_1x_a10","region_name": "us-east-1","quantity": "1","name": "training-node-1","ssh_key_names":["dynamic_ssh"],"file_system_names":["fs1"]}'\
+                        https://cloud.lambdalabs.com/api/v1/instance-operations/launch)
+
+        instance_id=$(echo $launch_response | jq -r '.data.instance_ids[0]')
+        echo $launch_response
+        echo "---"
+        echo $instance_id
+
+        # Wait for instance to be ready
+        while true; do
+          instance_status_resp=$(curl -X GET -H "Authorization: Bearer $LL_API_KEY" https://cloud.lambdalabs.com/api/v1/instances/$instance_id)
+          # echo $instance_status_resp
+          instance_status=$(echo $instance_status_resp | jq -r '.data.status')
+          echo "---status---"
+          echo $instance_status
+          if [ "$instance_status" = "active" ]; then
+            break
+          fi
+          sleep 10
+        done
+
+        # Get instance details
+
+        instance_details=$(curl -X GET -H "Authorization: Bearer $LL_API_KEY" https://cloud.lambdalabs.com/api/v1/instances/$instance_id)
+        instance_ip=$(echo $instance_details | jq -r '.data.ip')
+        echo $instance_ip
+        echo "HUGGING_FACE_HUB_TOKEN=$HUGGING_FACE_HUB_TOKEN" >> .env
+        echo "WANDB_API_KEY=$WANDB_API_KEY" >> .env
+        echo "WANDB_ENTITY=$WANDB_ENTITY" >> .env
+        echo "WANDB_PROJECT=$WANDB_PROJECT" >> .env
+        echo "XLA_FLAGS=--xla_gpu_cuda_data_dir=/usr/lib/cuda" >> .env
+        # Deploy code
+        scp -i key.pem -o StrictHostKeyChecking=no Dockerfile ./.env lambda_env.yaml train_citation_classifier.py requirements.txt ubuntu@$instance_ip:/home/ubuntu/.
+
+        echo "---scp done---"
+        ssh -i key.pem -o StrictHostKeyChecking=no ubuntu@$instance_ip << 'EOF'
+          sudo apt-get install git
+          export $(xargs <.env)
+          which python
+          python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU')); print(tf.__version__)"
+          python -c "import tensorflow as tf; print(tf.test.is_built_with_cuda()); print('-'*20); print(tf.config.list_logical_devices('GPU'))"
+          pip install -r requirements.txt
+          git config --global credential.helper store
+          huggingface-cli login --token $HUGGING_FACE_HUB_TOKEN --add-to-git-credential
+          wandb login
+          python train_citation_classifier.py
+
+        EOF
+
+    - name: Terminate Instance
+      if: always()
+      run: |
+
+
+        # Get instance details
+        instance_status_resp=$(curl -X GET -H "Authorization: Bearer $LL_API_KEY" https://cloud.lambdalabs.com/api/v1/instances)
+        echo $instance_status_resp
+        instance_id=$(echo $instance_status_resp | jq -r '.data[0].id')
+        echo $instance_id
+        curl -X POST -H "Authorization: Bearer $LL_API_KEY" \
+          -d "{\"instance_ids\":[\"$instance_id\"]}" \
+          https://cloud.lambdalabs.com/api/v1/instance-operations/terminate
+
+        # Delete ssh keys
+        #dynamic_ssh_id=$(curl https://cloud.lambdalabs.com/api/v1/ssh-keys  -X GET -H "Authorization: Bearer $LL_API_KEY" | jq -r '.data | map(select(.name == "dynamic_ssh")) | .[0].id')
+        #curl https://cloud.lambdalabs.com/api/v1/ssh-keys/$dynamic_ssh_id -X DELETE -H "Authorization: Bearer $LL_API_KEY"
