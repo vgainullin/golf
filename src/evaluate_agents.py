@@ -60,6 +60,15 @@ def evaluate_agent(
     # Parse results into DataFrame
     df = pd.DataFrame(results.ledger)
 
+    # Add player_type column
+    player_types = {0: "Random", 1: "Heuristic", 2: "Random", 3: "Heuristic"}
+    if config.dqn_player_id is not None:
+        player_types[config.dqn_player_id] = "OfflineDQN"
+    df["player_type"] = df["player_id"].map(player_types)
+
+    # Calculate rank for each game (lower score = better rank in golf)
+    df["rank"] = df.groupby(["game", "hole"])["score"].rank(method="min").astype(int)
+
     # Compute per-player statistics
     player_stats = []
     for player_id in range(4):  # 4 players
