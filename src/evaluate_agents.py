@@ -55,10 +55,10 @@ def evaluate_agent(
     )
 
     # Run simulation
-    results = run_simulation(config=sim_config, worker_id=None)
+    results = run_simulation(config=sim_config, worker_id=0)
 
     # Parse results into DataFrame
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(results.ledger)
 
     # Compute per-player statistics
     player_stats = []
