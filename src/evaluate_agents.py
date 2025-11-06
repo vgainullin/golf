@@ -207,14 +207,72 @@ def evaluate_multiple_agents(
     return results
 
 
+def generate_text_report(df: pd.DataFrame, output_file: Path) -> None:
+    """Generate a human-readable text report ranking models.
+
+    Args:
+        df: DataFrame with comparison data
+        output_file: Path to save the report
+    """
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_file.open("w") as f:
+        f.write("=" * 80 + "\n")
+        f.write("DQN AGENT EVALUATION REPORT\n")
+        f.write("=" * 80 + "\n\n")
+
+        f.write(f"Total Agents Evaluated: {len(df)}\n")
+        f.write(f"Ranked by: Win Rate (primary), Score Delta (secondary)\n\n")
+
+        for rank, row in enumerate(df.itertuples(), 1):
+            f.write(f"\n{'#' * 80}\n")
+            f.write(f"RANK {rank}: {row.experiment}\n")
+            f.write(f"{'#' * 80}\n\n")
+
+            # Simulation Performance
+            f.write("SIMULATION PERFORMANCE:\n")
+            f.write(f"  Win Rate:           {row.win_rate:.2%}\n")
+            f.write(f"  DQN Score:          {row.dqn_score_mean:.2f} ± {row.dqn_score_std:.2f}\n")
+            f.write(f"  Opponent Score:     {row.opponent_score_mean:.2f}\n")
+            f.write(f"  Score Delta:        {row.score_delta:+.2f} (lower is better)\n")
+            f.write(f"  DQN Avg Rank:       {row.dqn_rank_mean:.2f}\n")
+            f.write(f"  Opponent Avg Rank:  {row.opponent_rank_mean:.2f}\n\n")
+
+            # Training Metrics
+            if hasattr(row, "best_val_loss") and not pd.isna(row.best_val_loss):
+                f.write("TRAINING METRICS:\n")
+                f.write(f"  Best Val Loss:      {row.best_val_loss:.4f}\n")
+                f.write(f"  Final Val Loss:     {row.final_val_loss:.4f}\n")
+                f.write(f"  Final Train Loss:   {row.final_train_loss:.4f}\n")
+                f.write(f"  Epochs Trained:     {int(row.epochs_trained)}\n\n")
+
+            # Hyperparameters
+            if hasattr(row, "learning_rate") and not pd.isna(row.learning_rate):
+                f.write("HYPERPARAMETERS:\n")
+                f.write(f"  Learning Rate:      {row.learning_rate:.0e}\n")
+                f.write(f"  Batch Size:         {int(row.batch_size)}\n")
+                f.write(f"  Hidden Dim:         {int(row.hidden_dim)}\n")
+                f.write(f"  Embedding Dim:      {int(row.embedding_dim)}\n")
+                f.write(f"  Gamma:              {row.gamma:.2f}\n")
+                f.write(f"  Weight Decay:       {row.weight_decay:.0e}\n")
+
+        f.write(f"\n{'=' * 80}\n")
+        f.write("END OF REPORT\n")
+        f.write(f"{'=' * 80}\n")
+
+    print(f"\nSaved evaluation report to: {output_file}")
+
+
 def compare_agents(
     evaluation_results: List[Dict[str, Any]],
+    experiments_dir: Optional[Path] = None,
     output_file: Optional[Path] = None,
 ) -> pd.DataFrame:
     """Create a comparison table of agent performance.
 
     Args:
         evaluation_results: List of evaluation summaries
+        experiments_dir: Directory with experiment configs and training history
         output_file: Optional path to save comparison CSV
 
     Returns:
@@ -239,6 +297,36 @@ def compare_agents(
             "opponent_rank_mean": opponent_stats.get("rank_mean", 0.0),
             "score_delta": dqn_stats.get("score_mean", 0.0) - opponent_stats.get("score_mean", 0.0),
         }
+
+        # Load training history and config if available
+        if experiments_dir:
+            exp_dir = experiments_dir / result["experiment_name"]
+
+            # Load training history
+            history_file = exp_dir / "training_history.json"
+            if history_file.exists():
+                with history_file.open() as f:
+                    history = json.load(f)
+                if history:
+                    # Get best and final metrics
+                    val_losses = [h.get("val_loss", float("inf")) for h in history]
+                    row["best_val_loss"] = min(val_losses)
+                    row["final_val_loss"] = history[-1].get("val_loss", float("nan"))
+                    row["final_train_loss"] = history[-1].get("train_loss", float("nan"))
+                    row["epochs_trained"] = len(history)
+
+            # Load hyperparameters
+            config_file = exp_dir / "experiment_config.json"
+            if config_file.exists():
+                with config_file.open() as f:
+                    config = json.load(f)
+                row["learning_rate"] = config.get("learning_rate", float("nan"))
+                row["batch_size"] = config.get("batch_size", float("nan"))
+                row["hidden_dim"] = config.get("hidden_dim", float("nan"))
+                row["embedding_dim"] = config.get("embedding_dim", float("nan"))
+                row["gamma"] = config.get("gamma", float("nan"))
+                row["weight_decay"] = config.get("weight_decay", float("nan"))
+
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -361,9 +449,17 @@ def main(argv: Optional[List[str]] = None) -> None:
         print(f"{'#'*80}\n")
 
         comparison_file = args.output_dir / "agent_comparison.csv"
-        comparison_df = compare_agents(results, output_file=comparison_file)
+        comparison_df = compare_agents(
+            results,
+            experiments_dir=args.experiments_dir,
+            output_file=comparison_file,
+        )
 
         print(comparison_df.to_string(index=False))
+
+        # Generate text report
+        report_file = args.output_dir / "evaluation_report.txt"
+        generate_text_report(comparison_df, report_file)
 
         # Highlight top performers
         if len(comparison_df) > 0:
