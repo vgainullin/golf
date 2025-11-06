@@ -46,7 +46,6 @@ def evaluate_agent(
     sim_config = SimulationConfig(
         num_games=config.num_games,
         holes_per_game=config.holes_per_game,
-        seed=config.seed,
         verbose=False,
         shuffle=True,
         log_tensors=False,
