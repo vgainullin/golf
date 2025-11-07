@@ -74,12 +74,13 @@ def evaluate_self_play(
         else:
             rotation_offset = 0
 
-        # Create player roster with rotation
+        # Compute agent-to-seat mapping for this game
         from src.simulation import Player
 
-        players = []
         agent_to_seat = {}
         seat_to_agent = {}
+        player_names = []
+        player_types = []
 
         for seat in range(4):
             agent_idx = (seat - rotation_offset) % num_agents
@@ -87,27 +88,30 @@ def evaluate_self_play(
             if seat < num_agents:
                 # DQN agent
                 agent_name = agent_names[agent_idx]
-                players.append(Player(
-                    name=f"DQN_{agent_idx}",
-                    id=seat,
-                    type="OfflineDQN"
-                ))
+                player_names.append(f"DQN_{agent_idx}")
+                player_types.append("OfflineDQN")
                 agent_to_seat[agent_idx] = seat
                 seat_to_agent[seat] = agent_idx
             else:
                 # Baseline player
                 baseline_idx = seat - num_agents
                 baseline_type = baseline_types[baseline_idx]
-                players.append(Player(
-                    name=f"{baseline_type}_{seat}",
-                    id=seat,
-                    type=baseline_type
-                ))
+                player_names.append(f"{baseline_type}_{seat}")
+                player_types.append(baseline_type)
                 seat_to_agent[seat] = None  # Not a DQN agent
 
-        # Play game
+        # Play each hole with FRESH player objects
         for hole in range(1, holes_per_game + 1):
-            golf = Golf(players=list(players), deck_type="French", verbose=False)
+            # Create fresh players for this hole
+            players = []
+            for seat in range(4):
+                players.append(Player(
+                    name=player_names[seat],
+                    id=seat,
+                    type=player_types[seat]
+                ))
+
+            golf = Golf(players=players, deck_type="French", verbose=False)
 
             # Map agents to correct seats for this game
             agent_array = [None, None, None, None]
@@ -135,8 +139,8 @@ def evaluate_self_play(
                     result["agent_name"] = agent_names[agent_idx]
                     result["agent_type"] = "DQN"
                 else:
-                    result["agent_name"] = players[seat].name
-                    result["agent_type"] = players[seat].type
+                    result["agent_name"] = player_names[seat]
+                    result["agent_type"] = player_types[seat]
                 result["rotation"] = rotation_offset
 
             all_results.extend(game_results)
