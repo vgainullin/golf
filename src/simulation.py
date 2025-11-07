@@ -550,7 +550,7 @@ def play_single_turn(
     hole,
     round_num,
     transition_logger: TensorTransitionLogger | None = None,
-    offline_agent: "OfflineDQAgent | None" = None,
+    offline_agent: "OfflineDQAgent | List[OfflineDQAgent | None] | None" = None,
 ):
     player = golf.players[player_id]
     state_tensor = None
@@ -576,7 +576,13 @@ def play_single_turn(
         else:
             action, pos, reward = get_player_action(deepcopy(golf), player_id, action_num, rank_cutoff, take_random_action=True)
     elif player.type == 'OfflineDQN':
-        if offline_agent is None:
+        # Support both single agent and array of agents
+        if isinstance(offline_agent, list):
+            agent = offline_agent[player_id]
+        else:
+            agent = offline_agent
+
+        if agent is None:
             raise RuntimeError("Offline DQN agent not provided. Pass offline_agent parameter to play_single_turn.")
         if state_tensor is None:
             if not hasattr(golf, "encode_golf_tensor"):
@@ -593,7 +599,7 @@ def play_single_turn(
                 np.asarray([holding, discard_top], dtype=np.int64),
             )
         )
-        action_id = offline_agent.select_action(state_tokens, action_num)
+        action_id = agent.select_action(state_tokens, action_num)
 
         # Validate action_id range (0-15 for NUM_ACTIONS=16)
         if not (0 <= action_id < 16):
@@ -690,7 +696,7 @@ def play_game(
     verbose: bool = False,
     shuffle: bool = True,
     transition_logger: TensorTransitionLogger | None = None,
-    offline_agent: "OfflineDQAgent | None" = None,
+    offline_agent: "OfflineDQAgent | List[OfflineDQAgent | None] | None" = None,
 ):
     initial_shuffle_signature: Tuple[Tuple[str, str], ...] = tuple()
     if shuffle:
