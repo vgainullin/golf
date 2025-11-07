@@ -232,7 +232,8 @@ def generate_text_report(df: pd.DataFrame, output_file: Path) -> None:
             # Simulation Performance
             f.write("SIMULATION PERFORMANCE:\n")
             f.write(f"  Win Rate:           {row.win_rate:.2%}\n")
-            f.write(f"  DQN Score:          {row.dqn_score_mean:.2f} ± {row.dqn_score_std:.2f}\n")
+            f.write(f"  DQN Score (mean):   {row.dqn_score_mean:.2f} ± {row.dqn_score_std:.2f}\n")
+            f.write(f"  DQN Score (median): {row.dqn_score_median:.2f}\n")
             f.write(f"  Opponent Score:     {row.opponent_score_mean:.2f}\n")
             f.write(f"  Score Delta:        {row.score_delta:+.2f} (lower is better)\n")
             f.write(f"  DQN Avg Rank:       {row.dqn_rank_mean:.2f}\n")
@@ -291,6 +292,7 @@ def compare_agents(
             "experiment": result["experiment_name"],
             "win_rate": dqn_stats.get("win_rate", 0.0),
             "dqn_score_mean": dqn_stats.get("score_mean", 0.0),
+            "dqn_score_median": dqn_stats.get("score_median", 0.0),
             "dqn_score_std": dqn_stats.get("score_std", 0.0),
             "dqn_rank_mean": dqn_stats.get("rank_mean", 0.0),
             "opponent_score_mean": opponent_stats.get("score_mean", 0.0),
