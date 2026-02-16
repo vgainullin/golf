@@ -545,41 +545,69 @@ def test_run_simulation_writes_metrics_summary(tmp_path):
     assert metrics_payload["total_states"] == len(result["transition_logger"]._states)
 
 
-def test_rl_vs_heuristic_game():
-    """RL agent should complete a game against Heuristic without errors and learn Q-values."""
+def test_dqn_vs_heuristic_game(tmp_path):
+    """Offline DQN agent should complete a game against Heuristic players without errors."""
+    import torch
+    from dataclasses import asdict
+    from src.dqn_offline import GolfDQN, TrainingConfig
+
     random.seed(42)
     np.random.seed(42)
+    torch.manual_seed(42)
+
+    # Build a synthetic checkpoint with a randomly-initialized model
+    config = TrainingConfig(
+        archive_prefix=tmp_path / "dummy",
+        output_dir=tmp_path,
+        embedding_dim=32,
+        hidden_dim=64,
+    )
+    model = GolfDQN(config.embedding_dim, config.hidden_dim)
+    checkpoint_path = tmp_path / "offline_dqn.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": asdict(config),
+        },
+        checkpoint_path,
+    )
+
+    from src.offline_agent import OfflineDQAgent
+    agent = OfflineDQAgent(checkpoint_path, device="cpu")
 
     players = [
-        Player(name="RL_0", id=0, type='RL'),
+        Player(name="DQN_0", id=0, type='OfflineDQN'),
         Player(name="Heuristic_1", id=1, type='Heuristic'),
-        Player(name="RL_2", id=2, type='RL'),
+        Player(name="Random_2", id=2, type='Random'),
         Player(name="Heuristic_3", id=3, type='Heuristic'),
     ]
 
-    Q = {}
+    all_dqn_scores = []
+    all_heuristic_scores = []
 
-    # Play several holes so the Q-table accumulates entries
     for hole in range(1, 4):
         golf = simulation_mod.Golf(players=list(players), deck_type="French", verbose=False)
         results, _ = simulation_mod.play_game(
             golf,
             game_num=0,
             hole=hole,
-            Q=Q,
+            Q={},
             shuffle=True,
+            offline_agent=agent,
         )
 
-        # Every player should have a result each hole
         assert len(results) == len(players)
         for r in results:
             assert "score" in r
             assert np.isfinite(r["score"])
 
-    # RL agent should have populated the Q-table after 3 holes
-    assert len(Q) > 0, "Q-table should have entries after RL play"
+        for r in results:
+            if r["player_id"] == 0:
+                all_dqn_scores.append(r["score"])
+            elif r["player_id"] in (1, 3):
+                all_heuristic_scores.append(r["score"])
 
-    # Verify scores are numeric for all players
-    rl_scores = [r["score"] for r in results if r["player_id"] in (0, 2)]
-    heuristic_scores = [r["score"] for r in results if r["player_id"] in (1, 3)]
-    assert all(np.isfinite(s) for s in rl_scores + heuristic_scores)
+    # DQN agent (untrained random weights) should still produce valid scores
+    assert len(all_dqn_scores) == 3
+    assert len(all_heuristic_scores) == 6
+    assert all(np.isfinite(s) for s in all_dqn_scores + all_heuristic_scores)
