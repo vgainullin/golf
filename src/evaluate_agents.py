@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 import numpy as np
 
-from .simulation import SimulationConfig, run_simulation
+from .simulation import SimulationConfig, run_simulation, _default_player_roster
 
 
 @dataclass
@@ -61,10 +61,9 @@ def evaluate_agent(
     # Parse results into DataFrame
     df = pd.DataFrame(results.ledger)
 
-    # Add player_type column
-    player_types = {0: "Random", 1: "Heuristic", 2: "Random", 3: "Heuristic"}
-    if config.dqn_player_id is not None:
-        player_types[config.dqn_player_id] = "OfflineDQN"
+    # Add player_type column derived from the actual roster
+    roster = _default_player_roster(config.dqn_player_id)
+    player_types = {p.id: p.type for p in roster}
     df["player_type"] = df["player_id"].map(player_types)
 
     # Calculate rank for each game (lower score = better rank in golf)
@@ -450,10 +449,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         print("AGENT COMPARISON")
         print(f"{'#'*80}\n")
 
+        experiments_dir = args.experiments_dir if not args.checkpoint else None
         comparison_file = args.output_dir / "agent_comparison.csv"
         comparison_df = compare_agents(
             results,
-            experiments_dir=args.experiments_dir,
+            experiments_dir=experiments_dir,
             output_file=comparison_file,
         )
 

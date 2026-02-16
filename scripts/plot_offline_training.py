@@ -217,11 +217,11 @@ def create_q_value_plot(
     action_q_vals: List[torch.Tensor] = []
 
     with torch.no_grad():
-        for states, actions, _, _, _ in loader:
-
+        for states, actions, _, _, _, stages, _ in loader:
             states = states.to(device)
             actions = actions.to(device)
-            q_values = model(states)
+            stages = stages.to(device)
+            q_values = model(states, stages)
             max_q_vals.append(q_values.max(dim=1).values.cpu())
             action_q_vals.append(q_values.gather(1, actions.unsqueeze(1)).squeeze(1).cpu())
 
