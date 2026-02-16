@@ -1,0 +1,71 @@
+[
+  {
+    "experiment_name": "self_play",
+    "checkpoint": "data/self_play/self_play_best.pt",
+    "num_games": 200,
+    "holes_per_game": 9,
+    "dqn_player_id": 0,
+    "dqn_stats": {
+      "player_id": 0,
+      "player_type": "OfflineDQN",
+      "games": 1800,
+      "wins": 272,
+      "win_rate": 0.1511111111111111,
+      "score_mean": 23.746666666666666,
+      "score_std": 8.919019281691956,
+      "score_median": 24.0,
+      "rank_mean": 2.651666666666667
+    },
+    "opponent_stats": {
+      "score_mean": 21.67074074074074,
+      "score_std": 11.711727084557385,
+      "rank_mean": 2.408703703703704
+    },
+    "all_player_stats": [
+      {
+        "player_id": 0,
+        "player_type": "OfflineDQN",
+        "games": 1800,
+        "wins": 272,
+        "win_rate": 0.1511111111111111,
+        "score_mean": 23.746666666666666,
+        "score_std": 8.919019281691956,
+        "score_median": 24.0,
+        "rank_mean": 2.651666666666667
+      },
+      {
+        "player_id": 1,
+        "player_type": "Heuristic",
+        "games": 1800,
+        "wins": 705,
+        "win_rate": 0.39166666666666666,
+        "score_mean": 17.040555555555557,
+        "score_std": 8.52436717364976,
+        "score_median": 17.0,
+        "rank_mean": 1.94
+      },
+      {
+        "player_id": 2,
+        "player_type": "Random",
+        "games": 1800,
+        "wins": 71,
+        "win_rate": 0.03944444444444444,
+        "score_mean": 32.236666666666665,
+        "score_std": 9.609472235382087,
+        "score_median": 32.0,
+        "rank_mean": 3.457222222222222
+      },
+      {
+        "player_id": 3,
+        "player_type": "Heuristic",
+        "games": 1800,
+        "wins": 827,
+        "win_rate": 0.45944444444444443,
+        "score_mean": 15.735,
+        "score_std": 8.849384994788746,
+        "score_median": 15.0,
+        "rank_mean": 1.8288888888888888
+      }
+    ]
+  }
+]
