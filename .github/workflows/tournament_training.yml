@@ -36,6 +36,14 @@ on:
         options:
           - "true"
           - "false"
+      dry_run:
+        description: "Dry run: launch instance, verify SSH, terminate immediately (no training)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 env:
   LL_API_KEY: ${{ secrets.LL_API_KEY }}
@@ -114,7 +122,37 @@ jobs:
           echo "Timeout waiting for instance"
           exit 1
 
+      - name: Dry run - verify SSH and GPU
+        if: inputs.dry_run == 'true'
+        run: |
+          IP="${{ steps.wait.outputs.instance_ip }}"
+          KEY="$SSH_KEY_PATH"
+
+          for i in $(seq 1 20); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i $KEY ubuntu@$IP "echo ok" 2>/dev/null; then
+              break
+            fi
+            echo "Waiting for SSH... attempt $i"
+            sleep 10
+          done
+
+          echo "=== Dry run: verifying instance ==="
+          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP << 'DRYRUN_EOF'
+          echo "--- SSH: OK ---"
+          echo "--- hostname: $(hostname) ---"
+          echo "--- GPU info ---"
+          nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || echo "(no GPU driver)"
+          echo "--- Python ---"
+          python3 --version
+          echo "--- Disk ---"
+          df -h / | tail -1
+          echo "--- RAM ---"
+          free -h | head -2
+          echo "=== Dry run complete ==="
+          DRYRUN_EOF
+
       - name: Setup instance environment
+        if: inputs.dry_run != 'true'
         run: |
           IP="${{ steps.wait.outputs.instance_ip }}"
           KEY="$SSH_KEY_PATH"
@@ -138,6 +176,7 @@ jobs:
           SETUP_EOF
 
       - name: Upload repository
+        if: inputs.dry_run != 'true'
         run: |
           IP="${{ steps.wait.outputs.instance_ip }}"
           KEY="$SSH_KEY_PATH"
@@ -147,6 +186,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP "mkdir -p ~/golf && cd ~/golf && tar xzf ~/golf_repo.tar.gz && pip install -q -e . 2>/dev/null"
 
       - name: Run tournament training
+        if: inputs.dry_run != 'true'
         run: |
           IP="${{ steps.wait.outputs.instance_ip }}"
           KEY="$SSH_KEY_PATH"
@@ -170,7 +210,7 @@ jobs:
           TRAIN_EOF
 
       - name: Download results
-        if: always()
+        if: always() && inputs.dry_run != 'true'
         run: |
           IP="${{ steps.wait.outputs.instance_ip }}"
           KEY="$SSH_KEY_PATH"
@@ -179,7 +219,7 @@ jobs:
           scp -o StrictHostKeyChecking=no -i $KEY "ubuntu@$IP:~/golf/training.log" tournament_results/ 2>/dev/null || true
 
       - name: Upload results artifact
-        if: always()
+        if: always() && inputs.dry_run != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: tournament-results-${{ github.run_id }}
@@ -245,14 +285,23 @@ jobs:
         run: |
           echo "## Tournament Training Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Population: ${{ inputs.population_size }} agents" >> $GITHUB_STEP_SUMMARY
-          echo "- Generations: ${{ inputs.generations }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Episodes/gen: ${{ inputs.episodes_per_gen }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f tournament_results/tournament_history.json ]; then
-            echo "### Results" >> $GITHUB_STEP_SUMMARY
-            python3 -c "
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "### Dry Run" >> $GITHUB_STEP_SUMMARY
+            echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+            echo "- API auth: OK" >> $GITHUB_STEP_SUMMARY
+            echo "- SSH key registration: OK" >> $GITHUB_STEP_SUMMARY
+            echo "- Instance launch: OK" >> $GITHUB_STEP_SUMMARY
+            echo "- SSH connectivity: OK" >> $GITHUB_STEP_SUMMARY
+            echo "- Termination: verified in cleanup step" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Population: ${{ inputs.population_size }} agents" >> $GITHUB_STEP_SUMMARY
+            echo "- Generations: ${{ inputs.generations }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Episodes/gen: ${{ inputs.episodes_per_gen }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            if [ -f tournament_results/tournament_history.json ]; then
+              echo "### Results" >> $GITHUB_STEP_SUMMARY
+              python3 -c "
           import json
           h = json.load(open('tournament_results/tournament_history.json'))
           if h:
@@ -261,4 +310,5 @@ jobs:
               print(f'- Champion ELO: {last[\"best_elo\"]:.0f}')
               print(f'- vs Heuristic score: {last.get(\"best_vs_heuristic\", \"N/A\")}')
           " >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+            fi
           fi
