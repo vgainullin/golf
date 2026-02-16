@@ -397,7 +397,12 @@ class Golf:
             elif action_term == "discard" and pos_tuple:
                 # Do not place a card, instead flip a new card
                 if self.players[player_id].open_cards[pos_tuple[0]][pos_tuple[1]] != "?":
-                    print("ERROR Already flipped this card")
+                    # Card already flipped — discard the held card to recover
+                    self.discard.append(self.players[player_id].holding)
+                    self.face_card = self.players[player_id].holding
+                    self.players[player_id].holding = None
+                    self.players[player_id].action_num = 0
+                    return -2  # Penalty for illegal action
                 else:
                     self.discard.append(self.players[player_id].holding)
                     self.face_card = self.players[player_id].holding
@@ -405,8 +410,13 @@ class Golf:
                     self.players[player_id].open_cards[pos_tuple[0]][pos_tuple[1]] = self.players[player_id].cards[pos_tuple[0]][pos_tuple[1]]
                     self.players[player_id].action_num = 0
             else:
-                print("ERROR No condition met")
-                return 0  # Return a default reward
+                # No valid condition — discard the held card to recover
+                if self.players[player_id].holding:
+                    self.discard.append(self.players[player_id].holding)
+                    self.face_card = self.players[player_id].holding
+                    self.players[player_id].holding = None
+                self.players[player_id].action_num = 0
+                return -2  # Penalty for illegal action
         self.players[player_id].calculate_score()
         reward = score_before_action - self.players[player_id].score
         return reward
@@ -539,6 +549,42 @@ epsilon = 0.1  # Exploration rate
 alpha = 0.1  # Learning rate
 gamma = 0.9  # Discount factor
 
+def _validate_dqn_action(action_id, action_num, player, golf):
+    """Return True if the DQN's action_id is legal for the current game state."""
+    if not (0 <= action_id < 16):
+        return False
+    sel_action_num, action, position = decode_action_id(action_id)
+    if sel_action_num != action_num:
+        return False
+    pos = None if position is None else int(position)
+
+    if action_num == 0:
+        # Stage 0: draw decision
+        if action == 0 and len(golf.discard) == 0:
+            return False
+        if action == 1 and len(golf.deck) == 0:
+            return False
+    elif action_num == 1:
+        # Stage 1: place or discard
+        if action == 0:
+            # "place" — must have a valid board position
+            if pos is None:
+                return False
+            row, col = divmod(pos, 3)
+            if row < 0 or row > 1 or col < 0 or col > 2:
+                return False
+        elif action == 1:
+            # "discard" — must target an unflipped card
+            if pos is None:
+                return False
+            row, col = divmod(pos, 3)
+            if row < 0 or row > 1 or col < 0 or col > 2:
+                return False
+            if player.open_cards[row][col] != "?":
+                return False
+    return True
+
+
 def play_single_turn(
     golf,
     player_id,
@@ -602,8 +648,15 @@ def play_single_turn(
         )
         action_id = agent.select_action(state_tokens, action_num)
 
-        # Validate action_id range (0-15 for NUM_ACTIONS=16)
-        if not (0 <= action_id < 16):
+        # Validate the DQN's chosen action; fall back to a legal random
+        # action with a penalty if the choice is illegal.
+        valid = _validate_dqn_action(action_id, action_num, player, golf)
+        if valid:
+            sel_action_num, action, position = decode_action_id(action_id)
+            pos = None if position is None else int(position)
+            reward = 0
+        else:
+            # Penalty for picking an illegal action
             action, pos, reward = get_player_action(
                 deepcopy(golf),
                 player_id,
@@ -611,39 +664,7 @@ def play_single_turn(
                 rank_cutoff,
                 take_random_action=True,
             )
-        else:
-            sel_action_num, action, position = decode_action_id(action_id)
-            if sel_action_num != action_num:
-                raise RuntimeError(
-                    f"Offline DQN agent produced action for stage {sel_action_num} during stage {action_num}."
-                )
-            pos = None if position is None else int(position)
-            valid = True
-            if action_num == 0:
-                if action == 0 and len(golf.discard) == 0:
-                    valid = False
-                elif action == 1 and len(golf.deck) == 0:
-                    valid = False
-            elif action_num == 1:
-                if action == 0 and pos is None:
-                    valid = False
-                elif action == 1:
-                    if pos is None:
-                        valid = False
-                    else:
-                        row, col = divmod(pos, 3)
-                        if player.open_cards[row][col] != "?":
-                            valid = False
-            if not valid:
-                action, pos, reward = get_player_action(
-                    deepcopy(golf),
-                    player_id,
-                    action_num,
-                    rank_cutoff,
-                    take_random_action=True,
-                )
-            else:
-                reward = 0
+            reward = -2
     else:
         raise ValueError(f"Error: Player type '{player.type}' not recognized.")
 
