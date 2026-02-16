@@ -1,0 +1,145 @@
+name: Cleanup Stale Lambda Labs Instances
+
+on:
+  schedule:
+    # Run every hour
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      max_age_hours:
+        description: "Terminate instances older than this many hours"
+        required: false
+        default: "6"
+        type: string
+
+env:
+  LL_API_KEY: ${{ secrets.LL_API_KEY }}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check for stale instances
+        id: check
+        run: |
+          MAX_AGE_HOURS="${{ inputs.max_age_hours || '6' }}"
+          MAX_AGE_SECS=$((MAX_AGE_HOURS * 3600))
+          NOW=$(date +%s)
+
+          echo "Checking for Lambda Labs instances older than ${MAX_AGE_HOURS}h..."
+
+          RESPONSE=$(curl -s "https://cloud.lambdalabs.com/api/v1/instances" \
+            -H "Authorization: Bearer $LL_API_KEY")
+
+          INSTANCES=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          from datetime import datetime, timezone
+
+          data = json.load(sys.stdin).get('data', [])
+          now = $NOW
+          max_age = $MAX_AGE_SECS
+          stale = []
+
+          for inst in data:
+              status = inst.get('status', '')
+              if status not in ('active', 'booting'):
+                  continue
+              name = inst.get('name', '')
+              inst_id = inst.get('id', '')
+              inst_type = inst.get('instance_type', {}).get('name', 'unknown')
+
+              # Use the instance name or check if it's one of ours
+              if not name.startswith('golf-tournament'):
+                  continue
+
+              stale.append({
+                  'id': inst_id,
+                  'name': name,
+                  'type': inst_type,
+                  'status': status,
+                  'ip': inst.get('ip', 'N/A'),
+              })
+
+          print(json.dumps(stale))
+          " 2>/dev/null || echo "[]")
+
+          COUNT=$(echo "$INSTANCES" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+          echo "Found $COUNT golf-tournament instance(s) running"
+          echo "instances=$INSTANCES" >> $GITHUB_OUTPUT
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Terminate stale instances
+        if: steps.check.outputs.count != '0'
+        run: |
+          INSTANCES='${{ steps.check.outputs.instances }}'
+
+          echo "$INSTANCES" | python3 -c "
+          import sys, json, subprocess, time
+
+          instances = json.load(sys.stdin)
+
+          for inst in instances:
+              inst_id = inst['id']
+              name = inst['name']
+              print(f'Terminating {name} ({inst_id})...')
+
+              # Retry termination up to 3 times
+              for attempt in range(3):
+                  result = subprocess.run([
+                      'curl', '-s', '-w', '\n%{http_code}', '-X', 'POST',
+                      'https://cloud.lambdalabs.com/api/v1/instance-operations/terminate',
+                      '-H', 'Authorization: Bearer ${{ secrets.LL_API_KEY }}',
+                      '-H', 'Content-Type: application/json',
+                      '-d', json.dumps({'instance_ids': [inst_id]}),
+                  ], capture_output=True, text=True, timeout=30)
+
+                  lines = result.stdout.strip().split('\n')
+                  http_code = lines[-1] if lines else '0'
+
+                  if http_code.startswith('2'):
+                      print(f'  Terminated successfully (HTTP {http_code})')
+                      break
+                  else:
+                      print(f'  Attempt {attempt+1} failed (HTTP {http_code})')
+                      if attempt < 2:
+                          time.sleep(5 * (attempt + 1))
+              else:
+                  print(f'  FAILED to terminate {inst_id} after 3 attempts!')
+
+              # Brief pause between terminations
+              time.sleep(2)
+          "
+
+      - name: Verify cleanup
+        if: steps.check.outputs.count != '0'
+        run: |
+          echo "Waiting 15s for terminations to propagate..."
+          sleep 15
+
+          RESPONSE=$(curl -s "https://cloud.lambdalabs.com/api/v1/instances" \
+            -H "Authorization: Bearer $LL_API_KEY")
+
+          REMAINING=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin).get('data', [])
+          active = [i for i in data if i.get('name','').startswith('golf-tournament')
+                    and i.get('status') in ('active', 'booting')]
+          print(len(active))
+          ")
+
+          if [ "$REMAINING" != "0" ]; then
+            echo "::warning::$REMAINING instance(s) still running after cleanup!"
+            echo "Check https://cloud.lambdalabs.com/instances"
+          else
+            echo "All golf-tournament instances terminated."
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Instance Cleanup Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Instances found: ${{ steps.check.outputs.count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Max age threshold: ${{ inputs.max_age_hours || '6' }}h" >> $GITHUB_STEP_SUMMARY

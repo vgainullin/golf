@@ -105,11 +105,48 @@ def launch_instance(
     return resp
 
 
-def terminate_instance(instance_id: str) -> Dict[str, Any]:
-    """Terminate a running instance."""
-    return _api_call("POST", "instance-operations/terminate", {
-        "instance_ids": [instance_id],
-    })
+def terminate_instance(instance_id: str, retries: int = 4, verify: bool = True) -> Dict[str, Any]:
+    """Terminate a running instance with retries and optional verification."""
+    last_error = None
+    for attempt in range(retries):
+        try:
+            resp = _api_call("POST", "instance-operations/terminate", {
+                "instance_ids": [instance_id],
+            })
+            if "error" not in resp:
+                break
+            last_error = resp.get("error")
+            print(f"  Terminate attempt {attempt + 1} got error: {last_error}")
+        except Exception as e:
+            last_error = e
+            print(f"  Terminate attempt {attempt + 1} failed: {e}")
+
+        if attempt < retries - 1:
+            backoff = 2 ** (attempt + 1)
+            print(f"  Retrying in {backoff}s...")
+            time.sleep(backoff)
+    else:
+        raise RuntimeError(
+            f"Failed to terminate instance {instance_id} after {retries} attempts: {last_error}"
+        )
+
+    if verify:
+        time.sleep(10)
+        for _ in range(3):
+            try:
+                info = get_instance(instance_id)
+                status = info.get("status", "unknown")
+                if status in ("terminated", "unknown"):
+                    print(f"  Instance confirmed terminated (status={status})")
+                    return resp
+                print(f"  Instance still {status}, waiting...")
+                time.sleep(10)
+            except Exception:
+                # Instance not found = terminated
+                return resp
+        print(f"  WARNING: Instance {instance_id} may still be running")
+
+    return resp
 
 
 def get_instance(instance_id: str) -> Dict[str, Any]:
@@ -336,14 +373,14 @@ cd ~/golf && python -m src.tournament \
         return {"status": "error", "error": str(e), "instance_id": instance_id}
 
     finally:
-        # 7. Terminate instance
+        # 7. Terminate instance (with retries and verification)
         if instance_id:
             print(f"Terminating instance {instance_id}...")
             try:
-                terminate_instance(instance_id)
+                terminate_instance(instance_id, retries=4, verify=True)
                 print("  Instance terminated")
             except Exception as e:
-                print(f"  WARNING: Failed to terminate instance {instance_id}: {e}")
+                print(f"  CRITICAL: Failed to terminate instance {instance_id}: {e}")
                 print(f"  Manually terminate at https://cloud.lambdalabs.com/instances")
 
 
