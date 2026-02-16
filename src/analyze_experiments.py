@@ -10,9 +10,9 @@ import pandas as pd
 import numpy as np
 
 try:
-    import matplotlib.pyplot as plt
     import matplotlib
-    matplotlib.use('Agg')  # Non-interactive backend
+    matplotlib.use('Agg')  # Non-interactive backend (must be set before importing pyplot)
+    import matplotlib.pyplot as plt
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False

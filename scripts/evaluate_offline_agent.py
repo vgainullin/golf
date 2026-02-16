@@ -52,7 +52,6 @@ def evaluate_agent(
                 game_idx,
                 hole,
                 q_table,
-                model=None,
                 rank_cutoff=4,
                 verbose=False,
                 shuffle=True,

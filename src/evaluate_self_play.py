@@ -65,7 +65,7 @@ def evaluate_self_play(
     print(f"\nRunning {num_games} games ({holes_per_game} holes each)...\n")
 
     all_results = []
-    rotation_period = num_agents if rotate_positions else num_games + 1
+    rotation_period = 4 if rotate_positions else num_games + 1
 
     for game_num in range(num_games):
         # Determine rotation for this game
@@ -82,20 +82,24 @@ def evaluate_self_play(
         player_names = []
         player_types = []
 
-        for seat in range(4):
-            agent_idx = (seat - rotation_offset) % num_agents
+        # Assign DQN agents to rotated seats
+        dqn_seats = set()
+        for agent_idx in range(num_agents):
+            seat = (agent_idx + rotation_offset) % 4
+            agent_to_seat[agent_idx] = seat
+            seat_to_agent[seat] = agent_idx
+            dqn_seats.add(seat)
 
-            if seat < num_agents:
-                # DQN agent
-                agent_name = agent_names[agent_idx]
+        # Fill remaining seats with baseline players
+        baseline_idx = 0
+        for seat in range(4):
+            if seat in dqn_seats:
+                agent_idx = seat_to_agent[seat]
                 player_names.append(f"DQN_{agent_idx}")
                 player_types.append("OfflineDQN")
-                agent_to_seat[agent_idx] = seat
-                seat_to_agent[seat] = agent_idx
             else:
-                # Baseline player
-                baseline_idx = seat - num_agents
                 baseline_type = baseline_types[baseline_idx]
+                baseline_idx += 1
                 player_names.append(f"{baseline_type}_{seat}")
                 player_types.append(baseline_type)
                 seat_to_agent[seat] = None  # Not a DQN agent
@@ -123,7 +127,6 @@ def evaluate_self_play(
                 game_num=game_num,
                 hole=hole,
                 Q={},
-                model=None,
                 rank_cutoff=4,
                 verbose=False,
                 shuffle=True,

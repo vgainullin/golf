@@ -17,15 +17,19 @@ class CardEmbedding(nn.Module):
     def forward(self, card_indices):
         # card_indices shape: (batch_size, sequence_length)
         card_embeds = self.card_embedding(card_indices)
-        
-        # Calculate suit and rank indices
-        suit_indices = torch.div(card_indices, 13, rounding_mode='floor')
-        rank_indices = card_indices % 13
-        
+
+        # Clamp indices to valid range for known cards (0-51).
+        # Index 52 (unknown/hidden) would produce out-of-bounds suit index,
+        # so clamp to 51 for suit/rank decomposition; the card_embedding
+        # already handles index 52 correctly via its own embedding table.
+        clamped = card_indices.clamp(max=51)
+        suit_indices = torch.div(clamped, 13, rounding_mode='floor')
+        rank_indices = clamped % 13
+
         # Get suit and rank embeddings
         suit_embeds = self.suit_embedding(suit_indices)
         rank_embeds = self.rank_embedding(rank_indices)
-        
+
         # Combine all embeddings, ensure the size of card_embed (1, 6, 64) is same as suit_rank_emb (1, 6, 32)
         suit_rank_emb = torch.cat([suit_embeds, rank_embeds], dim=-1)
         return card_embeds + suit_rank_emb

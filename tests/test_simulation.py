@@ -486,7 +486,6 @@ def test_play_game_logs_tensor_transitions(tmp_path):
     logger = simulation_mod.TensorTransitionLogger(tmp_path)
 
     Q = {}
-    model = simulation_mod.QTransformer()
 
     try:
         results = simulation_mod.play_game(
@@ -494,7 +493,6 @@ def test_play_game_logs_tensor_transitions(tmp_path):
             game_num=0,
             hole=1,
             Q=Q,
-            model=model,
             shuffle=False,
             transition_logger=logger,
         )

@@ -17,9 +17,7 @@ except ImportError:  # pragma: no cover - torch is optional for certain test env
 
 import collections
 from collections.abc import MutableSequence
-from collections import namedtuple
 from collections import deque
-from src.qtransformer import QTransformer, ReplayBuffer, CardEmbedding, train_episode
 from src.tensor_logger import TensorTransitionLogger, decode_action_id
 from src.tensor_dataset import tensor_to_player_tokens
 
@@ -351,7 +349,7 @@ class Golf:
         }
         action_num = action_array[0]
         action_term = available_actions[action_array[0]][action_array[1]]
-        if action_array[2] == None:
+        if action_array[2] is None:
             pos_tuple = None
         else:
             pos_tuple = action_array[2] // 3, action_array[2] % 3
@@ -384,7 +382,7 @@ class Golf:
             elif not self.players[player_id].holding:
                 print(f"ERROR, Player should be holding a card {player_id}")
                 return 0  # Return a default reward
-            elif action_term == "place" and pos_tuple != None:
+            elif action_term == "place" and pos_tuple is not None:
                 # remove the card that is being replaced
                 discard_ = self.players[player_id].cards[pos_tuple[0]][pos_tuple[1]]
                 # place it in discard pile
@@ -486,7 +484,7 @@ def get_player_action(game, player_id, action_num, rank_cutoff=5, take_random_ac
                 return 0, None, 0  # Take the face card
         elif player.type == 'Heuristic':
             rank_of_face_card = player.card2rank(game.face_card)
-            rank_match = np.argwhere(player.open_ranks == rank_of_face_card)
+            rank_match = np.argwhere(np.array(player.open_ranks) == rank_of_face_card)
             if player.card_to_score[game.face_card[0]] < rank_cutoff or rank_match.size > 0:
                 return 0, None, 0  # Take the face card
             else:
@@ -512,9 +510,12 @@ def get_player_action(game, player_id, action_num, rank_cutoff=5, take_random_ac
                 available_pos_to_place = np.argwhere(np.isnan(player.scores))
                 if len(available_pos_to_place) > 0:
                     rand_pos = tuple(available_pos_to_place[random.randint(0, len(available_pos_to_place) - 1)])
+                    return rand_action, encode_pos_tuple(rand_pos), 0
                 else:
-                    rand_pos = None
-                return rand_action, encode_pos_tuple(rand_pos), 0
+                    # No unflipped cards to discard onto; fall back to placing
+                    rand_pos, upd_rand_score = calc_opt_heuristic_position(player, player.holding, random_action=True)
+                    reward = current_score - upd_rand_score if upd_rand_score is not None else 0
+                    return 0, encode_pos_tuple(rand_pos), reward
         else:
             available_pos_to_place = np.argwhere(np.isnan(player.scores))
             can_place = len(available_pos_to_place) > 0
@@ -568,7 +569,7 @@ def play_single_turn(
         action, pos, reward = get_player_action(deepcopy(golf), player_id, action_num, rank_cutoff, take_random_action=False)
     elif player.type == 'RL':
         q_state_ = Q.get(f'{action_num}'+state_, {}).items()
-        if q_state_:
+        if q_state_ and random.random() >= epsilon:
             action_pos = max(q_state_, key=lambda x: x[1])[0]
             action, pos = action_pos.split("|")
             action = int(action)
@@ -682,7 +683,8 @@ def play_single_turn(
 
 def update_q_table(Q, action_num, state, new_state, action, pos, reward):
     old_q_value = Q.get(f'{action_num}'+state, {}).get(f"{action}|{pos}", 0)
-    next_max_q_value = max(Q.get(f'{action_num}'+new_state, {}).values(), default=0)
+    next_action_num = 1 - action_num  # 0 -> 1, 1 -> 0
+    next_max_q_value = max(Q.get(f'{next_action_num}'+new_state, {}).values(), default=0)
     new_q_value = old_q_value + alpha * (reward + gamma * next_max_q_value - old_q_value)
     Q.setdefault(f'{action_num}'+state, {})[f"{action}|{pos}"] = new_q_value
 
@@ -691,7 +693,6 @@ def play_game(
     game_num,
     hole,
     Q,
-    model,
     rank_cutoff: int = 4,
     verbose: bool = False,
     shuffle: bool = True,
@@ -708,23 +709,15 @@ def play_game(
     for player in golf.players:
         if player.type == 'CountingHeuristic':
             player.initialize_card_counts()
+            # Count dealt cards (pass face_card=None to avoid counting it multiple times)
             for other_player in golf.players:
-                player.update_card_counts(other_player.cards[0] + other_player.cards[1], golf.face_card)
+                player.update_card_counts(other_player.cards[0] + other_player.cards[1], '?')
+            # Count the face card exactly once
+            player.update_card_counts([], golf.face_card)
 
     # Play rounds
     round_num = 0
     while not golf.game_over:
-        if torch is not None and model is not None:
-            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-            replay_buffer = ReplayBuffer(capacity=10000)
-        else:
-            optimizer = None
-            replay_buffer = None
-
-        epsilon = 0.5
-        batch_size = 32
-        episode_rewards = []
-
         # iterate over all players
         for player_id in range(golf.num_players):
             golf.players[player_id].gather_game_state(golf)
@@ -766,10 +759,15 @@ def play_game(
 
             if len(golf.deck) < golf.num_players + 2:
                 if verbose:
-                    print(f"Deck is empty, creating new deck {player_id}")
-                golf.deck = GolfDeck()
-                golf.shuffle()
-                golf.deal()
+                    print(f"Deck running low, reshuffling discard pile {player_id}")
+                # Reshuffle the discard pile (minus the face card) back into the deck
+                cards_to_reshuffle = [
+                    card for card in golf.discard if card != golf.face_card
+                ]
+                for card in cards_to_reshuffle:
+                    golf.discard._cards.remove(card)
+                golf.deck._cards.extend(cards_to_reshuffle)
+                random.shuffle(golf.deck._cards)
 
             if verbose:
                 print(
@@ -871,8 +869,6 @@ def run_simulation(
     q_table: Dict[str, Dict[str, float]] = {}
     shuffle_history: List[Tuple[Tuple[str, str], ...]] = []
 
-    model = QTransformer() if torch is not None else None
-
     tensor_logger: TensorTransitionLogger | None = None
     tensor_log_dir_path: Path | None = None
     tensor_log_prefix_val: str | None = None
@@ -906,7 +902,6 @@ def run_simulation(
                 game_number,
                 hole,
                 q_table,
-                model,
                 rank_cutoff=config.rank_cutoff,
                 verbose=config.verbose,
                 shuffle=config.shuffle,

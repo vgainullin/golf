@@ -104,7 +104,7 @@ def test_run_simulations_concurrently_falls_back_to_sequential(monkeypatch):
 def test_run_simulation_writes_artifacts(tmp_path, monkeypatch):
     config = SimulationConfig(num_games=1, holes_per_game=1)
 
-    def stub_play_game(golf, game_num, hole, q_table, model, rank_cutoff, **kwargs):
+    def stub_play_game(golf, game_num, hole, q_table, rank_cutoff, **kwargs):
         return ([{
             'worker_id': 3,
             'score': 5,
