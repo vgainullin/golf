@@ -1,76 +1,56 @@
-name: Cleanup Stale Lambda Labs Instances
+name: Verify Instance Cleanup
 
 on:
-  schedule:
-    # Run every hour
-    - cron: "0 * * * *"
-  workflow_dispatch:
-    inputs:
-      max_age_hours:
-        description: "Terminate instances older than this many hours"
-        required: false
-        default: "6"
-        type: string
+  workflow_run:
+    workflows: ["Tournament Training on Lambda Labs"]
+    types: [completed]
+  workflow_dispatch: {}
 
 env:
   LL_API_KEY: ${{ secrets.LL_API_KEY }}
 
 jobs:
-  cleanup:
+  verify-cleanup:
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Check for stale instances
+      - name: Check for surviving instances
         id: check
         run: |
-          MAX_AGE_HOURS="${{ inputs.max_age_hours || '6' }}"
-          MAX_AGE_SECS=$((MAX_AGE_HOURS * 3600))
-          NOW=$(date +%s)
-
-          echo "Checking for Lambda Labs instances older than ${MAX_AGE_HOURS}h..."
+          echo "Checking for any running golf-tournament instances..."
 
           RESPONSE=$(curl -s "https://cloud.lambdalabs.com/api/v1/instances" \
             -H "Authorization: Bearer $LL_API_KEY")
 
           INSTANCES=$(echo "$RESPONSE" | python3 -c "
           import sys, json
-          from datetime import datetime, timezone
 
           data = json.load(sys.stdin).get('data', [])
-          now = $NOW
-          max_age = $MAX_AGE_SECS
-          stale = []
-
+          alive = []
           for inst in data:
               status = inst.get('status', '')
               if status not in ('active', 'booting'):
                   continue
               name = inst.get('name', '')
-              inst_id = inst.get('id', '')
-              inst_type = inst.get('instance_type', {}).get('name', 'unknown')
-
-              # Use the instance name or check if it's one of ours
               if not name.startswith('golf-tournament'):
                   continue
-
-              stale.append({
-                  'id': inst_id,
+              alive.append({
+                  'id': inst.get('id', ''),
                   'name': name,
-                  'type': inst_type,
+                  'type': inst.get('instance_type', {}).get('name', 'unknown'),
                   'status': status,
                   'ip': inst.get('ip', 'N/A'),
               })
-
-          print(json.dumps(stale))
+          print(json.dumps(alive))
           " 2>/dev/null || echo "[]")
 
           COUNT=$(echo "$INSTANCES" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
-          echo "Found $COUNT golf-tournament instance(s) running"
+          echo "Found $COUNT golf-tournament instance(s) still running"
           echo "instances=$INSTANCES" >> $GITHUB_OUTPUT
           echo "count=$COUNT" >> $GITHUB_OUTPUT
 
-      - name: Terminate stale instances
+      - name: Terminate surviving instances
         if: steps.check.outputs.count != '0'
         run: |
           INSTANCES='${{ steps.check.outputs.instances }}'
@@ -85,8 +65,7 @@ jobs:
               name = inst['name']
               print(f'Terminating {name} ({inst_id})...')
 
-              # Retry termination up to 3 times
-              for attempt in range(3):
+              for attempt in range(4):
                   result = subprocess.run([
                       'curl', '-s', '-w', '\n%{http_code}', '-X', 'POST',
                       'https://cloud.lambdalabs.com/api/v1/instance-operations/terminate',
@@ -99,29 +78,27 @@ jobs:
                   http_code = lines[-1] if lines else '0'
 
                   if http_code.startswith('2'):
-                      print(f'  Terminated successfully (HTTP {http_code})')
+                      print(f'  Terminated (HTTP {http_code})')
                       break
                   else:
                       print(f'  Attempt {attempt+1} failed (HTTP {http_code})')
-                      if attempt < 2:
-                          time.sleep(5 * (attempt + 1))
+                      if attempt < 3:
+                          time.sleep(2 ** (attempt + 1))
               else:
-                  print(f'  FAILED to terminate {inst_id} after 3 attempts!')
+                  print(f'  FAILED to terminate {inst_id} after 4 attempts!')
 
-              # Brief pause between terminations
               time.sleep(2)
           "
 
-      - name: Verify cleanup
+      - name: Verify termination
         if: steps.check.outputs.count != '0'
         run: |
           echo "Waiting 15s for terminations to propagate..."
           sleep 15
 
-          RESPONSE=$(curl -s "https://cloud.lambdalabs.com/api/v1/instances" \
-            -H "Authorization: Bearer $LL_API_KEY")
-
-          REMAINING=$(echo "$RESPONSE" | python3 -c "
+          REMAINING=$(curl -s "https://cloud.lambdalabs.com/api/v1/instances" \
+            -H "Authorization: Bearer $LL_API_KEY" \
+            | python3 -c "
           import sys, json
           data = json.load(sys.stdin).get('data', [])
           active = [i for i in data if i.get('name','').startswith('golf-tournament')
@@ -130,16 +107,20 @@ jobs:
           ")
 
           if [ "$REMAINING" != "0" ]; then
-            echo "::warning::$REMAINING instance(s) still running after cleanup!"
-            echo "Check https://cloud.lambdalabs.com/instances"
+            echo "::error::$REMAINING instance(s) still running after cleanup!"
+            echo "::error::Manually terminate at https://cloud.lambdalabs.com/instances"
+            exit 1
           else
-            echo "All golf-tournament instances terminated."
+            echo "All clear - no golf-tournament instances running."
           fi
 
       - name: Summary
         if: always()
         run: |
-          echo "## Instance Cleanup Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Instance Cleanup Verification" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- Instances found: ${{ steps.check.outputs.count }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Max age threshold: ${{ inputs.max_age_hours || '6' }}h" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check.outputs.count }}" = "0" ]; then
+            echo "No orphaned instances found. Termination in training workflow succeeded." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Found **${{ steps.check.outputs.count }}** orphaned instance(s) — terminated them." >> $GITHUB_STEP_SUMMARY
+          fi
