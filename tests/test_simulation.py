@@ -543,3 +543,43 @@ def test_run_simulation_writes_metrics_summary(tmp_path):
     assert "unique_states" in metrics_payload
     assert "reward_mean" in metrics_payload
     assert metrics_payload["total_states"] == len(result["transition_logger"]._states)
+
+
+def test_rl_vs_heuristic_game():
+    """RL agent should complete a game against Heuristic without errors and learn Q-values."""
+    random.seed(42)
+    np.random.seed(42)
+
+    players = [
+        Player(name="RL_0", id=0, type='RL'),
+        Player(name="Heuristic_1", id=1, type='Heuristic'),
+        Player(name="RL_2", id=2, type='RL'),
+        Player(name="Heuristic_3", id=3, type='Heuristic'),
+    ]
+
+    Q = {}
+
+    # Play several holes so the Q-table accumulates entries
+    for hole in range(1, 4):
+        golf = simulation_mod.Golf(players=list(players), deck_type="French", verbose=False)
+        results, _ = simulation_mod.play_game(
+            golf,
+            game_num=0,
+            hole=hole,
+            Q=Q,
+            shuffle=True,
+        )
+
+        # Every player should have a result each hole
+        assert len(results) == len(players)
+        for r in results:
+            assert "score" in r
+            assert np.isfinite(r["score"])
+
+    # RL agent should have populated the Q-table after 3 holes
+    assert len(Q) > 0, "Q-table should have entries after RL play"
+
+    # Verify scores are numeric for all players
+    rl_scores = [r["score"] for r in results if r["player_id"] in (0, 2)]
+    heuristic_scores = [r["score"] for r in results if r["player_id"] in (1, 3)]
+    assert all(np.isfinite(s) for s in rl_scores + heuristic_scores)
