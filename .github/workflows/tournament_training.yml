@@ -190,12 +190,54 @@ jobs:
         if: always()
         run: |
           INSTANCE_ID="${{ steps.launch.outputs.instance_id }}"
-          if [ -n "$INSTANCE_ID" ]; then
-            curl -s -X POST "https://cloud.lambdalabs.com/api/v1/instance-operations/terminate" \
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "No instance ID found, skipping termination"
+            exit 0
+          fi
+
+          echo "Terminating instance $INSTANCE_ID..."
+
+          # Retry termination up to 4 times with backoff
+          for ATTEMPT in 1 2 3 4; do
+            HTTP_CODE=$(curl -s -o /tmp/term_response.json -w "%{http_code}" \
+              -X POST "https://cloud.lambdalabs.com/api/v1/instance-operations/terminate" \
               -H "Authorization: Bearer $LL_API_KEY" \
               -H "Content-Type: application/json" \
-              -d "{\"instance_ids\": [\"$INSTANCE_ID\"]}"
-            echo "Instance $INSTANCE_ID terminated"
+              -d "{\"instance_ids\": [\"$INSTANCE_ID\"]}")
+
+            if [[ "$HTTP_CODE" == 2* ]]; then
+              echo "Termination request accepted (HTTP $HTTP_CODE)"
+              break
+            fi
+
+            echo "Attempt $ATTEMPT failed (HTTP $HTTP_CODE): $(cat /tmp/term_response.json)"
+            if [ "$ATTEMPT" -lt 4 ]; then
+              BACKOFF=$((2 ** ATTEMPT))
+              echo "Retrying in ${BACKOFF}s..."
+              sleep $BACKOFF
+            fi
+          done
+
+          # Verify the instance is actually terminated
+          echo "Verifying termination..."
+          sleep 10
+          for CHECK in 1 2 3; do
+            STATUS=$(curl -s "https://cloud.lambdalabs.com/api/v1/instances/$INSTANCE_ID" \
+              -H "Authorization: Bearer $LL_API_KEY" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('data',{}).get('status','unknown'))" 2>/dev/null || echo "unknown")
+
+            if [ "$STATUS" = "terminated" ] || [ "$STATUS" = "unknown" ]; then
+              echo "Instance confirmed terminated (status=$STATUS)"
+              break
+            fi
+
+            echo "Instance still $STATUS, waiting..."
+            sleep 10
+          done
+
+          if [ "$STATUS" = "active" ] || [ "$STATUS" = "booting" ]; then
+            echo "::error::Instance $INSTANCE_ID may still be running (status=$STATUS)!"
+            echo "::error::Manually terminate at https://cloud.lambdalabs.com/instances"
           fi
 
       - name: Print summary
