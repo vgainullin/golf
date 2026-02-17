@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 import numpy as np
 
-from .simulation import Golf, play_game
+from .simulation import Golf, Player, play_game
 from .offline_agent import OfflineDQAgent
 
 
@@ -65,40 +65,38 @@ def evaluate_self_play(
     print(f"\nRunning {num_games} games ({holes_per_game} holes each)...\n")
 
     all_results = []
-    rotation_period = num_agents if rotate_positions else num_games + 1
 
     for game_num in range(num_games):
         # Determine rotation for this game
         if rotate_positions:
-            rotation_offset = (game_num % rotation_period)
+            rotation_offset = game_num % 4
         else:
             rotation_offset = 0
 
-        # Compute agent-to-seat mapping for this game
-        from src.simulation import Player
-
+        # Build seat assignments: rotate DQN agents through all 4 seats
         agent_to_seat = {}
         seat_to_agent = {}
         player_names = []
         player_types = []
 
-        for seat in range(4):
-            agent_idx = (seat - rotation_offset) % num_agents
+        # Assign DQN agents to rotated seats
+        for agent_idx in range(num_agents):
+            seat = (agent_idx + rotation_offset) % 4
+            agent_to_seat[agent_idx] = seat
+            seat_to_agent[seat] = agent_idx
 
-            if seat < num_agents:
-                # DQN agent
-                agent_name = agent_names[agent_idx]
-                player_names.append(f"DQN_{agent_idx}")
+        # Fill remaining seats with baselines
+        baseline_iter = iter(baseline_types)
+        for seat in range(4):
+            if seat in seat_to_agent:
+                agent_idx = seat_to_agent[seat]
+                player_names.append(agent_names[agent_idx])
                 player_types.append("OfflineDQN")
-                agent_to_seat[agent_idx] = seat
-                seat_to_agent[seat] = agent_idx
             else:
-                # Baseline player
-                baseline_idx = seat - num_agents
-                baseline_type = baseline_types[baseline_idx]
+                baseline_type = next(baseline_iter)
                 player_names.append(f"{baseline_type}_{seat}")
                 player_types.append(baseline_type)
-                seat_to_agent[seat] = None  # Not a DQN agent
+                seat_to_agent[seat] = None
 
         # Play each hole with FRESH player objects
         for hole in range(1, holes_per_game + 1):

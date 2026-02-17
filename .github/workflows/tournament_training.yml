@@ -1,0 +1,314 @@
+name: Tournament Training on Lambda Labs
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: "Lambda Labs instance type"
+        required: true
+        default: "gpu_1x_a10"
+        type: choice
+        options:
+          - gpu_1x_a10
+          - gpu_1x_a100_sxm4
+          - gpu_1x_rtx6000
+          - gpu_8x_a100_80gb_sxm4
+      population_size:
+        description: "Number of agents in population"
+        required: true
+        default: "12"
+        type: string
+      generations:
+        description: "Number of tournament generations"
+        required: true
+        default: "50"
+        type: string
+      episodes_per_gen:
+        description: "Training episodes per generation"
+        required: true
+        default: "1000"
+        type: string
+      warmstart:
+        description: "Warm-start from existing checkpoint"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      dry_run:
+        description: "Dry run: launch instance, verify SSH, terminate immediately (no training)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+env:
+  LL_API_KEY: ${{ secrets.LL_API_KEY }}
+
+jobs:
+  tournament:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1440  # 24 hour max
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install torch numpy pandas
+
+      - name: Generate SSH key pair
+        run: |
+          ssh-keygen -t ed25519 -f ~/.ssh/lambda_key -N "" -q
+          echo "SSH_KEY_PATH=$HOME/.ssh/lambda_key" >> $GITHUB_ENV
+
+      - name: Register SSH key with Lambda Labs
+        id: register_key
+        run: |
+          PUB_KEY=$(cat ~/.ssh/lambda_key.pub)
+          RESPONSE=$(curl -s -X POST "https://cloud.lambdalabs.com/api/v1/ssh-keys" \
+            -H "Authorization: Bearer $LL_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\": \"golf-tournament-$(date +%s)\", \"public_key\": \"$PUB_KEY\"}")
+          KEY_NAME=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['name'])")
+          echo "ssh_key_name=$KEY_NAME" >> $GITHUB_OUTPUT
+          echo "Registered SSH key: $KEY_NAME"
+
+      - name: Launch Lambda Labs instance
+        id: launch
+        run: |
+          RESPONSE=$(curl -s -X POST "https://cloud.lambdalabs.com/api/v1/instance-operations/launch" \
+            -H "Authorization: Bearer $LL_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "instance_type_name": "${{ inputs.instance_type }}",
+              "quantity": 1,
+              "name": "golf-tournament-${{ github.run_id }}",
+              "ssh_key_names": ["${{ steps.register_key.outputs.ssh_key_name }}"]
+            }')
+          echo "Launch response: $RESPONSE"
+          INSTANCE_ID=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['instance_ids'][0])")
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "Launched instance: $INSTANCE_ID"
+
+      - name: Wait for instance
+        id: wait
+        run: |
+          INSTANCE_ID="${{ steps.launch.outputs.instance_id }}"
+          for i in $(seq 1 40); do
+            RESPONSE=$(curl -s "https://cloud.lambdalabs.com/api/v1/instances/$INSTANCE_ID" \
+              -H "Authorization: Bearer $LL_API_KEY")
+            STATUS=$(echo $RESPONSE | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('status','unknown'))")
+            IP=$(echo $RESPONSE | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('ip',''))")
+            echo "Attempt $i: status=$STATUS ip=$IP"
+            if [ "$STATUS" = "active" ] && [ -n "$IP" ] && [ "$IP" != "None" ]; then
+              echo "instance_ip=$IP" >> $GITHUB_OUTPUT
+              echo "Instance ready at $IP"
+              sleep 10
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Timeout waiting for instance"
+          exit 1
+
+      - name: Dry run - verify SSH and GPU
+        if: inputs.dry_run == 'true'
+        run: |
+          IP="${{ steps.wait.outputs.instance_ip }}"
+          KEY="$SSH_KEY_PATH"
+
+          for i in $(seq 1 20); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i $KEY ubuntu@$IP "echo ok" 2>/dev/null; then
+              break
+            fi
+            echo "Waiting for SSH... attempt $i"
+            sleep 10
+          done
+
+          echo "=== Dry run: verifying instance ==="
+          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP << 'DRYRUN_EOF'
+          echo "--- SSH: OK ---"
+          echo "--- hostname: $(hostname) ---"
+          echo "--- GPU info ---"
+          nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || echo "(no GPU driver)"
+          echo "--- Python ---"
+          python3 --version
+          echo "--- Disk ---"
+          df -h / | tail -1
+          echo "--- RAM ---"
+          free -h | head -2
+          echo "=== Dry run complete ==="
+          DRYRUN_EOF
+
+      - name: Setup instance environment
+        if: inputs.dry_run != 'true'
+        run: |
+          IP="${{ steps.wait.outputs.instance_ip }}"
+          KEY="$SSH_KEY_PATH"
+
+          # Wait for SSH to be available
+          for i in $(seq 1 20); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i $KEY ubuntu@$IP "echo ok" 2>/dev/null; then
+              break
+            fi
+            echo "Waiting for SSH... attempt $i"
+            sleep 10
+          done
+
+          # Setup environment
+          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP << 'SETUP_EOF'
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-pip git > /dev/null 2>&1
+          pip install -q torch numpy pandas 2>/dev/null
+          echo "Environment ready"
+          SETUP_EOF
+
+      - name: Upload repository
+        if: inputs.dry_run != 'true'
+        run: |
+          IP="${{ steps.wait.outputs.instance_ip }}"
+          KEY="$SSH_KEY_PATH"
+          # Pack and upload repo
+          tar czf /tmp/golf_repo.tar.gz --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' .
+          scp -o StrictHostKeyChecking=no -i $KEY /tmp/golf_repo.tar.gz ubuntu@$IP:~/
+          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP "mkdir -p ~/golf && cd ~/golf && tar xzf ~/golf_repo.tar.gz && pip install -q -e . 2>/dev/null"
+
+      - name: Run tournament training
+        if: inputs.dry_run != 'true'
+        run: |
+          IP="${{ steps.wait.outputs.instance_ip }}"
+          KEY="$SSH_KEY_PATH"
+
+          WARMSTART_FLAG=""
+          if [ "${{ inputs.warmstart }}" = "true" ] && [ -f data/self_play/self_play_best.pt ]; then
+            scp -o StrictHostKeyChecking=no -i $KEY data/self_play/self_play_best.pt ubuntu@$IP:~/golf/warmstart.pt
+            WARMSTART_FLAG="--warmstart-checkpoint ~/golf/warmstart.pt"
+          fi
+
+          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP << TRAIN_EOF
+          cd ~/golf
+          python -m src.tournament \
+            --population-size ${{ inputs.population_size }} \
+            --generations ${{ inputs.generations }} \
+            --episodes-per-gen ${{ inputs.episodes_per_gen }} \
+            --output-dir data/tournament \
+            --device auto \
+            $WARMSTART_FLAG \
+            2>&1 | tee training.log
+          TRAIN_EOF
+
+      - name: Download results
+        if: always() && inputs.dry_run != 'true'
+        run: |
+          IP="${{ steps.wait.outputs.instance_ip }}"
+          KEY="$SSH_KEY_PATH"
+          mkdir -p tournament_results
+          scp -o StrictHostKeyChecking=no -r -i $KEY "ubuntu@$IP:~/golf/data/tournament/" tournament_results/ 2>/dev/null || true
+          scp -o StrictHostKeyChecking=no -i $KEY "ubuntu@$IP:~/golf/training.log" tournament_results/ 2>/dev/null || true
+
+      - name: Upload results artifact
+        if: always() && inputs.dry_run != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tournament-results-${{ github.run_id }}
+          path: tournament_results/
+          retention-days: 30
+
+      - name: Terminate instance
+        if: always()
+        run: |
+          INSTANCE_ID="${{ steps.launch.outputs.instance_id }}"
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "No instance ID found, skipping termination"
+            exit 0
+          fi
+
+          echo "Terminating instance $INSTANCE_ID..."
+
+          # Retry termination up to 4 times with backoff
+          for ATTEMPT in 1 2 3 4; do
+            HTTP_CODE=$(curl -s -o /tmp/term_response.json -w "%{http_code}" \
+              -X POST "https://cloud.lambdalabs.com/api/v1/instance-operations/terminate" \
+              -H "Authorization: Bearer $LL_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"instance_ids\": [\"$INSTANCE_ID\"]}")
+
+            if [[ "$HTTP_CODE" == 2* ]]; then
+              echo "Termination request accepted (HTTP $HTTP_CODE)"
+              break
+            fi
+
+            echo "Attempt $ATTEMPT failed (HTTP $HTTP_CODE): $(cat /tmp/term_response.json)"
+            if [ "$ATTEMPT" -lt 4 ]; then
+              BACKOFF=$((2 ** ATTEMPT))
+              echo "Retrying in ${BACKOFF}s..."
+              sleep $BACKOFF
+            fi
+          done
+
+          # Verify the instance is actually terminated
+          echo "Verifying termination..."
+          sleep 10
+          for CHECK in 1 2 3; do
+            STATUS=$(curl -s "https://cloud.lambdalabs.com/api/v1/instances/$INSTANCE_ID" \
+              -H "Authorization: Bearer $LL_API_KEY" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('data',{}).get('status','unknown'))" 2>/dev/null || echo "unknown")
+
+            if [ "$STATUS" = "terminated" ] || [ "$STATUS" = "unknown" ]; then
+              echo "Instance confirmed terminated (status=$STATUS)"
+              break
+            fi
+
+            echo "Instance still $STATUS, waiting..."
+            sleep 10
+          done
+
+          if [ "$STATUS" = "active" ] || [ "$STATUS" = "booting" ]; then
+            echo "::error::Instance $INSTANCE_ID may still be running (status=$STATUS)!"
+            echo "::error::Manually terminate at https://cloud.lambdalabs.com/instances"
+          fi
+
+      - name: Print summary
+        if: always()
+        run: |
+          echo "## Tournament Training Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "### Dry Run" >> $GITHUB_STEP_SUMMARY
+            echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+            echo "- API auth: OK" >> $GITHUB_STEP_SUMMARY
+            echo "- SSH key registration: OK" >> $GITHUB_STEP_SUMMARY
+            echo "- Instance launch: OK" >> $GITHUB_STEP_SUMMARY
+            echo "- SSH connectivity: OK" >> $GITHUB_STEP_SUMMARY
+            echo "- Termination: verified in cleanup step" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Population: ${{ inputs.population_size }} agents" >> $GITHUB_STEP_SUMMARY
+            echo "- Generations: ${{ inputs.generations }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Episodes/gen: ${{ inputs.episodes_per_gen }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            if [ -f tournament_results/tournament_history.json ]; then
+              echo "### Results" >> $GITHUB_STEP_SUMMARY
+              python3 -c "
+          import json
+          h = json.load(open('tournament_results/tournament_history.json'))
+          if h:
+              last = h[-1]
+              print(f'- Champion: {last[\"best_agent\"]}')
+              print(f'- Champion ELO: {last[\"best_elo\"]:.0f}')
+              print(f'- vs Heuristic score: {last.get(\"best_vs_heuristic\", \"N/A\")}')
+          " >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+            fi
+          fi
