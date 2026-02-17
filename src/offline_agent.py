@@ -57,19 +57,27 @@ class OfflineDQAgent:
 
         config_dict = state.get("config")
         if config_dict is None:
-            raise ValueError("Checkpoint is missing TrainingConfig data.")
+            raise ValueError("Checkpoint is missing config data.")
 
         # Validate config structure
         if not isinstance(config_dict, dict):
             raise ValueError(f"Config must be a dict, got {type(config_dict)}")
 
+        # Extract model architecture params (works for both TrainingConfig and SelfPlayConfig)
+        embedding_dim = config_dict.get("embedding_dim", 128)
+        hidden_dim = config_dict.get("hidden_dim", 256)
+
+        # Try to build a full TrainingConfig if possible, otherwise store the raw dict
         config_kwargs = dict(config_dict)
-        config_kwargs["archive_prefix"] = Path(config_kwargs["archive_prefix"])
-        config_kwargs["output_dir"] = Path(config_kwargs["output_dir"])
-        self.config = TrainingConfig(**config_kwargs)
+        if "archive_prefix" in config_kwargs and "output_dir" in config_kwargs:
+            config_kwargs["archive_prefix"] = Path(config_kwargs["archive_prefix"])
+            config_kwargs["output_dir"] = Path(config_kwargs["output_dir"])
+            self.config = TrainingConfig(**config_kwargs)
+        else:
+            self.config = None
 
         self.device = _resolve_device(device)
-        self.model = GolfDQN(self.config.embedding_dim, self.config.hidden_dim)
+        self.model = GolfDQN(embedding_dim, hidden_dim)
         self.model.load_state_dict(state["model_state_dict"])
         self.model.to(self.device)
         self.model.eval()

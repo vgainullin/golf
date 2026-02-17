@@ -1,0 +1,112 @@
+[
+  {
+    "avg_score": 24.82,
+    "std_score": 2.85,
+    "win_rate": 0.1,
+    "games": 50,
+    "episode": 200,
+    "epsilon": 0.44,
+    "loss": 0.513067,
+    "buffer_size": 23608,
+    "global_step": 1472
+  },
+  {
+    "avg_score": 24.34,
+    "std_score": 2.55,
+    "win_rate": 0.08,
+    "games": 50,
+    "episode": 400,
+    "epsilon": 0.38,
+    "loss": 0.72599,
+    "buffer_size": 47198,
+    "global_step": 3072
+  },
+  {
+    "avg_score": 24.94,
+    "std_score": 2.97,
+    "win_rate": 0.14,
+    "games": 50,
+    "episode": 600,
+    "epsilon": 0.32,
+    "loss": 0.744072,
+    "buffer_size": 70814,
+    "global_step": 4672
+  },
+  {
+    "avg_score": 24.53,
+    "std_score": 2.98,
+    "win_rate": 0.08,
+    "games": 50,
+    "episode": 800,
+    "epsilon": 0.26,
+    "loss": 0.906315,
+    "buffer_size": 94394,
+    "global_step": 6272
+  },
+  {
+    "avg_score": 26.15,
+    "std_score": 2.88,
+    "win_rate": 0.16,
+    "games": 50,
+    "episode": 1000,
+    "epsilon": 0.2,
+    "loss": 0.891787,
+    "buffer_size": 117938,
+    "global_step": 7872
+  },
+  {
+    "avg_score": 24.96,
+    "std_score": 2.73,
+    "win_rate": 0.06,
+    "games": 50,
+    "episode": 1200,
+    "epsilon": 0.14,
+    "loss": 1.061031,
+    "buffer_size": 141324,
+    "global_step": 9472
+  },
+  {
+    "avg_score": 25.08,
+    "std_score": 2.5,
+    "win_rate": 0.06,
+    "games": 50,
+    "episode": 1400,
+    "epsilon": 0.08,
+    "loss": 1.229116,
+    "buffer_size": 164642,
+    "global_step": 11072
+  },
+  {
+    "avg_score": 25.13,
+    "std_score": 3.05,
+    "win_rate": 0.06,
+    "games": 50,
+    "episode": 1600,
+    "epsilon": 0.05,
+    "loss": 1.260549,
+    "buffer_size": 187962,
+    "global_step": 12672
+  },
+  {
+    "avg_score": 25.61,
+    "std_score": 2.81,
+    "win_rate": 0.06,
+    "games": 50,
+    "episode": 1800,
+    "epsilon": 0.05,
+    "loss": 1.349176,
+    "buffer_size": 200000,
+    "global_step": 14272
+  },
+  {
+    "avg_score": 24.57,
+    "std_score": 3.18,
+    "win_rate": 0.2,
+    "games": 50,
+    "episode": 2000,
+    "epsilon": 0.05,
+    "loss": 1.490202,
+    "buffer_size": 200000,
+    "global_step": 15872
+  }
+]
