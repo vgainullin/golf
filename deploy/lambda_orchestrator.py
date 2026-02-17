@@ -82,20 +82,40 @@ def list_running_instances() -> List[Dict]:
     return resp.get("data", [])
 
 
+def resolve_region(instance_type: str) -> str:
+    """Pick the first region with available capacity for the given instance type."""
+    data = list_instance_types().get("data", {})
+    info = data.get(instance_type, {})
+    regions = info.get("regions_with_capacity_available", [])
+    if not regions:
+        raise RuntimeError(
+            f"No regions with capacity for {instance_type}. "
+            "Check availability at https://cloud.lambdalabs.com/instances"
+        )
+    region = regions[0]
+    return region.get("name", region) if isinstance(region, dict) else region
+
+
 def launch_instance(
     instance_type: str,
     region: Optional[str] = None,
     ssh_key_name: Optional[str] = None,
     name: str = "golf-tournament",
 ) -> Dict[str, Any]:
-    """Launch a new GPU instance."""
+    """Launch a new GPU instance.
+
+    If region is None, auto-selects the first region with capacity.
+    """
+    if not region:
+        region = resolve_region(instance_type)
+        print(f"  Auto-selected region: {region}")
+
     payload: Dict[str, Any] = {
+        "region_name": region,
         "instance_type_name": instance_type,
         "quantity": 1,
         "name": name,
     }
-    if region:
-        payload["region_name"] = region
     if ssh_key_name:
         payload["ssh_key_names"] = [ssh_key_name]
 

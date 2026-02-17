@@ -13,6 +13,11 @@ on:
           - gpu_1x_a100_sxm4
           - gpu_1x_rtx6000
           - gpu_8x_a100_80gb_sxm4
+      region:
+        description: "Lambda Labs region (auto = pick first available)"
+        required: true
+        default: "auto"
+        type: string
       population_size:
         description: "Number of agents in population"
         required: true
@@ -84,6 +89,29 @@ jobs:
           echo "ssh_key_name=$KEY_NAME" >> $GITHUB_OUTPUT
           echo "Registered SSH key: $KEY_NAME"
 
+      - name: Resolve region
+        id: resolve_region
+        run: |
+          REGION="${{ inputs.region }}"
+          if [ "$REGION" = "auto" ]; then
+            echo "Auto-detecting region with capacity for ${{ inputs.instance_type }}..."
+            REGION=$(curl -s "https://cloud.lambdalabs.com/api/v1/instance-types" \
+              -H "Authorization: Bearer $LL_API_KEY" \
+              | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin).get('data', {})
+          itype = '${{ inputs.instance_type }}'
+          info = data.get(itype, {})
+          regions = info.get('regions_with_capacity_available', [])
+          if not regions:
+              print('::error::No regions with capacity for ' + itype)
+              sys.exit(1)
+          print(regions[0].get('name', regions[0]) if isinstance(regions[0], dict) else regions[0])
+          ")
+            echo "Auto-selected region: $REGION"
+          fi
+          echo "region=$REGION" >> $GITHUB_OUTPUT
+
       - name: Launch Lambda Labs instance
         id: launch
         run: |
@@ -91,6 +119,7 @@ jobs:
             -H "Authorization: Bearer $LL_API_KEY" \
             -H "Content-Type: application/json" \
             -d '{
+              "region_name": "${{ steps.resolve_region.outputs.region }}",
               "instance_type_name": "${{ inputs.instance_type }}",
               "quantity": 1,
               "name": "golf-tournament-${{ github.run_id }}",
@@ -288,6 +317,7 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "### Dry Run" >> $GITHUB_STEP_SUMMARY
             echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Region: ${{ steps.resolve_region.outputs.region }}" >> $GITHUB_STEP_SUMMARY
             echo "- API auth: OK" >> $GITHUB_STEP_SUMMARY
             echo "- SSH key registration: OK" >> $GITHUB_STEP_SUMMARY
             echo "- Instance launch: OK" >> $GITHUB_STEP_SUMMARY
@@ -295,6 +325,7 @@ jobs:
             echo "- Termination: verified in cleanup step" >> $GITHUB_STEP_SUMMARY
           else
             echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Region: ${{ steps.resolve_region.outputs.region }}" >> $GITHUB_STEP_SUMMARY
             echo "- Population: ${{ inputs.population_size }} agents" >> $GITHUB_STEP_SUMMARY
             echo "- Generations: ${{ inputs.generations }}" >> $GITHUB_STEP_SUMMARY
             echo "- Episodes/gen: ${{ inputs.episodes_per_gen }}" >> $GITHUB_STEP_SUMMARY
