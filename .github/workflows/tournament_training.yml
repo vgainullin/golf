@@ -36,6 +36,23 @@ on:
         options:
           - "true"
           - "false"
+      region:
+        description: "Lambda Labs region"
+        required: true
+        default: "us-east-1"
+        type: choice
+        options:
+          - us-east-1
+          - us-west-1
+          - us-west-2
+          - us-west-3
+          - us-south-1
+          - us-midwest-1
+          - europe-central-1
+          - asia-south-1
+          - me-west-1
+          - asia-northeast-1
+          - asia-northeast-2
       dry_run:
         description: "Dry run: launch instance, verify SSH, terminate immediately (no training)"
         required: false
@@ -92,6 +109,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{
               "instance_type_name": "${{ inputs.instance_type }}",
+              "region_name": "${{ inputs.region }}",
               "quantity": 1,
               "name": "golf-tournament-${{ github.run_id }}",
               "ssh_key_names": ["${{ steps.register_key.outputs.ssh_key_name }}"]
@@ -288,6 +306,7 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "### Dry Run" >> $GITHUB_STEP_SUMMARY
             echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Region: ${{ inputs.region }}" >> $GITHUB_STEP_SUMMARY
             echo "- API auth: OK" >> $GITHUB_STEP_SUMMARY
             echo "- SSH key registration: OK" >> $GITHUB_STEP_SUMMARY
             echo "- Instance launch: OK" >> $GITHUB_STEP_SUMMARY
@@ -295,6 +314,7 @@ jobs:
             echo "- Termination: verified in cleanup step" >> $GITHUB_STEP_SUMMARY
           else
             echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Region: ${{ inputs.region }}" >> $GITHUB_STEP_SUMMARY
             echo "- Population: ${{ inputs.population_size }} agents" >> $GITHUB_STEP_SUMMARY
             echo "- Generations: ${{ inputs.generations }}" >> $GITHUB_STEP_SUMMARY
             echo "- Episodes/gen: ${{ inputs.episodes_per_gen }}" >> $GITHUB_STEP_SUMMARY
