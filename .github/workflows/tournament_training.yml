@@ -82,12 +82,19 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install torch numpy pandas
+        run: pip install numpy pandas
 
       - name: Generate SSH key pair
         run: |
           ssh-keygen -t ed25519 -f ~/.ssh/lambda_key -N "" -q
           echo "SSH_KEY_PATH=$HOME/.ssh/lambda_key" >> $GITHUB_ENV
+
+      - name: Validate API key
+        run: |
+          if [ -z "$LL_API_KEY" ]; then
+            echo "::error::LL_API_KEY secret is not set"
+            exit 1
+          fi
 
       - name: Register SSH key with Lambda Labs
         id: register_key
@@ -97,7 +104,8 @@ jobs:
             -H "Authorization: Bearer $LL_API_KEY" \
             -H "Content-Type: application/json" \
             -d "{\"name\": \"golf-tournament-$(date +%s)\", \"public_key\": \"$PUB_KEY\"}")
-          KEY_NAME=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['name'])")
+          echo "Register response: $RESPONSE"
+          KEY_NAME=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['name'])")
           echo "ssh_key_name=$KEY_NAME" >> $GITHUB_OUTPUT
           echo "Registered SSH key: $KEY_NAME"
 
@@ -115,7 +123,7 @@ jobs:
               "ssh_key_names": ["${{ steps.register_key.outputs.ssh_key_name }}"]
             }')
           echo "Launch response: $RESPONSE"
-          INSTANCE_ID=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['instance_ids'][0])")
+          INSTANCE_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['instance_ids'][0])")
           echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "Launched instance: $INSTANCE_ID"
 
@@ -126,8 +134,8 @@ jobs:
           for i in $(seq 1 40); do
             RESPONSE=$(curl -s "https://cloud.lambdalabs.com/api/v1/instances/$INSTANCE_ID" \
               -H "Authorization: Bearer $LL_API_KEY")
-            STATUS=$(echo $RESPONSE | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('status','unknown'))")
-            IP=$(echo $RESPONSE | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('ip',''))")
+            STATUS=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('status','unknown'))")
+            IP=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('ip',''))")
             echo "Attempt $i: status=$STATUS ip=$IP"
             if [ "$STATUS" = "active" ] && [ -n "$IP" ] && [ "$IP" != "None" ]; then
               echo "instance_ip=$IP" >> $GITHUB_OUTPUT
@@ -189,7 +197,8 @@ jobs:
           set -e
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-pip git > /dev/null 2>&1
-          pip install -q torch numpy pandas 2>/dev/null
+          pip install -q torch numpy pandas
+          python3 -c "import torch; print(f'torch {torch.__version__}, CUDA available: {torch.cuda.is_available()}')"
           echo "Environment ready"
           SETUP_EOF
 
@@ -201,7 +210,7 @@ jobs:
           # Pack and upload repo
           tar czf /tmp/golf_repo.tar.gz --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' .
           scp -o StrictHostKeyChecking=no -i $KEY /tmp/golf_repo.tar.gz ubuntu@$IP:~/
-          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP "mkdir -p ~/golf && cd ~/golf && tar xzf ~/golf_repo.tar.gz && pip install -q -e . 2>/dev/null"
+          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP "mkdir -p ~/golf && cd ~/golf && tar xzf ~/golf_repo.tar.gz && pip install -q -e ."
 
       - name: Run tournament training
         if: inputs.dry_run != 'true'
