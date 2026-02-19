@@ -56,8 +56,9 @@ jobs:
           INSTANCES='${{ steps.check.outputs.instances }}'
 
           echo "$INSTANCES" | python3 -c "
-          import sys, json, subprocess, time
+          import os, sys, json, subprocess, time
 
+          api_key = os.environ['LL_API_KEY']
           instances = json.load(sys.stdin)
 
           for inst in instances:
@@ -69,7 +70,7 @@ jobs:
                   result = subprocess.run([
                       'curl', '-s', '-w', '\n%{http_code}', '-X', 'POST',
                       'https://cloud.lambdalabs.com/api/v1/instance-operations/terminate',
-                      '-H', 'Authorization: Bearer ${{ secrets.LL_API_KEY }}',
+                      '-H', f'Authorization: Bearer {api_key}',
                       '-H', 'Content-Type: application/json',
                       '-d', json.dumps({'instance_ids': [inst_id]}),
                   ], capture_output=True, text=True, timeout=30)

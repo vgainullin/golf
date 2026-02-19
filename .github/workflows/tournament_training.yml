@@ -36,6 +36,23 @@ on:
         options:
           - "true"
           - "false"
+      region:
+        description: "Lambda Labs region"
+        required: true
+        default: "us-east-1"
+        type: choice
+        options:
+          - us-east-1
+          - us-west-1
+          - us-west-2
+          - us-west-3
+          - us-south-1
+          - us-midwest-1
+          - europe-central-1
+          - asia-south-1
+          - me-west-1
+          - asia-northeast-1
+          - asia-northeast-2
       dry_run:
         description: "Dry run: launch instance, verify SSH, terminate immediately (no training)"
         required: false
@@ -65,12 +82,19 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install torch numpy pandas
+        run: pip install numpy pandas
 
       - name: Generate SSH key pair
         run: |
           ssh-keygen -t ed25519 -f ~/.ssh/lambda_key -N "" -q
           echo "SSH_KEY_PATH=$HOME/.ssh/lambda_key" >> $GITHUB_ENV
+
+      - name: Validate API key
+        run: |
+          if [ -z "$LL_API_KEY" ]; then
+            echo "::error::LL_API_KEY secret is not set"
+            exit 1
+          fi
 
       - name: Register SSH key with Lambda Labs
         id: register_key
@@ -80,7 +104,8 @@ jobs:
             -H "Authorization: Bearer $LL_API_KEY" \
             -H "Content-Type: application/json" \
             -d "{\"name\": \"golf-tournament-$(date +%s)\", \"public_key\": \"$PUB_KEY\"}")
-          KEY_NAME=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['name'])")
+          echo "Register response: $RESPONSE"
+          KEY_NAME=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['name'])")
           echo "ssh_key_name=$KEY_NAME" >> $GITHUB_OUTPUT
           echo "Registered SSH key: $KEY_NAME"
 
@@ -92,12 +117,13 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{
               "instance_type_name": "${{ inputs.instance_type }}",
+              "region_name": "${{ inputs.region }}",
               "quantity": 1,
               "name": "golf-tournament-${{ github.run_id }}",
               "ssh_key_names": ["${{ steps.register_key.outputs.ssh_key_name }}"]
             }')
           echo "Launch response: $RESPONSE"
-          INSTANCE_ID=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['instance_ids'][0])")
+          INSTANCE_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['instance_ids'][0])")
           echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "Launched instance: $INSTANCE_ID"
 
@@ -108,8 +134,8 @@ jobs:
           for i in $(seq 1 40); do
             RESPONSE=$(curl -s "https://cloud.lambdalabs.com/api/v1/instances/$INSTANCE_ID" \
               -H "Authorization: Bearer $LL_API_KEY")
-            STATUS=$(echo $RESPONSE | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('status','unknown'))")
-            IP=$(echo $RESPONSE | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('ip',''))")
+            STATUS=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('status','unknown'))")
+            IP=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('ip',''))")
             echo "Attempt $i: status=$STATUS ip=$IP"
             if [ "$STATUS" = "active" ] && [ -n "$IP" ] && [ "$IP" != "None" ]; then
               echo "instance_ip=$IP" >> $GITHUB_OUTPUT
@@ -137,7 +163,7 @@ jobs:
           done
 
           echo "=== Dry run: verifying instance ==="
-          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP << 'DRYRUN_EOF'
+          ssh -T -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP << 'DRYRUN_EOF'
           echo "--- SSH: OK ---"
           echo "--- hostname: $(hostname) ---"
           echo "--- GPU info ---"
@@ -166,12 +192,10 @@ jobs:
             sleep 10
           done
 
-          # Setup environment
-          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP << 'SETUP_EOF'
+          # Setup environment (Lambda Stack has torch, numpy, CUDA pre-installed)
+          ssh -T -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i $KEY ubuntu@$IP << 'SETUP_EOF'
           set -e
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq python3-pip git > /dev/null 2>&1
-          pip install -q torch numpy pandas 2>/dev/null
+          python3 -c "import torch; print(f'torch {torch.__version__}, CUDA available: {torch.cuda.is_available()}')"
           echo "Environment ready"
           SETUP_EOF
 
@@ -183,7 +207,7 @@ jobs:
           # Pack and upload repo
           tar czf /tmp/golf_repo.tar.gz --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' .
           scp -o StrictHostKeyChecking=no -i $KEY /tmp/golf_repo.tar.gz ubuntu@$IP:~/
-          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP "mkdir -p ~/golf && cd ~/golf && tar xzf ~/golf_repo.tar.gz && pip install -q -e . 2>/dev/null"
+          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i $KEY ubuntu@$IP "mkdir -p ~/golf && cd ~/golf && tar xzf ~/golf_repo.tar.gz && pip install -q -e ."
 
       - name: Run tournament training
         if: inputs.dry_run != 'true'
@@ -197,17 +221,51 @@ jobs:
             WARMSTART_FLAG="--warmstart-checkpoint ~/golf/warmstart.pt"
           fi
 
-          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$IP << TRAIN_EOF
+          SSH="ssh -T -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i $KEY ubuntu@$IP"
+
+          # Launch training in background so it survives SSH drops
+          $SSH << TRAIN_EOF
           cd ~/golf
-          python -m src.tournament \
+          echo "=== Training starting at \$(date) ===" > training.log
+          nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader >> training.log 2>&1 || echo "(no GPU)" >> training.log
+          free -h | head -2 >> training.log
+          nohup python -u -m src.tournament \
             --population-size ${{ inputs.population_size }} \
             --generations ${{ inputs.generations }} \
             --episodes-per-gen ${{ inputs.episodes_per_gen }} \
             --output-dir data/tournament \
             --device auto \
             $WARMSTART_FLAG \
-            2>&1 | tee training.log
+            >> training.log 2>&1 &
+          echo \$! > training.pid
+          echo "Training launched (PID=\$(cat training.pid))"
           TRAIN_EOF
+
+          # Poll until training finishes, streaming logs
+          PREV_LINES=0
+          while true; do
+            # Check if process is still running
+            RUNNING=$($SSH "kill -0 \$(cat ~/golf/training.pid) 2>/dev/null && echo yes || echo no")
+            # Tail new log lines
+            TOTAL_LINES=$($SSH "wc -l < ~/golf/training.log 2>/dev/null || echo 0")
+            if [ "$TOTAL_LINES" -gt "$PREV_LINES" ]; then
+              $SSH "tail -n +$((PREV_LINES + 1)) ~/golf/training.log | head -n $((TOTAL_LINES - PREV_LINES))"
+              PREV_LINES=$TOTAL_LINES
+            fi
+            if [ "$RUNNING" = "no" ]; then
+              # Check exit code
+              EXIT_CODE=$($SSH "wait \$(cat ~/golf/training.pid) 2>/dev/null; echo \$?")
+              echo "Training finished with exit code $EXIT_CODE"
+              if [ "$EXIT_CODE" != "0" ]; then
+                echo "::error::Training failed (exit code $EXIT_CODE)"
+                # Print last 50 lines for diagnostics
+                $SSH "tail -50 ~/golf/training.log" || true
+                exit 1
+              fi
+              break
+            fi
+            sleep 30
+          done
 
       - name: Download results
         if: always() && inputs.dry_run != 'true'
@@ -215,8 +273,8 @@ jobs:
           IP="${{ steps.wait.outputs.instance_ip }}"
           KEY="$SSH_KEY_PATH"
           mkdir -p tournament_results
-          scp -o StrictHostKeyChecking=no -r -i $KEY "ubuntu@$IP:~/golf/data/tournament/" tournament_results/ 2>/dev/null || true
-          scp -o StrictHostKeyChecking=no -i $KEY "ubuntu@$IP:~/golf/training.log" tournament_results/ 2>/dev/null || true
+          scp -o StrictHostKeyChecking=no -r -i $KEY "ubuntu@$IP:~/golf/data/tournament/" tournament_results/ || echo "WARNING: Failed to download tournament data"
+          scp -o StrictHostKeyChecking=no -i $KEY "ubuntu@$IP:~/golf/training.log" tournament_results/ || echo "WARNING: Failed to download training.log"
 
       - name: Upload results artifact
         if: always() && inputs.dry_run != 'true'
@@ -288,6 +346,7 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "### Dry Run" >> $GITHUB_STEP_SUMMARY
             echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Region: ${{ inputs.region }}" >> $GITHUB_STEP_SUMMARY
             echo "- API auth: OK" >> $GITHUB_STEP_SUMMARY
             echo "- SSH key registration: OK" >> $GITHUB_STEP_SUMMARY
             echo "- Instance launch: OK" >> $GITHUB_STEP_SUMMARY
@@ -295,6 +354,7 @@ jobs:
             echo "- Termination: verified in cleanup step" >> $GITHUB_STEP_SUMMARY
           else
             echo "- Instance type: ${{ inputs.instance_type }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Region: ${{ inputs.region }}" >> $GITHUB_STEP_SUMMARY
             echo "- Population: ${{ inputs.population_size }} agents" >> $GITHUB_STEP_SUMMARY
             echo "- Generations: ${{ inputs.generations }}" >> $GITHUB_STEP_SUMMARY
             echo "- Episodes/gen: ${{ inputs.episodes_per_gen }}" >> $GITHUB_STEP_SUMMARY

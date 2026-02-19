@@ -593,6 +593,7 @@ class TournamentTrainer:
 
         for idx, (record, model, target, optimizer, buf) in enumerate(self.population):
             global_step = 0
+            log_interval = max(1, n_eps // 10)
             for ep in range(1, n_eps + 1):
                 progress = ep / n_eps
                 epsilon = eps_start + progress * (eps_end - eps_start)
@@ -607,6 +608,12 @@ class TournamentTrainer:
                     model, target, opp_model, buf, optimizer,
                     self.device, self.config, epsilon, global_step,
                 )
+
+                if ep % log_interval == 0:
+                    print(
+                        f"  {record.agent_id}: ep {ep}/{n_eps}, "
+                        f"buf={len(buf):,d}, loss={loss:.4f}, eps={epsilon:.3f}"
+                    )
 
             print(
                 f"  {record.agent_id}: trained {n_eps} eps, "
