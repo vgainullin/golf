@@ -1,0 +1,23 @@
+name: Check Lambda Capacity
+
+on:
+  workflow_dispatch:
+
+env:
+  LL_API_KEY: ${{ secrets.LL_API_KEY }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check capacity
+        run: |
+          curl -s "https://cloud.lambdalabs.com/api/v1/instance-types" \
+            -H "Authorization: Bearer $LL_API_KEY" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin).get('data', {})
+          for name, info in sorted(data.items()):
+              regions = [r['name'] for r in info.get('regions_with_capacity_available', [])]
+              status = ', '.join(regions) if regions else 'NO CAPACITY'
+              print(f'{name}: {status}')
+          "
