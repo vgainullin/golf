@@ -96,6 +96,28 @@ jobs:
             exit 1
           fi
 
+      - name: Check instance availability
+        run: |
+          RESPONSE=$(curl -s "https://cloud.lambdalabs.com/api/v1/instance-types" \
+            -H "Authorization: Bearer $LL_API_KEY")
+          python3 -c "
+          import sys, json
+          data = json.load(sys.stdin).get('data', {})
+          itype = '${{ inputs.instance_type }}'
+          region = '${{ inputs.region }}'
+          info = data.get(itype)
+          if not info:
+              print(f'::error::Instance type {itype} not found in API response')
+              sys.exit(1)
+          regions = [r['name'] for r in info.get('regions_with_capacity_available', [])]
+          print(f'Instance type: {itype}')
+          print(f'Regions with capacity: {regions if regions else \"NONE\"}')
+          if region not in regions:
+              print(f'::error::{itype} has no capacity in {region}. Available in: {regions}')
+              sys.exit(1)
+          print(f'Capacity confirmed in {region}')
+          " <<< "$RESPONSE"
+
       - name: Register SSH key with Lambda Labs
         id: register_key
         run: |
