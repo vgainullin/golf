@@ -42,6 +42,21 @@ from .simulation import (
 )
 from .tensor_dataset import tensor_to_player_tokens
 from .tensor_logger import decode_action_id, encode_action_id
+from .vectorized_golf import (
+    VectorizedGolfState,
+    reset_games,
+    get_observation,
+    step_stage0,
+    step_stage1,
+    compute_score as vec_compute_score,
+    compute_final_score,
+    get_valid_action_mask,
+    heuristic_stage0,
+    heuristic_stage1,
+    eps_greedy_batched,
+    NUM_ACTIONS as VEC_NUM_ACTIONS,
+    RANK_CUTOFF,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +529,336 @@ def train_episode(
 
 
 # ---------------------------------------------------------------------------
+# Vectorized training and match functions
+# ---------------------------------------------------------------------------
+
+def train_episodes_vectorized(
+    N: int,
+    model: nn.Module,
+    target_model: nn.Module,
+    opponent_model: Optional[nn.Module],
+    buffer: ReplayBuffer,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    config: TournamentConfig,
+    epsilon: float,
+    global_step: int,
+) -> Tuple[float, int]:
+    """Run N self-play episodes in parallel using vectorized env.
+
+    Returns (avg_loss, global_step).
+    """
+    learner_id = 0
+    opponent_id = 1
+    all_transitions: List[Transition] = []
+
+    for hole in range(1, config.holes_per_game + 1):
+        state = reset_games(N, device)
+        max_rounds = 30  # safety limit
+
+        for round_num in range(max_rounds):
+            if state.done.all():
+                break
+
+            for pid in range(4):
+                active = ~state.done
+
+                # Check if all cards revealed for this player -> game over
+                all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                # If last_turn was triggered and we're back to the trigger player, mark done
+                back_to_trigger = state.last_turn & (state.end_game_player == pid)
+                state.done = state.done | (back_to_trigger & active)
+                active = ~state.done
+
+                if not active.any():
+                    break
+
+                # -- Stage 0 --
+                state.current_stage.fill_(0)
+                obs = get_observation(state, pid)  # (N, 8)
+
+                if pid == learner_id:
+                    # Learner: eps-greedy
+                    st = obs.to(device)
+                    sg = torch.zeros(N, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q = model(st, sg)
+                    mask = get_valid_action_mask(state, pid)
+                    # Only stage0 actions valid
+                    stage0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=device)
+                    stage0_mask[:, 0] = True
+                    stage0_mask[:, 1] = state.deck_ptr < 52
+                    actions_s0 = eps_greedy_batched(q, epsilon, stage0_mask)
+                elif pid == opponent_id and opponent_model is not None:
+                    # Opponent: greedy
+                    st = obs.to(device)
+                    sg = torch.zeros(N, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q = opponent_model(st, sg)
+                    stage0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=device)
+                    stage0_mask[:, 0] = True
+                    stage0_mask[:, 1] = state.deck_ptr < 52
+                    actions_s0 = eps_greedy_batched(q, 0.0, stage0_mask)
+                else:
+                    # Heuristic
+                    actions_s0 = heuristic_stage0(state, pid)
+
+                # Store pre-step observation for learner
+                if pid == learner_id:
+                    obs_before_s0 = obs.clone()
+                    aid_s0 = actions_s0.clone()
+
+                step_stage0(state, actions_s0, pid)
+
+                # Learner: record stage0 transition
+                if pid == learner_id:
+                    obs_after_s0 = get_observation(state, pid)
+                    # Build transitions for each game
+                    for n in range(N):
+                        if not active[n]:
+                            continue
+                        all_transitions.append(Transition(
+                            state=obs_before_s0[n].cpu().numpy(),
+                            action=int(aid_s0[n].item()),
+                            reward=0.0,
+                            next_state=obs_after_s0[n].cpu().numpy(),
+                            done=1.0 if state.done[n] else 0.0,
+                            stage=0,
+                            next_stage=1,
+                        ))
+
+                if state.done.all():
+                    break
+
+                # -- Stage 1 --
+                state.current_stage.fill_(1)
+                obs1 = get_observation(state, pid)
+
+                if pid == learner_id:
+                    st1 = obs1.to(device)
+                    sg1 = torch.ones(N, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q1 = model(st1, sg1)
+                    mask1 = get_valid_action_mask(state, pid)
+                    actions_s1 = eps_greedy_batched(q1, epsilon, mask1)
+                elif pid == opponent_id and opponent_model is not None:
+                    st1 = obs1.to(device)
+                    sg1 = torch.ones(N, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q1 = opponent_model(st1, sg1)
+                    mask1 = get_valid_action_mask(state, pid)
+                    actions_s1 = eps_greedy_batched(q1, 0.0, mask1)
+                else:
+                    actions_s1 = heuristic_stage1(state, pid)
+
+                if pid == learner_id:
+                    obs_before_s1 = obs1.clone()
+                    aid_s1 = actions_s1.clone()
+
+                rewards_s1 = step_stage1(state, actions_s1, pid)
+
+                if pid == learner_id:
+                    obs_after_s1 = get_observation(state, pid)
+                    for n in range(N):
+                        if not active[n]:
+                            continue
+                        all_transitions.append(Transition(
+                            state=obs_before_s1[n].cpu().numpy(),
+                            action=int(aid_s1[n].item()),
+                            reward=float(rewards_s1[n].item()),
+                            next_state=obs_after_s1[n].cpu().numpy(),
+                            done=1.0 if state.done[n] else 0.0,
+                            stage=1,
+                            next_stage=0,
+                        ))
+
+                # Check if all cards revealed -> trigger last turn
+                all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                newly_last = active & all_rev & (~state.last_turn)
+                state.last_turn = state.last_turn | newly_last
+                state.end_game_player = torch.where(
+                    newly_last,
+                    torch.full_like(state.end_game_player, pid),
+                    state.end_game_player,
+                )
+
+    # Bulk extend replay buffer
+    buffer.extend(all_transitions)
+
+    # Train on buffer
+    losses = []
+    if len(buffer) >= config.min_buffer_size:
+        model.train()
+        for _ in range(config.updates_per_episode * max(1, N // 10)):
+            batch = buffer.sample(config.batch_size)
+            states = torch.tensor(np.stack([t.state for t in batch]), dtype=torch.long, device=device)
+            actions = torch.tensor([t.action for t in batch], dtype=torch.long, device=device)
+            rewards = torch.tensor([t.reward for t in batch], dtype=torch.float32, device=device)
+            next_states = torch.tensor(np.stack([t.next_state for t in batch]), dtype=torch.long, device=device)
+            dones = torch.tensor([t.done for t in batch], dtype=torch.float32, device=device)
+            stages = torch.tensor([t.stage for t in batch], dtype=torch.long, device=device)
+            next_stages = torch.tensor([t.next_stage for t in batch], dtype=torch.long, device=device)
+
+            q = model(states, stages)
+            q_sel = q.gather(1, actions.unsqueeze(1)).squeeze(1)
+
+            with torch.no_grad():
+                nq_online = model(next_states, next_stages)
+                masked_online = mask_illegal_actions(nq_online, next_stages)
+                best_next = masked_online.argmax(dim=1)
+                nq_target = target_model(next_states, next_stages)
+                nq_val = nq_target.gather(1, best_next.unsqueeze(1)).squeeze(1)
+                nq_val = torch.where(torch.isfinite(nq_val), nq_val, torch.zeros_like(nq_val))
+                targets = rewards + config.gamma * (1.0 - dones) * nq_val
+
+            loss = F.smooth_l1_loss(q_sel, targets)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            losses.append(float(loss.item()))
+            global_step += 1
+
+            if global_step % config.target_update_interval == 0:
+                target_model.load_state_dict(model.state_dict())
+
+    avg_loss = float(np.mean(losses)) if losses else float("nan")
+    return avg_loss, global_step
+
+
+def play_matches_vectorized(
+    model_a: nn.Module,
+    model_b: Optional[nn.Module],
+    device: torch.device,
+    num_games: int = 4,
+    holes: int = 9,
+) -> Tuple[float, float, float, float]:
+    """Play matches using vectorized environment.
+
+    All num_games run simultaneously. model_b=None means heuristic opponent.
+    Returns (score_a, score_b, wins_a, wins_b) averaged per hole.
+    """
+    N = num_games
+    total_a = torch.zeros(N, dtype=torch.float32, device=device)
+    total_b = torch.zeros(N, dtype=torch.float32, device=device)
+
+    # Seat assignments: alternate for fairness
+    seat_a = torch.arange(N, device=device) % 4
+    seat_b = (torch.arange(N, device=device) + 1) % 4
+
+    for hole in range(1, holes + 1):
+        state = reset_games(N, device)
+        max_rounds = 30
+
+        for round_num in range(max_rounds):
+            if state.done.all():
+                break
+
+            for pid in range(4):
+                active = ~state.done
+                back_to_trigger = state.last_turn & (state.end_game_player == pid)
+                state.done = state.done | (back_to_trigger & active)
+                active = ~state.done
+
+                if not active.any():
+                    break
+
+                is_a = (seat_a == pid)  # (N,) which games have model_a at this pid
+                is_b = (seat_b == pid)
+                is_heuristic = (~is_a) & (~is_b)
+
+                # -- Stage 0 --
+                state.current_stage.fill_(0)
+                obs = get_observation(state, pid)
+
+                # Default: heuristic
+                actions_s0 = heuristic_stage0(state, pid)
+
+                # Model A seats
+                if is_a.any():
+                    st = obs.to(device)
+                    sg = torch.zeros(N, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q = model_a(st, sg)
+                    s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=device)
+                    s0_mask[:, 0] = True
+                    s0_mask[:, 1] = state.deck_ptr < 52
+                    greedy_a = eps_greedy_batched(q, 0.0, s0_mask)
+                    actions_s0 = torch.where(is_a, greedy_a, actions_s0)
+
+                # Model B seats
+                if model_b is not None and is_b.any():
+                    st = obs.to(device)
+                    sg = torch.zeros(N, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q = model_b(st, sg)
+                    s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=device)
+                    s0_mask[:, 0] = True
+                    s0_mask[:, 1] = state.deck_ptr < 52
+                    greedy_b = eps_greedy_batched(q, 0.0, s0_mask)
+                    actions_s0 = torch.where(is_b, greedy_b, actions_s0)
+
+                step_stage0(state, actions_s0, pid)
+                if state.done.all():
+                    break
+
+                # -- Stage 1 --
+                state.current_stage.fill_(1)
+                obs1 = get_observation(state, pid)
+
+                actions_s1 = heuristic_stage1(state, pid)
+
+                if is_a.any():
+                    st1 = obs1.to(device)
+                    sg1 = torch.ones(N, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q1 = model_a(st1, sg1)
+                    mask1 = get_valid_action_mask(state, pid)
+                    greedy_a1 = eps_greedy_batched(q1, 0.0, mask1)
+                    actions_s1 = torch.where(is_a, greedy_a1, actions_s1)
+
+                if model_b is not None and is_b.any():
+                    st1 = obs1.to(device)
+                    sg1 = torch.ones(N, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q1 = model_b(st1, sg1)
+                    mask1 = get_valid_action_mask(state, pid)
+                    greedy_b1 = eps_greedy_batched(q1, 0.0, mask1)
+                    actions_s1 = torch.where(is_b, greedy_b1, actions_s1)
+
+                step_stage1(state, actions_s1, pid)
+
+                all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                newly_last = active & all_rev & (~state.last_turn)
+                state.last_turn = state.last_turn | newly_last
+                state.end_game_player = torch.where(
+                    newly_last,
+                    torch.full_like(state.end_game_player, pid),
+                    state.end_game_player,
+                )
+
+        # Compute final scores for each game
+        for n in range(N):
+            sa = int(seat_a[n].item())
+            sb = int(seat_b[n].item())
+            score_a_n = compute_final_score(
+                state.player_cards[n:n+1, sa, :], device
+            ).item()
+            score_b_n = compute_final_score(
+                state.player_cards[n:n+1, sb, :], device
+            ).item()
+            total_a[n] += score_a_n
+            total_b[n] += score_b_n
+
+    total_holes = holes
+    avg_a = total_a.sum().item() / (N * total_holes)
+    avg_b = total_b.sum().item() / (N * total_holes)
+    wins_a = 1.0 if avg_a < avg_b else 0.0
+    wins_b = 1.0 if avg_b < avg_a else 0.0
+    return avg_a, avg_b, wins_a, wins_b
+
+
+# ---------------------------------------------------------------------------
 # Population manager
 # ---------------------------------------------------------------------------
 
@@ -586,44 +931,39 @@ class TournamentTrainer:
     # ----- Training phase -----
 
     def _train_generation(self) -> None:
-        """Train each agent in the population for episodes_per_gen episodes."""
-        eps_start = self.config.epsilon_start
-        eps_end = self.config.epsilon_end
+        """Train each agent in the population using vectorized episodes."""
         n_eps = self.config.episodes_per_gen
+        epsilon = (self.config.epsilon_start + self.config.epsilon_end) / 2.0
 
         for idx, (record, model, target, optimizer, buf) in enumerate(self.population):
-            global_step = 0
-            log_interval = max(1, n_eps // 10)
-            for ep in range(1, n_eps + 1):
-                progress = ep / n_eps
-                epsilon = eps_start + progress * (eps_end - eps_start)
+            # Pick a random opponent from the population (not self)
+            opp_indices = [j for j in range(len(self.population)) if j != idx]
+            opp_idx = random.choice(opp_indices)
+            opp_model = self.population[opp_idx][1]
+            opp_model.eval()
 
-                # Pick a random opponent from the population (not self)
-                opp_indices = [j for j in range(len(self.population)) if j != idx]
-                opp_idx = random.choice(opp_indices)
-                opp_model = self.population[opp_idx][1]
-                opp_model.eval()
-
-                loss, global_step, _ = train_episode(
-                    model, target, opp_model, buf, optimizer,
-                    self.device, self.config, epsilon, global_step,
-                )
-
-                if ep % log_interval == 0:
-                    print(
-                        f"  {record.agent_id}: ep {ep}/{n_eps}, "
-                        f"buf={len(buf):,d}, loss={loss:.4f}, eps={epsilon:.3f}"
-                    )
+            loss, _ = train_episodes_vectorized(
+                N=n_eps,
+                model=model,
+                target_model=target,
+                opponent_model=opp_model,
+                buffer=buf,
+                optimizer=optimizer,
+                device=self.device,
+                config=self.config,
+                epsilon=epsilon,
+                global_step=0,
+            )
 
             print(
-                f"  {record.agent_id}: trained {n_eps} eps, "
+                f"  {record.agent_id}: trained {n_eps} vectorized eps, "
                 f"buf={len(buf):,d}, loss={loss:.4f}"
             )
 
     # ----- Round-robin tournament -----
 
     def _run_tournament(self) -> None:
-        """Round-robin matches between all agents. Updates ELO and stats."""
+        """Round-robin matches between all agents using vectorized play."""
         n = len(self.population)
         for i in range(n):
             for j in range(i + 1, n):
@@ -632,7 +972,7 @@ class TournamentTrainer:
                 model_a.eval()
                 model_b.eval()
 
-                score_a, score_b, wa, wb = play_match(
+                score_a, score_b, wa, wb = play_matches_vectorized(
                     model_a, model_b, self.device,
                     num_games=self.config.matches_per_pair,
                     holes=self.config.match_holes,
@@ -663,10 +1003,10 @@ class TournamentTrainer:
                     rec_a.draws += 1
                     rec_b.draws += 1
 
-        # Also play each agent vs heuristic baseline for absolute measurement
+        # Also play each agent vs heuristic baseline
         for rec, model, _, _, _ in self.population:
             model.eval()
-            score_agent, score_heur, _, _ = play_match(
+            score_agent, score_heur, _, _ = play_matches_vectorized(
                 model, None, self.device,
                 num_games=self.config.matches_per_pair,
                 holes=self.config.match_holes,
