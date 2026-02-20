@@ -259,20 +259,16 @@ jobs:
 
           SSH="ssh -T -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i $KEY ubuntu@$IP"
 
+          # Build the training command locally, then send it
+          TRAIN_CMD="python3 -u -m src.tournament --population-size ${{ inputs.population_size }} --generations ${{ inputs.generations }} --episodes-per-gen ${{ inputs.episodes_per_gen }} --output-dir data/tournament --device auto ${WARMSTART_FLAG}"
+
           # Launch training in background so it survives SSH drops
           $SSH << TRAIN_EOF
           cd ~/golf
           echo "=== Training starting at \$(date) ===" > training.log
           nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader >> training.log 2>&1 || echo "(no GPU)" >> training.log
           free -h | head -2 >> training.log
-          nohup python -u -m src.tournament \
-            --population-size ${{ inputs.population_size }} \
-            --generations ${{ inputs.generations }} \
-            --episodes-per-gen ${{ inputs.episodes_per_gen }} \
-            --output-dir data/tournament \
-            --device auto \
-            $WARMSTART_FLAG \
-            >> training.log 2>&1 &
+          nohup bash -c '${TRAIN_CMD} >> training.log 2>&1; echo \$? > training.exit_code' &
           echo \$! > training.pid
           echo "Training launched (PID=\$(cat training.pid))"
           TRAIN_EOF
@@ -289,12 +285,11 @@ jobs:
               PREV_LINES=$TOTAL_LINES
             fi
             if [ "$RUNNING" = "no" ]; then
-              # Check exit code
-              EXIT_CODE=$($SSH "wait \$(cat ~/golf/training.pid) 2>/dev/null; echo \$?")
+              # Read exit code written by the wrapper script
+              EXIT_CODE=$($SSH "cat ~/golf/training.exit_code 2>/dev/null || echo 1")
               echo "Training finished with exit code $EXIT_CODE"
               if [ "$EXIT_CODE" != "0" ]; then
                 echo "::error::Training failed (exit code $EXIT_CODE)"
-                # Print last 50 lines for diagnostics
                 $SSH "tail -50 ~/golf/training.log" || true
                 exit 1
               fi
