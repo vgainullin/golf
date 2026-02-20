@@ -167,42 +167,122 @@ class TournamentConfig:
 # Lightweight replay buffer (same as self_play_trainer)
 # ---------------------------------------------------------------------------
 
-from collections import deque
 import torch.nn.functional as F
 from torch import nn
 
 
-@dataclass
-class Transition:
-    state: np.ndarray
-    action: int
-    reward: float
-    next_state: np.ndarray
-    done: float
-    stage: int
-    next_stage: int
+OBS_DIM = 8  # from get_observation: [card0..5, holding, discard_top]
 
 
 class ReplayBuffer:
+    """Array-based circular replay buffer -- no per-transition Python objects."""
+
     def __init__(self, capacity: int):
-        self._buf: deque[Transition] = deque(maxlen=capacity)
+        self._capacity = capacity
+        self.states = np.zeros((capacity, OBS_DIM), dtype=np.int64)
+        self.actions = np.zeros(capacity, dtype=np.int64)
+        self.rewards = np.zeros(capacity, dtype=np.float32)
+        self.next_states = np.zeros((capacity, OBS_DIM), dtype=np.int64)
+        self.dones = np.zeros(capacity, dtype=np.float32)
+        self.stages = np.zeros(capacity, dtype=np.int64)
+        self.next_stages = np.zeros(capacity, dtype=np.int64)
+        self._ptr = 0
+        self._size = 0
 
-    def push(self, t: Transition) -> None:
-        self._buf.append(t)
+    # -- bulk insert (main hot path) --
+    def push_batch(
+        self,
+        states: np.ndarray,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+        next_states: np.ndarray,
+        dones: np.ndarray,
+        stages: np.ndarray,
+        next_stages: np.ndarray,
+    ) -> None:
+        n = len(states)
+        if n == 0:
+            return
+        end = self._ptr + n
+        if end <= self._capacity:
+            self.states[self._ptr:end] = states
+            self.actions[self._ptr:end] = actions
+            self.rewards[self._ptr:end] = rewards
+            self.next_states[self._ptr:end] = next_states
+            self.dones[self._ptr:end] = dones
+            self.stages[self._ptr:end] = stages
+            self.next_stages[self._ptr:end] = next_stages
+        else:
+            first = self._capacity - self._ptr
+            self.states[self._ptr:] = states[:first]
+            self.actions[self._ptr:] = actions[:first]
+            self.rewards[self._ptr:] = rewards[:first]
+            self.next_states[self._ptr:] = next_states[:first]
+            self.dones[self._ptr:] = dones[:first]
+            self.stages[self._ptr:] = stages[:first]
+            self.next_stages[self._ptr:] = next_stages[:first]
+            rest = n - first
+            self.states[:rest] = states[first:]
+            self.actions[:rest] = actions[first:]
+            self.rewards[:rest] = rewards[first:]
+            self.next_states[:rest] = next_states[first:]
+            self.dones[:rest] = dones[first:]
+            self.stages[:rest] = stages[first:]
+            self.next_stages[:rest] = next_stages[first:]
+        self._ptr = end % self._capacity
+        self._size = min(self._size + n, self._capacity)
 
-    def extend(self, ts: List[Transition]) -> None:
-        self._buf.extend(ts)
+    # -- single insert (backward compat for train_episode) --
+    def push_single(
+        self,
+        state: np.ndarray,
+        action: int,
+        reward: float,
+        next_state: np.ndarray,
+        done: float,
+        stage: int,
+        next_stage: int,
+    ) -> None:
+        p = self._ptr
+        self.states[p] = state
+        self.actions[p] = action
+        self.rewards[p] = reward
+        self.next_states[p] = next_state
+        self.dones[p] = done
+        self.stages[p] = stage
+        self.next_stages[p] = next_stage
+        self._ptr = (p + 1) % self._capacity
+        self._size = min(self._size + 1, self._capacity)
 
-    def sample(self, n: int) -> List[Transition]:
-        return random.sample(list(self._buf), min(n, len(self._buf)))
+    # -- sampling: returns dict of tensors on device --
+    def sample(self, n: int, device: torch.device) -> Dict[str, torch.Tensor]:
+        k = min(n, self._size)
+        idx = np.random.choice(self._size, size=k, replace=False)
+        return {
+            "states": torch.as_tensor(self.states[idx], dtype=torch.long, device=device),
+            "actions": torch.as_tensor(self.actions[idx], dtype=torch.long, device=device),
+            "rewards": torch.as_tensor(self.rewards[idx], dtype=torch.float32, device=device),
+            "next_states": torch.as_tensor(self.next_states[idx], dtype=torch.long, device=device),
+            "dones": torch.as_tensor(self.dones[idx], dtype=torch.float32, device=device),
+            "stages": torch.as_tensor(self.stages[idx], dtype=torch.long, device=device),
+            "next_stages": torch.as_tensor(self.next_stages[idx], dtype=torch.long, device=device),
+        }
 
     def copy(self) -> "ReplayBuffer":
-        new = ReplayBuffer(self._buf.maxlen)
-        new._buf = deque(self._buf, maxlen=self._buf.maxlen)
+        new = ReplayBuffer(self._capacity)
+        new.states[:] = self.states
+        new.actions[:] = self.actions
+        new.rewards[:] = self.rewards
+        new.next_states[:] = self.next_states
+        new.dones[:] = self.dones
+        new.stages[:] = self.stages
+        new.next_stages[:] = self.next_stages
+        new._ptr = self._ptr
+        new._size = self._size
         return new
 
     def __len__(self) -> int:
-        return len(self._buf)
+        return self._size
 
 
 # ---------------------------------------------------------------------------
@@ -396,10 +476,10 @@ def train_episode(
     config: TournamentConfig,
     epsilon: float,
     global_step: int,
-) -> Tuple[float, int, List[Transition]]:
-    """Run one self-play episode and train on buffer. Returns (loss, step, transitions)."""
+) -> Tuple[float, int, int]:
+    """Run one self-play episode and train on buffer. Returns (loss, step, n_transitions)."""
     learner_id = 0
-    transitions: List[Transition] = []
+    n_transitions = 0
 
     for hole in range(1, config.holes_per_game + 1):
         players = [Player(name=f"P{i}", id=i, type="Heuristic") for i in range(4)]
@@ -440,12 +520,13 @@ def train_episode(
 
                 if pid == learner_id:
                     tok_after = _get_tokens(golf, pid)
-                    transitions.append(Transition(
+                    buffer.push_single(
                         state=tok, action=aid, reward=float(r0),
                         next_state=tok_after,
                         done=1.0 if golf.game_over else 0.0,
                         stage=0, next_stage=1,
-                    ))
+                    )
+                    n_transitions += 1
                 if golf.game_over:
                     break
 
@@ -473,12 +554,13 @@ def train_episode(
 
                 if pid == learner_id:
                     tok1_after = _get_tokens(golf, pid)
-                    transitions.append(Transition(
+                    buffer.push_single(
                         state=tok1, action=aid1, reward=float(r1),
                         next_state=tok1_after,
                         done=1.0 if golf.game_over else 0.0,
                         stage=1, next_stage=0,
-                    ))
+                    )
+                    n_transitions += 1
 
                 if len(golf.deck) < golf.num_players + 2:
                     golf.deck = GolfDeck()
@@ -489,22 +571,19 @@ def train_episode(
                     golf.last_turn = True
                     golf.end_game_player_id = pid
 
-    # Add transitions to buffer
-    buffer.extend(transitions)
-
-    # Train on buffer
+    # Train on buffer (transitions were pushed directly via push_single)
     losses = []
     if len(buffer) >= config.min_buffer_size:
         model.train()
         for _ in range(config.updates_per_episode):
-            batch = buffer.sample(config.batch_size)
-            states = torch.tensor(np.stack([t.state for t in batch]), dtype=torch.long, device=device)
-            actions = torch.tensor([t.action for t in batch], dtype=torch.long, device=device)
-            rewards = torch.tensor([t.reward for t in batch], dtype=torch.float32, device=device)
-            next_states = torch.tensor(np.stack([t.next_state for t in batch]), dtype=torch.long, device=device)
-            dones = torch.tensor([t.done for t in batch], dtype=torch.float32, device=device)
-            stages = torch.tensor([t.stage for t in batch], dtype=torch.long, device=device)
-            next_stages = torch.tensor([t.next_stage for t in batch], dtype=torch.long, device=device)
+            batch = buffer.sample(config.batch_size, device)
+            states = batch["states"]
+            actions = batch["actions"]
+            rewards = batch["rewards"]
+            next_states = batch["next_states"]
+            dones = batch["dones"]
+            stages = batch["stages"]
+            next_stages = batch["next_stages"]
 
             q = model(states, stages)
             q_sel = q.gather(1, actions.unsqueeze(1)).squeeze(1)
@@ -530,7 +609,7 @@ def train_episode(
                 target_model.load_state_dict(model.state_dict())
 
     avg_loss = float(np.mean(losses)) if losses else float("nan")
-    return avg_loss, global_step, transitions
+    return avg_loss, global_step, n_transitions
 
 
 # ---------------------------------------------------------------------------
@@ -555,7 +634,6 @@ def train_episodes_vectorized(
 
     Returns (avg_loss, global_step).
     """
-    all_transitions: List[Transition] = []
 
     for hole in range(1, config.holes_per_game + 1):
         state = reset_games(N, device)
@@ -594,20 +672,18 @@ def train_episodes_vectorized(
 
                 step_stage0(state, actions_s0, pid)
 
-                # Record stage0 transition for all players
+                # Record stage0 transition for all active players (batch push)
                 obs_after_s0 = get_observation(state, pid)
-                for n in range(N):
-                    if not active[n]:
-                        continue
-                    all_transitions.append(Transition(
-                        state=obs_before_s0[n].cpu().numpy(),
-                        action=int(aid_s0[n].item()),
-                        reward=0.0,
-                        next_state=obs_after_s0[n].cpu().numpy(),
-                        done=1.0 if state.done[n] else 0.0,
-                        stage=0,
-                        next_stage=1,
-                    ))
+                active_np = active.cpu().numpy()
+                buffer.push_batch(
+                    states=obs_before_s0.cpu().numpy()[active_np],
+                    actions=aid_s0.cpu().numpy()[active_np],
+                    rewards=np.zeros(int(active_np.sum()), dtype=np.float32),
+                    next_states=obs_after_s0.cpu().numpy()[active_np],
+                    dones=state.done.float().cpu().numpy()[active_np],
+                    stages=np.zeros(int(active_np.sum()), dtype=np.int64),
+                    next_stages=np.ones(int(active_np.sum()), dtype=np.int64),
+                )
 
                 if state.done.all():
                     break
@@ -629,18 +705,16 @@ def train_episodes_vectorized(
                 rewards_s1 = step_stage1(state, actions_s1, pid)
 
                 obs_after_s1 = get_observation(state, pid)
-                for n in range(N):
-                    if not active[n]:
-                        continue
-                    all_transitions.append(Transition(
-                        state=obs_before_s1[n].cpu().numpy(),
-                        action=int(aid_s1[n].item()),
-                        reward=float(rewards_s1[n].item()),
-                        next_state=obs_after_s1[n].cpu().numpy(),
-                        done=1.0 if state.done[n] else 0.0,
-                        stage=1,
-                        next_stage=0,
-                    ))
+                active_np = active.cpu().numpy()
+                buffer.push_batch(
+                    states=obs_before_s1.cpu().numpy()[active_np],
+                    actions=aid_s1.cpu().numpy()[active_np],
+                    rewards=rewards_s1.float().cpu().numpy()[active_np],
+                    next_states=obs_after_s1.cpu().numpy()[active_np],
+                    dones=state.done.float().cpu().numpy()[active_np],
+                    stages=np.ones(int(active_np.sum()), dtype=np.int64),
+                    next_stages=np.zeros(int(active_np.sum()), dtype=np.int64),
+                )
 
                 # Check if all cards revealed -> trigger last turn
                 all_rev = state.player_revealed[:, pid, :].all(dim=1)
@@ -652,22 +726,19 @@ def train_episodes_vectorized(
                     state.end_game_player,
                 )
 
-    # Bulk extend replay buffer
-    buffer.extend(all_transitions)
-
-    # Train on buffer
+    # Train on buffer (transitions were pushed directly via push_batch)
     losses = []
     if len(buffer) >= config.min_buffer_size:
         model.train()
         for _ in range(config.updates_per_episode * max(1, N // 10)):
-            batch = buffer.sample(config.batch_size)
-            states = torch.tensor(np.stack([t.state for t in batch]), dtype=torch.long, device=device)
-            actions = torch.tensor([t.action for t in batch], dtype=torch.long, device=device)
-            rewards = torch.tensor([t.reward for t in batch], dtype=torch.float32, device=device)
-            next_states = torch.tensor(np.stack([t.next_state for t in batch]), dtype=torch.long, device=device)
-            dones = torch.tensor([t.done for t in batch], dtype=torch.float32, device=device)
-            stages = torch.tensor([t.stage for t in batch], dtype=torch.long, device=device)
-            next_stages = torch.tensor([t.next_stage for t in batch], dtype=torch.long, device=device)
+            batch = buffer.sample(config.batch_size, device)
+            states = batch["states"]
+            actions = batch["actions"]
+            rewards = batch["rewards"]
+            next_states = batch["next_states"]
+            dones = batch["dones"]
+            stages = batch["stages"]
+            next_stages = batch["next_stages"]
 
             q = model(states, stages)
             q_sel = q.gather(1, actions.unsqueeze(1)).squeeze(1)
