@@ -269,6 +269,26 @@ def advance_to_human_turn(session: GameSession) -> list[str]:
     return ai_summaries
 
 
+def build_player_table(session: GameSession, player_id: int) -> dict:
+    """Return the visible card grid and score for a single player."""
+    golf = session.golf
+    player = golf.players[player_id]
+    display = []
+    for row in range(2):
+        row_cards = []
+        for col in range(3):
+            row_cards.append(_card_display(player.open_cards[row][col]))
+        display.append(row_cards)
+    return {
+        "game_id": session.game_id,
+        "player_id": player.id,
+        "player_type": player.type.lower(),
+        "cards": display,
+        "score": float(player.score),
+        "is_current": player.id == session.current_player_id,
+    }
+
+
 def get_final_scores(session: GameSession) -> list[dict]:
     """Compute final scores for all players."""
     golf = session.golf

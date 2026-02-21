@@ -37,6 +37,46 @@ def test_rules(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Player table
+# ---------------------------------------------------------------------------
+
+
+def test_player_table(client: TestClient) -> None:
+    create = client.post("/api/v1/games", json={"num_players": 2})
+    game_id = create.json()["game_id"]
+
+    resp = client.get(f"/api/v1/games/{game_id}/players/0/table")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["player_id"] == 0
+    assert len(body["cards"]) == 2
+    assert len(body["cards"][0]) == 3
+    assert "score" in body
+
+
+def test_player_table_other_player(client: TestClient) -> None:
+    create = client.post("/api/v1/games", json={"num_players": 3})
+    game_id = create.json()["game_id"]
+
+    resp = client.get(f"/api/v1/games/{game_id}/players/2/table")
+    assert resp.status_code == 200
+    assert resp.json()["player_id"] == 2
+
+
+def test_player_table_invalid_id(client: TestClient) -> None:
+    create = client.post("/api/v1/games", json={"num_players": 2})
+    game_id = create.json()["game_id"]
+
+    resp = client.get(f"/api/v1/games/{game_id}/players/5/table")
+    assert resp.status_code == 404
+
+
+def test_player_table_game_not_found(client: TestClient) -> None:
+    resp = client.get("/api/v1/games/nonexistent/players/0/table")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Create game
 # ---------------------------------------------------------------------------
 

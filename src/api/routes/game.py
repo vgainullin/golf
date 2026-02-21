@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from src.api.game_manager import (
     advance_to_human_turn,
     build_game_state,
+    build_player_table,
     create_game,
     delete_session,
     execute_draw,
@@ -22,6 +23,7 @@ from src.api.game_models import (
     GameOverResponse,
     GameState,
     PlaceActionRequest,
+    PlayerTableResponse,
 )
 
 router = APIRouter(prefix="/games", tags=["game"])
@@ -191,6 +193,24 @@ async def place_card(game_id: str, body: PlaceActionRequest) -> ActionResponse:
         state["message"] = "Your turn: draw a card (draw_deck or take_discard)."
 
     return ActionResponse(reward=reward, ai_actions=ai_msgs, state=GameState(**state))
+
+
+# ---------------------------------------------------------------------------
+# GET /games/{game_id}/players/{player_id}/table  – single player's visible grid
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{game_id}/players/{player_id}/table", response_model=PlayerTableResponse)
+async def player_table(game_id: str, player_id: int) -> PlayerTableResponse:
+    """Get the current visible card grid and score for one player."""
+    session = _require_session(game_id)
+    golf = session.golf
+    if player_id < 0 or player_id >= golf.num_players:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Player {player_id} does not exist (game has {golf.num_players} players)",
+        )
+    return PlayerTableResponse(**build_player_table(session, player_id))
 
 
 # ---------------------------------------------------------------------------

@@ -123,3 +123,15 @@ class GameOverResponse(BaseModel):
     game_id: str
     scoreboard: list[ScoreboardEntry]
     winner: int
+
+
+class PlayerTableResponse(BaseModel):
+    game_id: str
+    player_id: int
+    player_type: str
+    cards: list[list[str]] = Field(
+        ...,
+        description="2x3 grid. Each cell is 'Rank+Suit' (e.g. 'Ks') or '?' if face-down.",
+    )
+    score: float
+    is_current: bool
