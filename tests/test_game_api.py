@@ -23,6 +23,20 @@ def client() -> TestClient:
 
 
 # ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+
+
+def test_rules(client: TestClient) -> None:
+    resp = client.get("/api/v1/games/rules")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "goal" in body
+    assert "scoring" in body
+    assert "turn" in body
+
+
+# ---------------------------------------------------------------------------
 # Create game
 # ---------------------------------------------------------------------------
 

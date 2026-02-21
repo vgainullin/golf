@@ -26,6 +26,32 @@ from src.api.game_models import (
 
 router = APIRouter(prefix="/games", tags=["game"])
 
+_RULES = {
+    "goal": "Lowest score wins.",
+    "setup": "Each player gets 6 cards in a 2x3 grid (face-down). Two are flipped to start.",
+    "turn": [
+        "1. Draw: take the face-up discard OR draw from the deck.",
+        "2. Then either PLACE the drawn card into your grid (replacing a card) "
+        "or DISCARD it and flip one of your face-down cards.",
+    ],
+    "end": "The round ends once any player has all 6 cards face-up. Everyone else gets one final turn.",
+    "scoring": {
+        "2": -2,
+        "3-9": "face value",
+        "10/J/Q": 10,
+        "K": 0,
+        "A": 1,
+        "column_pair": "Two matching cards in the same column score 0 instead.",
+    },
+    "grid_positions": "Row-major: [0,1,2] = top row, [3,4,5] = bottom row.",
+}
+
+
+@router.get("/rules")
+async def rules() -> dict:
+    """Return a concise summary of the Golf card game rules."""
+    return _RULES
+
 
 def _require_session(game_id: str):
     session = get_session(game_id)
