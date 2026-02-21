@@ -118,6 +118,39 @@ class GolfDQN(nn.Module):
         return self.head(features)
 
 
+STATE_SEQUENCE_LENGTH_V2 = 29  # 29 card tokens to embed (excludes deck_remaining scalar)
+
+
+class GolfDQNv2(nn.Module):
+    """Expanded DQN with full table visibility (v2 observation)."""
+
+    def __init__(self, embedding_dim: int, hidden_dim: int, num_actions: int = NUM_ACTIONS):
+        super().__init__()
+        self.embedding = nn.Embedding(CARD_VOCAB_SIZE, embedding_dim)
+        self.stage_embedding = nn.Embedding(STAGE_VOCAB_SIZE, embedding_dim)
+        # 29 card tokens + 1 stage token -> flatten, then append 1 scalar (deck remaining)
+        self.encoder = nn.Sequential(
+            nn.Linear((STATE_SEQUENCE_LENGTH_V2 + 1) * embedding_dim + 1, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.head = nn.Linear(hidden_dim, num_actions)
+
+    def forward(self, state_tokens: torch.Tensor, stages: torch.Tensor) -> torch.Tensor:
+        # state_tokens: (batch, 30) -- first 29 are card tokens, last is deck_remaining
+        card_tokens = state_tokens[:, :29]
+        deck_remaining = state_tokens[:, 29].float() / 27.0  # normalize
+
+        embeds = self.embedding(card_tokens)  # (batch, 29, emb)
+        stage_embed = self.stage_embedding(stages).unsqueeze(1)  # (batch, 1, emb)
+        combined = torch.cat([embeds, stage_embed], dim=1)  # (batch, 30, emb)
+        flat = combined.view(combined.size(0), -1)  # (batch, 30*emb)
+        flat = torch.cat([flat, deck_remaining.unsqueeze(1)], dim=1)  # (batch, 30*emb + 1)
+        features = self.encoder(flat)
+        return self.head(features)
+
+
 def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -176,7 +209,11 @@ def split_dataset(
 
 def resolve_device(device_pref: str) -> torch.device:
     if device_pref == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
     return torch.device(device_pref)
 
 

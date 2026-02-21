@@ -153,6 +153,60 @@ def get_observation(state: VectorizedGolfState, player_id: int) -> torch.Tensor:
     return torch.cat([obs_cards, obs_holding.unsqueeze(1), obs_discard.unsqueeze(1)], dim=1)  # (N, 8)
 
 
+def get_observation_v2(state: VectorizedGolfState, player_id: int) -> torch.Tensor:
+    """Extract expanded observation with full table visibility.
+
+    Layout (30 tokens):
+        [0-5]   own 6 cards (revealed or 52)
+        [6]     own holding (or 52)
+        [7]     discard top
+        [8-13]  opponent 1 visible cards (revealed or 52)
+        [14]    opponent 1 holding (or 52)
+        [15-20] opponent 2 visible cards (revealed or 52)
+        [21]    opponent 2 holding (or 52)
+        [22-27] opponent 3 visible cards (revealed or 52)
+        [28]    opponent 3 holding (or 52)
+        [29]    deck cards remaining (0-27, raw int)
+
+    Opponents in relative order: (pid+1)%4, (pid+2)%4, (pid+3)%4.
+
+    Returns: (N, 30) int64
+    """
+    N = state.player_cards.shape[0]
+    device = state.player_cards.device
+
+    # Own cards + holding + discard (same as v1)
+    cards = state.player_cards[:, player_id, :].long()  # (N, 6)
+    revealed = state.player_revealed[:, player_id, :]    # (N, 6)
+    obs_cards = torch.where(revealed, cards, torch.full_like(cards, UNKNOWN_CARD))
+
+    holding = state.player_holding[:, player_id].long()
+    obs_holding = torch.where(holding >= 0, holding, torch.full_like(holding, UNKNOWN_CARD))
+
+    obs_discard = state.discard_top.long()
+
+    parts = [obs_cards, obs_holding.unsqueeze(1), obs_discard.unsqueeze(1)]
+
+    # Opponent info in relative order
+    for offset in range(1, 4):
+        opp_id = (player_id + offset) % 4
+        opp_cards = state.player_cards[:, opp_id, :].long()
+        opp_revealed = state.player_revealed[:, opp_id, :]
+        opp_obs = torch.where(opp_revealed, opp_cards, torch.full_like(opp_cards, UNKNOWN_CARD))
+
+        opp_holding = state.player_holding[:, opp_id].long()
+        opp_obs_holding = torch.where(opp_holding >= 0, opp_holding, torch.full_like(opp_holding, UNKNOWN_CARD))
+
+        parts.append(opp_obs)
+        parts.append(opp_obs_holding.unsqueeze(1))
+
+    # Deck cards remaining
+    deck_remaining = (NUM_CARDS - state.deck_ptr.long()).clamp(min=0)
+    parts.append(deck_remaining.unsqueeze(1))
+
+    return torch.cat(parts, dim=1)  # (N, 30)
+
+
 def step_stage0(state: VectorizedGolfState, actions: torch.Tensor, player_id: int) -> torch.Tensor:
     """Execute stage 0 actions. Action 0=take face card, 1=draw from deck.
 
