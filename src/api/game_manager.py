@@ -150,10 +150,21 @@ def build_game_state(session: GameSession) -> dict:
     }
 
 
-def _play_ai_turn(session: GameSession, player_id: int) -> str:
-    """Execute a full AI turn (stage 0 + stage 1) and return a summary string."""
+def _play_ai_turn(session: GameSession, player_id: int) -> str | None:
+    """Execute a full AI turn (stage 0 + stage 1) and return a summary string.
+
+    Returns ``None`` when the player's cards are already fully revealed
+    (matching simulation.py's pre-turn check), which also sets game_over.
+    """
     golf = session.golf
     player = golf.players[player_id]
+
+    # Mirror simulation.py: gather state first, skip if fully revealed
+    player.gather_game_state(golf)
+    if "?" not in player.game_state:
+        golf.game_over = True
+        return None
+
     take_random = player.type == "Random"
 
     # Stage 0: draw
@@ -242,11 +253,13 @@ def advance_to_human_turn(session: GameSession) -> list[str]:
             break
 
         summary = _play_ai_turn(session, pid)
+        if summary is None:
+            # All cards were already revealed — game ended inside _play_ai_turn
+            break
         ai_summaries.append(summary)
 
         # Check if all cards are revealed -> last turn
         player = golf.players[pid]
-        player.gather_game_state(golf)
         if "?" not in player.game_state:
             golf.last_turn = True
             golf.end_game_player_id = pid
