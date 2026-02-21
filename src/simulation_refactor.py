@@ -577,7 +577,7 @@ def get_player_action(game, player_id, action_num, rank_cutoff=5, take_random_ac
                 return 0, None, 0  # Take the face card
         elif player.type == 'Heuristic':
             rank_of_face_card = player.card2rank(game.face_card)
-            rank_match = np.argwhere(player.open_ranks == rank_of_face_card)
+            rank_match = np.argwhere(np.array(player.open_ranks) == rank_of_face_card)
             if player.card_to_score[game.face_card[0]] < rank_cutoff or rank_match.size > 0:
                 return 0, None, 0  # Take the face card
             else:
