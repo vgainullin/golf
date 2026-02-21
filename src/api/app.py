@@ -1,19 +1,19 @@
 from fastapi import FastAPI
 
 from src.api.config import get_settings
-from src.api.routes import secrets
+from src.api.routes import game, secrets
 
 app = FastAPI(
-    title="Golf – GitHub Secrets Manager",
+    title="Golf – Card Game & GitHub Secrets Manager",
     description=(
-        "FastAPI interface for managing GitHub Actions repository secrets. "
-        "Note: GitHub never exposes secret *values* via its API — only names "
-        "and metadata (created_at / updated_at) are returned."
+        "FastAPI interface for playing the Golf card game and managing "
+        "GitHub Actions repository secrets."
     ),
-    version="0.2.0",
+    version="0.3.0",
 )
 
 app.include_router(secrets.router, prefix="/api/v1")
+app.include_router(game.router, prefix="/api/v1")
 
 
 @app.get("/health")
