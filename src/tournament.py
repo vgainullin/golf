@@ -98,6 +98,7 @@ class AgentRecord:
     total_score: float = 0.0
     games_played: int = 0
     parent_id: Optional[str] = None
+    elite_age: int = 0
     hyperparams: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -979,6 +980,10 @@ class TournamentTrainer:
         print(f"  epsilon={epsilon:.3f}")
 
         for idx, (record, model, target, optimizer, buf) in enumerate(self.population):
+            # Children (born this generation) get higher epsilon for more exploration
+            is_child = record.generation == self.generation
+            agent_eps = min(epsilon + 0.15, 0.5) if is_child else epsilon
+
             loss, _ = train_episodes_vectorized(
                 N=n_eps,
                 model=model,
@@ -987,19 +992,28 @@ class TournamentTrainer:
                 optimizer=optimizer,
                 device=self.device,
                 config=self.config,
-                epsilon=epsilon,
+                epsilon=agent_eps,
                 global_step=0,
             )
 
             print(
                 f"  {record.agent_id}: trained {n_eps} vectorized eps, "
-                f"buf={len(buf):,d}, loss={loss:.4f}"
+                f"buf={len(buf):,d}, loss={loss:.4f}, eps={agent_eps:.3f}"
             )
 
     # ----- Round-robin tournament -----
 
     def _run_tournament(self) -> None:
         """Round-robin matches between all agents using vectorized play."""
+        # Reset ELO so tournament measures current-generation strength only
+        for rec, _, _, _, _ in self.population:
+            rec.elo = DEFAULT_ELO
+            rec.wins = 0
+            rec.losses = 0
+            rec.draws = 0
+            rec.total_score = 0.0
+            rec.games_played = 0
+
         n = len(self.population)
         for i in range(n):
             for j in range(i + 1, n):
@@ -1063,9 +1077,19 @@ class TournamentTrainer:
         elites = ranked[: self.config.elitism_count]
         new_population = []
 
-        # Keep elites unchanged
+        # Keep elites -- but age-limit them (max 3 gens as elite)
         for idx in elites:
             rec, model, target, opt, buf = self.population[idx]
+            rec.elite_age += 1
+            if rec.elite_age >= 3:
+                # Force through mutation: fresh optimizer, possible LR change
+                lr = rec.hyperparams["lr"]
+                if random.random() < self.config.mutation_rate:
+                    lr = lr * np.exp(np.random.normal(0, self.config.mutation_sigma))
+                    lr = np.clip(lr, self.config.lr_range[0], self.config.lr_range[1])
+                    rec.hyperparams["lr"] = float(lr)
+                opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+                rec.elite_age = 0
             new_population.append((rec, model, target, opt, buf))
 
         # Fill remaining slots by mutating top half
@@ -1082,6 +1106,9 @@ class TournamentTrainer:
             if random.random() < self.config.mutation_rate:
                 lr = lr * np.exp(np.random.normal(0, self.config.mutation_sigma))
                 lr = np.clip(lr, self.config.lr_range[0], self.config.lr_range[1])
+
+            if random.random() < self.config.mutation_rate:
+                hidden_dim = random.choice(self.config.hidden_dim_choices)
 
             agent_id = f"gen{self.generation + 1}_agent{child_id}"
             child_rec = AgentRecord(
