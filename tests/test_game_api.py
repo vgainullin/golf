@@ -37,6 +37,39 @@ def test_rules(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Simulate (all-AI auto-play)
+# ---------------------------------------------------------------------------
+
+
+def test_simulate_defaults(client: TestClient) -> None:
+    resp = client.post("/api/v1/games/simulate")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["scoreboard"]) == 4
+    assert "winner" in body
+    for entry in body["scoreboard"]:
+        assert "player_id" in entry
+        assert "final_score" in entry
+
+
+def test_simulate_custom(client: TestClient) -> None:
+    resp = client.post(
+        "/api/v1/games/simulate",
+        json={"num_players": 2, "player_type": "random", "starting_player_id": 1},
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()["scoreboard"]) == 2
+
+
+def test_simulate_invalid_start(client: TestClient) -> None:
+    resp = client.post(
+        "/api/v1/games/simulate",
+        json={"num_players": 2, "starting_player_id": 5},
+    )
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # Player table
 # ---------------------------------------------------------------------------
 

@@ -14,6 +14,7 @@ from src.api.game_manager import (
     execute_place,
     get_final_scores,
     get_session,
+    simulate_game,
 )
 from src.api.game_models import (
     ActionResponse,
@@ -24,6 +25,8 @@ from src.api.game_models import (
     GameState,
     PlaceActionRequest,
     PlayerTableResponse,
+    SimulateRequest,
+    SimulateResponse,
 )
 
 router = APIRouter(prefix="/games", tags=["game"])
@@ -77,11 +80,33 @@ def _require_human_turn(session):
 # ---------------------------------------------------------------------------
 
 
+@router.post("/simulate", response_model=SimulateResponse)
+async def simulate(body: SimulateRequest | None = None) -> SimulateResponse:
+    """Create an all-AI game, auto-play it to completion, and return scores."""
+    body = body or SimulateRequest()
+    if body.starting_player_id >= body.num_players:
+        raise HTTPException(
+            status_code=422,
+            detail="starting_player_id must be less than num_players",
+        )
+    session = create_game(
+        num_players=body.num_players,
+        human_player_id=None,
+        opponent_type=body.player_type.value,
+        starting_player_id=body.starting_player_id,
+    )
+    results = simulate_game(session)
+    winner = min(results, key=lambda r: r["final_score"])["player_id"]
+    game_id = session.game_id
+    delete_session(game_id)
+    return SimulateResponse(game_id=game_id, scoreboard=results, winner=winner)
+
+
 @router.post("", response_model=CreateGameResponse, status_code=201)
 async def new_game(body: CreateGameRequest | None = None) -> CreateGameResponse:
     """Start a new Golf card game session."""
     body = body or CreateGameRequest()
-    if body.human_player_id >= body.num_players:
+    if body.human_player_id is not None and body.human_player_id >= body.num_players:
         raise HTTPException(
             status_code=422,
             detail="human_player_id must be less than num_players",
@@ -92,7 +117,7 @@ async def new_game(body: CreateGameRequest | None = None) -> CreateGameResponse:
         opponent_type=body.opponent_type.value,
     )
     # If human is not player 0, play AI turns up to the human
-    if session.human_player_id != 0:
+    if session.human_player_id is not None and session.human_player_id != 0:
         ai_msgs = advance_to_human_turn(session)
         # reset round since this is the opening
         session.round_num = 0

@@ -1,10 +1,12 @@
-"""Play a 9-hole Golf game through the REST API with 4 heuristic players.
+"""Simulate 100 nine-hole Golf games via the REST API (all-AI heuristic).
 
-Player 0 is the 'human' seat controlled by this script using simple heuristic
-logic (take discard if rank < 4, else draw; place if it lowers score, else
-discard+flip).  Players 1-3 are server-side heuristics.
+Rotations per the user spec:
+  - Seats rotate after every full 9-hole game (player types shift).
+  - The starting player for each game rotates across the 100 games.
+  - Within a game, the first-draw player rotates each hole sequentially.
 
 Usage:
+    # start the server first:  uvicorn src.api.app:app
     python scripts/sim_via_api.py
 """
 
@@ -13,150 +15,79 @@ import sys
 
 BASE = "http://127.0.0.1:8000/api/v1/games"
 
-SCORE_MAP = {
-    "2": -2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
-    "8": 8, "9": 9, "X": 10, "J": 10, "Q": 10, "K": 0, "A": 1,
-}
-
-HOLES = 9
+NUM_PLAYERS = 4
+HOLES_PER_GAME = 9
+NUM_GAMES = 100
 
 
-def rank_score(rank: str) -> int:
-    return SCORE_MAP.get(rank, 10)
-
-
-def pick_draw_action(state: dict) -> str:
-    """Heuristic: take discard if its rank scores < 4, else draw from deck."""
-    fc = state.get("face_card")
-    if fc and rank_score(fc["rank"]) < 4:
-        return "take_discard"
-    return "draw_deck"
-
-
-def pick_place_action(state: dict) -> dict:
-    """Heuristic: place the held card at the position that helps most,
-    or discard+flip if the card is bad."""
-    holding = state.get("holding")
-    if not holding:
-        return {"action": "discard", "position": 0}
-
-    held_score = rank_score(holding["rank"])
-    cards = state["players"][0]["cards"]  # human is player 0
-
-    # Find the best face-down slot to flip (for discard path)
-    face_down = []
-    for r in range(2):
-        for c in range(3):
-            pos = r * 3 + c
-            if cards[r][c] == "?":
-                face_down.append(pos)
-
-    # Find the worst visible card we could replace
-    worst_pos = None
-    worst_score = -99
-    for r in range(2):
-        for c in range(3):
-            pos = r * 3 + c
-            cell = cards[r][c]
-            if cell == "?":
-                continue
-            cell_rank = cell[0]
-            s = rank_score(cell_rank)
-            if s > worst_score:
-                worst_score = s
-                worst_pos = pos
-
-    # Place the card if it improves on the worst visible card
-    if worst_pos is not None and held_score < worst_score:
-        return {"action": "place", "position": worst_pos}
-
-    # Otherwise place into a face-down slot if the card is decent
-    if held_score <= 4 and face_down:
-        return {"action": "place", "position": face_down[0]}
-
-    # Discard and flip a face-down card
-    if face_down:
-        return {"action": "discard", "position": face_down[0]}
-
-    # All revealed – just place somewhere
-    return {"action": "place", "position": worst_pos or 0}
-
-
-def play_one_hole(client: httpx.Client, hole_num: int) -> dict:
-    """Play a single hole and return {player_id: score}."""
-    resp = client.post(BASE, json={
-        "num_players": 4,
-        "human_player_id": 0,
-        "opponent_type": "heuristic",
-    })
+def simulate_hole(client: httpx.Client, starting_player_id: int) -> dict[int, float]:
+    """Play one hole via POST /games/simulate and return {player_id: score}."""
+    resp = client.post(
+        f"{BASE}/simulate",
+        json={
+            "num_players": NUM_PLAYERS,
+            "player_type": "heuristic",
+            "starting_player_id": starting_player_id,
+        },
+    )
     resp.raise_for_status()
     data = resp.json()
-    game_id = data["game_id"]
-    state = data["state"]
-    print(f"\n--- Hole {hole_num} (game {game_id}) ---")
-
-    turn = 0
-    while not state["game_over"]:
-        # Draw
-        action = pick_draw_action(state)
-        r = client.post(f"{BASE}/{game_id}/draw", json={"action": action})
-        r.raise_for_status()
-        state = r.json()["state"]
-
-        if state["game_over"]:
-            break
-
-        # Place
-        body = pick_place_action(state)
-        r = client.post(f"{BASE}/{game_id}/place", json=body)
-        r.raise_for_status()
-        result = r.json()
-        state = result["state"]
-
-        turn += 1
-        if result["ai_actions"]:
-            for a in result["ai_actions"]:
-                print(f"  {a}")
-
-    # Fetch scores
-    r = client.get(f"{BASE}/{game_id}/scores")
-    r.raise_for_status()
-    scores_data = r.json()
-    hole_scores = {}
-    for entry in scores_data["scoreboard"]:
-        pid = entry["player_id"]
-        sc = entry["final_score"]
-        hole_scores[pid] = sc
-    winner = scores_data["winner"]
-    print(f"  Turns: {turn}  |  Scores: {hole_scores}  |  Hole winner: Player {winner}")
-
-    # Clean up
-    client.delete(f"{BASE}/{game_id}")
-    return hole_scores
+    return {e["player_id"]: e["final_score"] for e in data["scoreboard"]}
 
 
 def main():
-    totals = {i: 0.0 for i in range(4)}
     with httpx.Client(timeout=30) as client:
-        # Quick health check
+        # Health check
         h = client.get("http://127.0.0.1:8000/health")
         if h.status_code != 200:
             print("Server not reachable. Start it with: uvicorn src.api.app:app")
             sys.exit(1)
 
-        for hole in range(1, HOLES + 1):
-            hole_scores = play_one_hole(client, hole)
-            for pid, sc in hole_scores.items():
-                totals[pid] += sc
+        # Accumulators: game_totals[game][pid] = 9-hole total
+        game_totals: list[dict[int, float]] = []
+        # Per-player-id accumulator across all games
+        all_totals = {pid: 0.0 for pid in range(NUM_PLAYERS)}
+        # Win counter per player id
+        wins = {pid: 0 for pid in range(NUM_PLAYERS)}
 
-    print("\n========== FINAL RESULTS (9 holes) ==========")
-    print(f"{'Player':<12} {'Type':<12} {'Total Score':<12}")
-    print("-" * 36)
-    for pid in sorted(totals):
-        label = "Human-Heur" if pid == 0 else "Heuristic"
-        print(f"Player {pid:<5} {label:<12} {totals[pid]:<12.0f}")
-    overall_winner = min(totals, key=totals.get)
-    print(f"\nOverall winner: Player {overall_winner} with {totals[overall_winner]:.0f}")
+        for game_num in range(NUM_GAMES):
+            # Rotate which player starts the game
+            game_start = game_num % NUM_PLAYERS
+            hole_scores_accum = {pid: 0.0 for pid in range(NUM_PLAYERS)}
+
+            for hole in range(HOLES_PER_GAME):
+                # Within a game, rotate first-draw sequentially per hole
+                starting = (game_start + hole) % NUM_PLAYERS
+                scores = simulate_hole(client, starting)
+                for pid, sc in scores.items():
+                    hole_scores_accum[pid] += sc
+
+            game_totals.append(hole_scores_accum)
+            game_winner = min(hole_scores_accum, key=hole_scores_accum.get)
+            wins[game_winner] += 1
+            for pid in range(NUM_PLAYERS):
+                all_totals[pid] += hole_scores_accum[pid]
+
+            if (game_num + 1) % 25 == 0:
+                print(f"  ... completed {game_num + 1}/{NUM_GAMES} games")
+
+    # Compute averages
+    print(f"\n{'='*56}")
+    print(f"  RESULTS: {NUM_GAMES} games x {HOLES_PER_GAME} holes  (4 Heuristic players)")
+    print(f"{'='*56}")
+    print(f"{'Player':<10} {'Avg 9-Hole':<14} {'Total':<10} {'Wins':<8} {'Win %':<8}")
+    print("-" * 50)
+    for pid in range(NUM_PLAYERS):
+        avg = all_totals[pid] / NUM_GAMES
+        print(
+            f"Player {pid:<3} {avg:<14.1f} {all_totals[pid]:<10.0f} "
+            f"{wins[pid]:<8} {wins[pid] / NUM_GAMES * 100:<7.1f}%"
+        )
+
+    overall = min(all_totals, key=all_totals.get)
+    most_wins = max(wins, key=wins.get)
+    print(f"\nLowest avg score:  Player {overall} ({all_totals[overall] / NUM_GAMES:.1f})")
+    print(f"Most game wins:    Player {most_wins} ({wins[most_wins]}/{NUM_GAMES})")
 
 
 if __name__ == "__main__":

@@ -48,11 +48,23 @@ class CardOut(BaseModel):
 
 class CreateGameRequest(BaseModel):
     num_players: int = Field(default=4, ge=2, le=4, description="Number of players (2-4)")
-    human_player_id: int = Field(default=0, ge=0, description="Which player the human controls")
+    human_player_id: Optional[int] = Field(default=0, ge=0, description="Which player the human controls (null for all-AI)")
     opponent_type: PlayerType = Field(
         default=PlayerType.heuristic,
         description="AI type for non-human players",
     )
+
+
+class SimulateRequest(BaseModel):
+    num_players: int = Field(default=4, ge=2, le=4, description="Number of players (2-4)")
+    player_type: PlayerType = Field(default=PlayerType.heuristic, description="AI type for all players")
+    starting_player_id: int = Field(default=0, ge=0, description="Which player draws first")
+
+
+class SimulateResponse(BaseModel):
+    game_id: str
+    scoreboard: list[ScoreboardEntry]
+    winner: int
 
 
 class DrawActionRequest(BaseModel):

@@ -27,7 +27,7 @@ from src.simulation import (
 class GameSession:
     game_id: str
     golf: Golf
-    human_player_id: int
+    human_player_id: int | None  # None = all-AI game
     hole: int = 1
     round_num: int = 0
     current_player_id: int = 0
@@ -57,8 +57,9 @@ def _card_out(card: Any) -> dict | None:
 
 def create_game(
     num_players: int = 4,
-    human_player_id: int = 0,
+    human_player_id: int | None = 0,
     opponent_type: str = "heuristic",
+    starting_player_id: int = 0,
 ) -> GameSession:
     """Create a new Golf game, shuffle, deal, and return the session."""
     type_map = {
@@ -70,7 +71,7 @@ def create_game(
 
     players = []
     for i in range(num_players):
-        if i == human_player_id:
+        if human_player_id is not None and i == human_player_id:
             p = Player(name=f"Player_{i}", id=i, type="Human")
         else:
             p = Player(name=f"Player_{i}", id=i, type=ai_type)
@@ -94,7 +95,7 @@ def create_game(
         game_id=game_id,
         golf=golf,
         human_player_id=human_player_id,
-        current_player_id=0,
+        current_player_id=starting_player_id,
     )
     _sessions[game_id] = session
     return session
@@ -314,3 +315,37 @@ def get_final_scores(session: GameSession) -> list[dict]:
             "final_score": float(p.score),
         })
     return results
+
+
+def simulate_game(session: GameSession) -> list[dict]:
+    """Auto-play an all-AI game to completion and return final scores."""
+    golf = session.golf
+
+    for _ in range(200):  # safety bound
+        if golf.game_over:
+            break
+
+        pid = session.current_player_id
+
+        summary = _play_ai_turn(session, pid)
+        if summary is None:
+            break
+
+        player = golf.players[pid]
+        if "?" not in player.game_state:
+            golf.last_turn = True
+            golf.end_game_player_id = pid
+
+        if len(golf.deck) < golf.num_players + 2:
+            golf.deck = GolfDeck()
+            golf.shuffle()
+
+        # Advance to next player
+        next_pid = (pid + 1) % golf.num_players
+        # Check if next player triggers game end
+        if golf.last_turn and golf.end_game_player_id == next_pid:
+            golf.game_over = True
+            break
+        session.current_player_id = next_pid
+
+    return get_final_scores(session)
