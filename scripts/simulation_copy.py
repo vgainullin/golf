@@ -813,7 +813,7 @@ def _init_random_seed(seed: Optional[int]) -> None:
 
 def _default_player_roster(dqn_player_id: Optional[int] = None) -> List[Player]:
     roster = [
-        Player(name="PL1", id=0, type='Heuristic'),
+        Player(name="PL1", id=0, type='Random'),
         Player(name="PL2", id=1, type='Heuristic'),
         Player(name="PL3", id=2, type='Heuristic'),
         Player(name="PL4", id=3, type='Random'),
