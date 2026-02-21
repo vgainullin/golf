@@ -89,11 +89,17 @@ async def simulate(body: SimulateRequest | None = None) -> SimulateResponse:
             status_code=422,
             detail="starting_player_id must be less than num_players",
         )
+    if body.player_types is not None and len(body.player_types) != body.num_players:
+        raise HTTPException(
+            status_code=422,
+            detail=f"player_types length ({len(body.player_types)}) must equal num_players ({body.num_players})",
+        )
     session = create_game(
         num_players=body.num_players,
         human_player_id=None,
         opponent_type=body.player_type.value,
         starting_player_id=body.starting_player_id,
+        player_types=[t.value for t in body.player_types] if body.player_types else None,
     )
     results = simulate_game(session)
     winner = min(results, key=lambda r: r["final_score"])["player_id"]

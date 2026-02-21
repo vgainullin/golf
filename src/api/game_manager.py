@@ -60,6 +60,7 @@ def create_game(
     human_player_id: int | None = 0,
     opponent_type: str = "heuristic",
     starting_player_id: int = 0,
+    player_types: list[str] | None = None,
 ) -> GameSession:
     """Create a new Golf game, shuffle, deal, and return the session."""
     type_map = {
@@ -71,11 +72,13 @@ def create_game(
 
     players = []
     for i in range(num_players):
-        if human_player_id is not None and i == human_player_id:
-            p = Player(name=f"Player_{i}", id=i, type="Human")
+        if player_types is not None:
+            ptype = type_map.get(player_types[i], "Heuristic")
+        elif human_player_id is not None and i == human_player_id:
+            ptype = "Human"
         else:
-            p = Player(name=f"Player_{i}", id=i, type=ai_type)
-        players.append(p)
+            ptype = ai_type
+        players.append(Player(name=f"Player_{i}", id=i, type=ptype))
 
     golf = Golf(players=players, verbose=False)
     golf.shuffle()

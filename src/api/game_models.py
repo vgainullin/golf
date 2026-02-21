@@ -57,7 +57,8 @@ class CreateGameRequest(BaseModel):
 
 class SimulateRequest(BaseModel):
     num_players: int = Field(default=4, ge=2, le=4, description="Number of players (2-4)")
-    player_type: PlayerType = Field(default=PlayerType.heuristic, description="AI type for all players")
+    player_type: PlayerType = Field(default=PlayerType.heuristic, description="AI type for all players (used when player_types is not set)")
+    player_types: Optional[list[PlayerType]] = Field(default=None, description="Per-player AI types. Length must equal num_players.")
     starting_player_id: int = Field(default=0, ge=0, description="Which player draws first")
 
 
