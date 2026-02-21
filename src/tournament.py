@@ -628,13 +628,14 @@ def train_episodes_vectorized(
     epsilon: float,
     global_step: int,
 ) -> Tuple[float, int]:
-    """Run N self-play episodes in parallel using vectorized env.
+    """Run N episodes in parallel using mixed-table seating.
 
-    All 4 seat positions use the learner model with eps-greedy and
-    record transitions, giving 4x the training data per episode.
+    Seat 0: Heuristic, Seat 1: Random, Seat 2: DQN learner (eps-greedy),
+    Seat 3: Random. Only seat 2 records transitions.
 
     Returns (avg_loss, global_step).
     """
+    LEARNER_SEAT = 2
 
     for hole in range(1, config.holes_per_game + 1):
         state = reset_games(N, device)
@@ -655,67 +656,94 @@ def train_episodes_vectorized(
                 if not active.any():
                     break
 
-                # -- Stage 0: all players use learner model --
+                # -- Stage 0 --
                 state.current_stage.fill_(0)
                 obs = get_observation(state, pid)  # (N, 8)
 
-                st = obs.to(device)
-                sg = torch.zeros(N, dtype=torch.long, device=device)
-                with torch.no_grad():
-                    q = model(st, sg)
-                stage0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=device)
-                stage0_mask[:, 0] = True
-                stage0_mask[:, 1] = state.deck_ptr < 52
-                actions_s0 = eps_greedy_batched(q, epsilon, stage0_mask)
+                if pid == 0:
+                    # Heuristic
+                    actions_s0 = heuristic_stage0(state, pid)
+                elif pid == LEARNER_SEAT:
+                    # DQN learner with eps-greedy
+                    st = obs.to(device)
+                    sg = torch.zeros(N, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q = model(st, sg)
+                    stage0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=device)
+                    stage0_mask[:, 0] = True
+                    stage0_mask[:, 1] = state.deck_ptr < 52
+                    actions_s0 = eps_greedy_batched(q, epsilon, stage0_mask)
+                else:
+                    # Random (seats 1 and 3): eps=1.0 with dummy q-values
+                    stage0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=device)
+                    stage0_mask[:, 0] = True
+                    stage0_mask[:, 1] = state.deck_ptr < 52
+                    dummy_q = torch.zeros(N, VEC_NUM_ACTIONS, device=device)
+                    actions_s0 = eps_greedy_batched(dummy_q, 1.0, stage0_mask)
 
-                obs_before_s0 = obs.clone()
-                aid_s0 = actions_s0.clone()
+                # Record stage0 transition for learner only
+                if pid == LEARNER_SEAT:
+                    obs_before_s0 = obs.clone()
+                    aid_s0 = actions_s0.clone()
 
                 step_stage0(state, actions_s0, pid)
 
-                # Record stage0 transition for all active players (batch push)
-                obs_after_s0 = get_observation(state, pid)
-                active_np = active.cpu().numpy()
-                buffer.push_batch(
-                    states=obs_before_s0.cpu().numpy()[active_np],
-                    actions=aid_s0.cpu().numpy()[active_np],
-                    rewards=np.zeros(int(active_np.sum()), dtype=np.float32),
-                    next_states=obs_after_s0.cpu().numpy()[active_np],
-                    dones=state.done.float().cpu().numpy()[active_np],
-                    stages=np.zeros(int(active_np.sum()), dtype=np.int64),
-                    next_stages=np.ones(int(active_np.sum()), dtype=np.int64),
-                )
+                if pid == LEARNER_SEAT:
+                    obs_after_s0 = get_observation(state, pid)
+                    active_np = active.cpu().numpy()
+                    buffer.push_batch(
+                        states=obs_before_s0.cpu().numpy()[active_np],
+                        actions=aid_s0.cpu().numpy()[active_np],
+                        rewards=np.zeros(int(active_np.sum()), dtype=np.float32),
+                        next_states=obs_after_s0.cpu().numpy()[active_np],
+                        dones=state.done.float().cpu().numpy()[active_np],
+                        stages=np.zeros(int(active_np.sum()), dtype=np.int64),
+                        next_stages=np.ones(int(active_np.sum()), dtype=np.int64),
+                    )
 
                 if state.done.all():
                     break
 
-                # -- Stage 1: all players use learner model --
+                # -- Stage 1 --
                 state.current_stage.fill_(1)
                 obs1 = get_observation(state, pid)
 
-                st1 = obs1.to(device)
-                sg1 = torch.ones(N, dtype=torch.long, device=device)
-                with torch.no_grad():
-                    q1 = model(st1, sg1)
-                mask1 = get_valid_action_mask(state, pid)
-                actions_s1 = eps_greedy_batched(q1, epsilon, mask1)
+                if pid == 0:
+                    # Heuristic
+                    actions_s1 = heuristic_stage1(state, pid)
+                elif pid == LEARNER_SEAT:
+                    # DQN learner with eps-greedy
+                    st1 = obs1.to(device)
+                    sg1 = torch.ones(N, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        q1 = model(st1, sg1)
+                    mask1 = get_valid_action_mask(state, pid)
+                    actions_s1 = eps_greedy_batched(q1, epsilon, mask1)
+                else:
+                    # Random (seats 1 and 3)
+                    mask1 = get_valid_action_mask(state, pid)
+                    dummy_q1 = torch.zeros(N, VEC_NUM_ACTIONS, device=device)
+                    actions_s1 = eps_greedy_batched(dummy_q1, 1.0, mask1)
 
-                obs_before_s1 = obs1.clone()
-                aid_s1 = actions_s1.clone()
+                # Record stage1 transition for learner only
+                if pid == LEARNER_SEAT:
+                    obs_before_s1 = obs1.clone()
+                    aid_s1 = actions_s1.clone()
 
                 rewards_s1 = step_stage1(state, actions_s1, pid)
 
-                obs_after_s1 = get_observation(state, pid)
-                active_np = active.cpu().numpy()
-                buffer.push_batch(
-                    states=obs_before_s1.cpu().numpy()[active_np],
-                    actions=aid_s1.cpu().numpy()[active_np],
-                    rewards=rewards_s1.float().cpu().numpy()[active_np],
-                    next_states=obs_after_s1.cpu().numpy()[active_np],
-                    dones=state.done.float().cpu().numpy()[active_np],
-                    stages=np.ones(int(active_np.sum()), dtype=np.int64),
-                    next_stages=np.zeros(int(active_np.sum()), dtype=np.int64),
-                )
+                if pid == LEARNER_SEAT:
+                    obs_after_s1 = get_observation(state, pid)
+                    active_np = active.cpu().numpy()
+                    buffer.push_batch(
+                        states=obs_before_s1.cpu().numpy()[active_np],
+                        actions=aid_s1.cpu().numpy()[active_np],
+                        rewards=rewards_s1.float().cpu().numpy()[active_np],
+                        next_states=obs_after_s1.cpu().numpy()[active_np],
+                        dones=state.done.float().cpu().numpy()[active_np],
+                        stages=np.ones(int(active_np.sum()), dtype=np.int64),
+                        next_stages=np.zeros(int(active_np.sum()), dtype=np.int64),
+                    )
 
                 # Check if all cards revealed -> trigger last turn
                 all_rev = state.player_revealed[:, pid, :].all(dim=1)
@@ -1063,16 +1091,127 @@ class TournamentTrainer:
             )
             rec.hyperparams["vs_heuristic_score"] = round(score_agent, 2)
 
+    # ----- Mixed-table evaluation -----
+
+    def _run_mixed_table_eval(self, num_games: int = 1000) -> None:
+        """Evaluate each agent in mixed-table games (Heuristic/Random/DQN/Random).
+
+        Runs num_games 9-hole games per agent with DQN at seat 2.
+        Stores average score per hole in rec.hyperparams["mixed_table_score"].
+        """
+        LEARNER_SEAT = 2
+        holes = self.config.match_holes
+
+        for rec, model, _, _, _ in self.population:
+            model.eval()
+            N = num_games
+            total_score = torch.zeros(N, dtype=torch.float32, device=self.device)
+
+            for hole in range(1, holes + 1):
+                state = reset_games(N, self.device)
+                max_rounds = 30
+
+                for round_num in range(max_rounds):
+                    if state.done.all():
+                        break
+
+                    for pid in range(4):
+                        active = ~state.done
+                        back_to_trigger = state.last_turn & (state.end_game_player == pid)
+                        state.done = state.done | (back_to_trigger & active)
+                        active = ~state.done
+
+                        if not active.any():
+                            break
+
+                        # -- Stage 0 --
+                        state.current_stage.fill_(0)
+                        obs = get_observation(state, pid)
+
+                        if pid == 0:
+                            actions_s0 = heuristic_stage0(state, pid)
+                        elif pid == LEARNER_SEAT:
+                            st = obs.to(self.device)
+                            sg = torch.zeros(N, dtype=torch.long, device=self.device)
+                            with torch.no_grad():
+                                q = model(st, sg)
+                            s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
+                            s0_mask[:, 0] = True
+                            s0_mask[:, 1] = state.deck_ptr < 52
+                            actions_s0 = eps_greedy_batched(q, 0.0, s0_mask)
+                        else:
+                            s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
+                            s0_mask[:, 0] = True
+                            s0_mask[:, 1] = state.deck_ptr < 52
+                            dummy_q = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
+                            actions_s0 = eps_greedy_batched(dummy_q, 1.0, s0_mask)
+
+                        step_stage0(state, actions_s0, pid)
+                        if state.done.all():
+                            break
+
+                        # -- Stage 1 --
+                        state.current_stage.fill_(1)
+                        obs1 = get_observation(state, pid)
+
+                        if pid == 0:
+                            actions_s1 = heuristic_stage1(state, pid)
+                        elif pid == LEARNER_SEAT:
+                            st1 = obs1.to(self.device)
+                            sg1 = torch.ones(N, dtype=torch.long, device=self.device)
+                            with torch.no_grad():
+                                q1 = model(st1, sg1)
+                            mask1 = get_valid_action_mask(state, pid)
+                            actions_s1 = eps_greedy_batched(q1, 0.0, mask1)
+                        else:
+                            mask1 = get_valid_action_mask(state, pid)
+                            dummy_q1 = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
+                            actions_s1 = eps_greedy_batched(dummy_q1, 1.0, mask1)
+
+                        step_stage1(state, actions_s1, pid)
+
+                        all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                        newly_last = active & all_rev & (~state.last_turn)
+                        state.last_turn = state.last_turn | newly_last
+                        state.end_game_player = torch.where(
+                            newly_last,
+                            torch.full_like(state.end_game_player, pid),
+                            state.end_game_player,
+                        )
+
+                # Accumulate learner's score for this hole
+                hole_scores = compute_final_score(
+                    state.player_cards[:, LEARNER_SEAT, :], self.device
+                )
+                total_score += hole_scores
+
+            avg_per_hole = total_score.mean().item() / holes
+            rec.hyperparams["mixed_table_score"] = round(avg_per_hole, 3)
+
     # ----- Selection and mutation -----
 
     def _select_and_mutate(self) -> None:
         """Keep elite agents, replace the rest with mutated copies of top performers."""
-        # Sort by ELO (descending)
-        ranked = sorted(
-            range(len(self.population)),
-            key=lambda i: self.population[i][0].elo,
-            reverse=True,
+        n = len(self.population)
+
+        # Rank by ELO (descending) -> position 0 = best
+        elo_order = sorted(range(n), key=lambda i: self.population[i][0].elo, reverse=True)
+        elo_rank = [0] * n
+        for pos, idx in enumerate(elo_order):
+            elo_rank[idx] = pos
+
+        # Rank by mixed_table_score (ascending, lower is better) -> position 0 = best
+        mts_order = sorted(
+            range(n),
+            key=lambda i: self.population[i][0].hyperparams.get("mixed_table_score", 999.0),
         )
+        mts_rank = [0] * n
+        for pos, idx in enumerate(mts_order):
+            mts_rank[idx] = pos
+
+        # Combined rank = mean of both rank positions, sort ascending
+        combined = [(elo_rank[i] + mts_rank[i]) / 2.0 for i in range(n)]
+        ranked = sorted(range(n), key=lambda i: combined[i])
 
         elites = ranked[: self.config.elitism_count]
         new_population = []
@@ -1166,6 +1305,7 @@ class TournamentTrainer:
             "best_agent": rankings[0]["agent_id"],
             "best_elo": rankings[0]["elo"],
             "best_vs_heuristic": rankings[0].get("hyperparams", {}).get("vs_heuristic_score", "N/A"),
+            "best_mixed_table_score": rankings[0].get("hyperparams", {}).get("mixed_table_score", "N/A"),
         }
         (gen_dir / "generation_summary.json").write_text(json.dumps(summary, indent=2))
 
@@ -1216,6 +1356,10 @@ class TournamentTrainer:
             print("Tournament round-robin...")
             self._run_tournament()
 
+            # Phase 2b: Mixed-table evaluation
+            print("Mixed-table evaluation...")
+            self._run_mixed_table_eval()
+
             # Phase 3: Save
             summary = self._save_generation()
 
@@ -1223,9 +1367,10 @@ class TournamentTrainer:
             print(f"\nGeneration {gen} results ({gen_elapsed:.0f}s):")
             for i, r in enumerate(summary["rankings"][:5]):
                 marker = " *" if i == 0 else ""
+                mts = r['hyperparams'].get('mixed_table_score', 'N/A')
                 print(
                     f"  #{i+1} {r['agent_id']}: ELO={r['elo']:.0f} "
-                    f"score={r['avg_score']} wr={r['win_rate']:.1%} "
+                    f"mts={mts} score={r['avg_score']} wr={r['win_rate']:.1%} "
                     f"lr={r['hyperparams']['lr']:.2e} "
                     f"hid={r['hyperparams']['hidden_dim']}{marker}"
                 )
