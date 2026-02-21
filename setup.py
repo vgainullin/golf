@@ -1,8 +1,5 @@
-# setup.py
-from setuptools import setup, find_packages
+# setup.py – kept for editable installs (`pip install -e .`).
+# All metadata lives in pyproject.toml.
+from setuptools import setup
 
-setup(
-    name="golf",
-    version="0.1",
-    packages=find_packages(),
-)
+setup()
