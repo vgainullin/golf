@@ -84,15 +84,6 @@ def create_game(
     golf.shuffle()
     golf.deal()
 
-    # Flip two initial cards for every player (standard Golf opening)
-    import random as _rand
-    for player in golf.players:
-        positions = [(r, c) for r in range(2) for c in range(3)]
-        chosen = _rand.sample(positions, 2)
-        for r, c in chosen:
-            player.open_cards[r][c] = player.cards[r][c]
-        player.calculate_score()
-
     game_id = uuid.uuid4().hex[:12]
     session = GameSession(
         game_id=game_id,
