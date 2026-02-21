@@ -1,9 +1,9 @@
 """Population-based tournament training for Golf DQN agents.
 
-Implements an ELO-rated tournament system where a population of agents
-train via self-play, compete in round-robin matches, and the top performers
-seed the next generation. This creates a curriculum of increasingly strong
-opponents without manual tuning.
+Implements a structured evaluation system where a population of agents
+train via mixed-table self-play, then are evaluated in controlled seating
+configurations against heuristic and random baselines. Top performers
+seed the next generation.
 
 Usage:
     python -m src.tournament --population-size 8 --generations 20 \
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import random
 import time
 from copy import deepcopy
@@ -27,6 +26,7 @@ import torch
 
 from .dqn_offline import (
     GolfDQN,
+    GolfDQNv2,
     NUM_ACTIONS,
     STAGE0_LEGAL,
     STAGE1_LEGAL,
@@ -46,6 +46,7 @@ from .vectorized_golf import (
     VectorizedGolfState,
     reset_games,
     get_observation,
+    get_observation_v2,
     step_stage0,
     step_stage1,
     compute_score as vec_compute_score,
@@ -60,31 +61,10 @@ from .vectorized_golf import (
 
 
 # ---------------------------------------------------------------------------
-# ELO rating system
+# Agent wrapper
 # ---------------------------------------------------------------------------
 
 DEFAULT_ELO = 1200.0
-ELO_K = 32.0
-
-
-def _expected_score(rating_a: float, rating_b: float) -> float:
-    return 1.0 / (1.0 + 10.0 ** ((rating_b - rating_a) / 400.0))
-
-
-def update_elo(
-    rating_a: float, rating_b: float, score_a: float
-) -> Tuple[float, float]:
-    """Update ELO ratings given actual score_a in [0, 1]."""
-    ea = _expected_score(rating_a, rating_b)
-    eb = 1.0 - ea
-    new_a = rating_a + ELO_K * (score_a - ea)
-    new_b = rating_b + ELO_K * ((1.0 - score_a) - eb)
-    return new_a, new_b
-
-
-# ---------------------------------------------------------------------------
-# Agent wrapper
-# ---------------------------------------------------------------------------
 
 @dataclass
 class AgentRecord:
@@ -172,7 +152,19 @@ import torch.nn.functional as F
 from torch import nn
 
 
-OBS_DIM = 8  # from get_observation: [card0..5, holding, discard_top]
+OBS_DIM = 30  # unified buffer width: v1 uses first 8 (rest zero-padded), v2 uses all 30
+
+
+def make_model(variant: str, embedding_dim: int, hidden_dim: int, device: torch.device) -> nn.Module:
+    if variant == "v2":
+        return GolfDQNv2(embedding_dim, hidden_dim).to(device)
+    return GolfDQN(embedding_dim, hidden_dim).to(device)
+
+
+def get_obs_fn(variant: str):
+    if variant == "v2":
+        return get_observation_v2
+    return get_observation
 
 
 class ReplayBuffer:
@@ -358,109 +350,6 @@ def _random_action(golf: Golf, pid: int, action_num: int) -> Tuple[int, Optional
         golf.players[pid].type = saved
 
 
-# ---------------------------------------------------------------------------
-# Play a match between two models (or model vs baseline)
-# ---------------------------------------------------------------------------
-
-def play_match(
-    model_a: nn.Module,
-    model_b: Optional[nn.Module],
-    device: torch.device,
-    num_games: int = 4,
-    holes: int = 9,
-) -> Tuple[float, float, float, float]:
-    """Play a match. model_b=None means heuristic opponent.
-
-    Returns (score_a, score_b, wins_a, wins_b) averaged per hole.
-    """
-    total_a, total_b = 0.0, 0.0
-    wins_a, wins_b = 0, 0
-
-    for game_idx in range(num_games):
-        # Alternate seats for fairness
-        seat_a = game_idx % 4
-        seat_b = (game_idx + 1) % 4
-
-        for hole in range(1, holes + 1):
-            players = []
-            for i in range(4):
-                players.append(Player(name=f"P{i}", id=i, type="Heuristic"))
-            golf = Golf(players=players, deck_type="French", verbose=False)
-            golf.shuffle()
-            golf.deal()
-
-            while not golf.game_over:
-                for pid in range(4):
-                    golf.players[pid].gather_game_state(golf)
-                    if "?" not in golf.players[pid].game_state:
-                        golf.game_over = True
-                        break
-
-                    # Stage 0
-                    if pid == seat_a:
-                        tok = _get_tokens(golf, pid)
-                        aid = _greedy_action(model_a, tok, 0, device)
-                        _, act, pos_ = decode_action_id(aid)
-                        pos = None if pos_ is None else int(pos_)
-                        if not _validate_action(golf, pid, 0, act, pos):
-                            act, pos = _heuristic_action(golf, pid, 0)
-                    elif pid == seat_b and model_b is not None:
-                        tok = _get_tokens(golf, pid)
-                        aid = _greedy_action(model_b, tok, 0, device)
-                        _, act, pos_ = decode_action_id(aid)
-                        pos = None if pos_ is None else int(pos_)
-                        if not _validate_action(golf, pid, 0, act, pos):
-                            act, pos = _heuristic_action(golf, pid, 0)
-                    else:
-                        act, pos = _heuristic_action(golf, pid, 0)
-
-                    golf.take_action(pid, [0, act, pos])
-                    golf.players[pid].gather_game_state(golf)
-                    if golf.game_over:
-                        break
-
-                    # Stage 1
-                    if pid == seat_a:
-                        tok = _get_tokens(golf, pid)
-                        aid = _greedy_action(model_a, tok, 1, device)
-                        _, act1, pos1_ = decode_action_id(aid)
-                        pos1 = None if pos1_ is None else int(pos1_)
-                        if not _validate_action(golf, pid, 1, act1, pos1):
-                            act1, pos1 = _heuristic_action(golf, pid, 1)
-                    elif pid == seat_b and model_b is not None:
-                        tok = _get_tokens(golf, pid)
-                        aid = _greedy_action(model_b, tok, 1, device)
-                        _, act1, pos1_ = decode_action_id(aid)
-                        pos1 = None if pos1_ is None else int(pos1_)
-                        if not _validate_action(golf, pid, 1, act1, pos1):
-                            act1, pos1 = _heuristic_action(golf, pid, 1)
-                    else:
-                        act1, pos1 = _heuristic_action(golf, pid, 1)
-
-                    golf.take_action(pid, [1, act1, pos1])
-                    golf.players[pid].gather_game_state(golf)
-
-                    if len(golf.deck) < golf.num_players + 2:
-                        golf.deck = GolfDeck()
-                        golf.shuffle()
-                        golf.deal()
-
-                    if "?" not in golf.players[pid].game_state:
-                        golf.last_turn = True
-                        golf.end_game_player_id = pid
-
-            for p in golf.players:
-                p.calculate_score(final=True)
-            total_a += golf.players[seat_a].score
-            total_b += golf.players[seat_b].score
-
-    n = num_games * holes
-    avg_a = total_a / max(1, n)
-    avg_b = total_b / max(1, n)
-    # In golf, lower is better - count wins by who scored lower
-    wins_a = 1 if avg_a < avg_b else 0
-    wins_b = 1 if avg_b < avg_a else 0
-    return avg_a, avg_b, float(wins_a), float(wins_b)
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +506,14 @@ def train_episode(
 # Vectorized training and match functions
 # ---------------------------------------------------------------------------
 
+def _pad_obs(obs: torch.Tensor) -> torch.Tensor:
+    """Pad observation to OBS_DIM columns if needed (v1 -> 30 with zero padding)."""
+    if obs.shape[1] == OBS_DIM:
+        return obs
+    pad = torch.zeros(obs.shape[0], OBS_DIM - obs.shape[1], dtype=obs.dtype, device=obs.device)
+    return torch.cat([obs, pad], dim=1)
+
+
 def train_episodes_vectorized(
     N: int,
     model: nn.Module,
@@ -627,14 +524,22 @@ def train_episodes_vectorized(
     config: TournamentConfig,
     epsilon: float,
     global_step: int,
+    obs_fn=None,
 ) -> Tuple[float, int]:
     """Run N episodes in parallel using mixed-table seating.
 
     Seat 0: Heuristic, Seat 1: Random, Seat 2: DQN learner (eps-greedy),
     Seat 3: Random. Only seat 2 records transitions.
 
+    Args:
+        obs_fn: Observation function for the learner (get_observation or get_observation_v2).
+                Defaults to get_observation for backward compatibility.
+
     Returns (avg_loss, global_step).
     """
+    if obs_fn is None:
+        obs_fn = get_observation
+
     LEARNER_SEAT = 2
 
     for hole in range(1, config.holes_per_game + 1):
@@ -658,7 +563,7 @@ def train_episodes_vectorized(
 
                 # -- Stage 0 --
                 state.current_stage.fill_(0)
-                obs = get_observation(state, pid)  # (N, 8)
+                obs = obs_fn(state, pid) if pid == LEARNER_SEAT else get_observation(state, pid)
 
                 if pid == 0:
                     # Heuristic
@@ -683,13 +588,13 @@ def train_episodes_vectorized(
 
                 # Record stage0 transition for learner only
                 if pid == LEARNER_SEAT:
-                    obs_before_s0 = obs.clone()
+                    obs_before_s0 = _pad_obs(obs).clone()
                     aid_s0 = actions_s0.clone()
 
                 step_stage0(state, actions_s0, pid)
 
                 if pid == LEARNER_SEAT:
-                    obs_after_s0 = get_observation(state, pid)
+                    obs_after_s0 = _pad_obs(obs_fn(state, pid))
                     active_np = active.cpu().numpy()
                     buffer.push_batch(
                         states=obs_before_s0.cpu().numpy()[active_np],
@@ -706,7 +611,7 @@ def train_episodes_vectorized(
 
                 # -- Stage 1 --
                 state.current_stage.fill_(1)
-                obs1 = get_observation(state, pid)
+                obs1 = obs_fn(state, pid) if pid == LEARNER_SEAT else get_observation(state, pid)
 
                 if pid == 0:
                     # Heuristic
@@ -727,13 +632,13 @@ def train_episodes_vectorized(
 
                 # Record stage1 transition for learner only
                 if pid == LEARNER_SEAT:
-                    obs_before_s1 = obs1.clone()
+                    obs_before_s1 = _pad_obs(obs1).clone()
                     aid_s1 = actions_s1.clone()
 
                 rewards_s1 = step_stage1(state, actions_s1, pid)
 
                 if pid == LEARNER_SEAT:
-                    obs_after_s1 = get_observation(state, pid)
+                    obs_after_s1 = _pad_obs(obs_fn(state, pid))
                     active_np = active.cpu().numpy()
                     buffer.push_batch(
                         states=obs_before_s1.cpu().numpy()[active_np],
@@ -756,15 +661,19 @@ def train_episodes_vectorized(
                 )
 
     # Train on buffer (transitions were pushed directly via push_batch)
+    # Determine state width for this model variant
+    is_v2 = (obs_fn is get_observation_v2)
+    state_width = OBS_DIM if is_v2 else 8
+
     losses = []
     if len(buffer) >= config.min_buffer_size:
         model.train()
         for _ in range(config.updates_per_episode * max(1, N // 10)):
             batch = buffer.sample(config.batch_size, device)
-            states = batch["states"]
+            states = batch["states"][:, :state_width]
             actions = batch["actions"]
             rewards = batch["rewards"]
-            next_states = batch["next_states"]
+            next_states = batch["next_states"][:, :state_width]
             dones = batch["dones"]
             stages = batch["stages"]
             next_stages = batch["next_stages"]
@@ -795,137 +704,6 @@ def train_episodes_vectorized(
     avg_loss = float(np.mean(losses)) if losses else float("nan")
     return avg_loss, global_step
 
-
-def play_matches_vectorized(
-    model_a: nn.Module,
-    model_b: Optional[nn.Module],
-    device: torch.device,
-    num_games: int = 4,
-    holes: int = 9,
-) -> Tuple[float, float, float, float]:
-    """Play matches using vectorized environment.
-
-    All num_games run simultaneously. model_b=None means heuristic opponent.
-    Returns (score_a, score_b, wins_a, wins_b) averaged per hole.
-    """
-    N = num_games
-    total_a = torch.zeros(N, dtype=torch.float32, device=device)
-    total_b = torch.zeros(N, dtype=torch.float32, device=device)
-
-    # Seat assignments: alternate for fairness
-    seat_a = torch.arange(N, device=device) % 4
-    seat_b = (torch.arange(N, device=device) + 1) % 4
-
-    for hole in range(1, holes + 1):
-        state = reset_games(N, device)
-        max_rounds = 30
-
-        for round_num in range(max_rounds):
-            if state.done.all():
-                break
-
-            for pid in range(4):
-                active = ~state.done
-                back_to_trigger = state.last_turn & (state.end_game_player == pid)
-                state.done = state.done | (back_to_trigger & active)
-                active = ~state.done
-
-                if not active.any():
-                    break
-
-                is_a = (seat_a == pid)  # (N,) which games have model_a at this pid
-                is_b = (seat_b == pid)
-                is_heuristic = (~is_a) & (~is_b)
-
-                # -- Stage 0 --
-                state.current_stage.fill_(0)
-                obs = get_observation(state, pid)
-
-                # Default: heuristic
-                actions_s0 = heuristic_stage0(state, pid)
-
-                # Model A seats
-                if is_a.any():
-                    st = obs.to(device)
-                    sg = torch.zeros(N, dtype=torch.long, device=device)
-                    with torch.no_grad():
-                        q = model_a(st, sg)
-                    s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=device)
-                    s0_mask[:, 0] = True
-                    s0_mask[:, 1] = state.deck_ptr < 52
-                    greedy_a = eps_greedy_batched(q, 0.0, s0_mask)
-                    actions_s0 = torch.where(is_a, greedy_a, actions_s0)
-
-                # Model B seats
-                if model_b is not None and is_b.any():
-                    st = obs.to(device)
-                    sg = torch.zeros(N, dtype=torch.long, device=device)
-                    with torch.no_grad():
-                        q = model_b(st, sg)
-                    s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=device)
-                    s0_mask[:, 0] = True
-                    s0_mask[:, 1] = state.deck_ptr < 52
-                    greedy_b = eps_greedy_batched(q, 0.0, s0_mask)
-                    actions_s0 = torch.where(is_b, greedy_b, actions_s0)
-
-                step_stage0(state, actions_s0, pid)
-                if state.done.all():
-                    break
-
-                # -- Stage 1 --
-                state.current_stage.fill_(1)
-                obs1 = get_observation(state, pid)
-
-                actions_s1 = heuristic_stage1(state, pid)
-
-                if is_a.any():
-                    st1 = obs1.to(device)
-                    sg1 = torch.ones(N, dtype=torch.long, device=device)
-                    with torch.no_grad():
-                        q1 = model_a(st1, sg1)
-                    mask1 = get_valid_action_mask(state, pid)
-                    greedy_a1 = eps_greedy_batched(q1, 0.0, mask1)
-                    actions_s1 = torch.where(is_a, greedy_a1, actions_s1)
-
-                if model_b is not None and is_b.any():
-                    st1 = obs1.to(device)
-                    sg1 = torch.ones(N, dtype=torch.long, device=device)
-                    with torch.no_grad():
-                        q1 = model_b(st1, sg1)
-                    mask1 = get_valid_action_mask(state, pid)
-                    greedy_b1 = eps_greedy_batched(q1, 0.0, mask1)
-                    actions_s1 = torch.where(is_b, greedy_b1, actions_s1)
-
-                step_stage1(state, actions_s1, pid)
-
-                all_rev = state.player_revealed[:, pid, :].all(dim=1)
-                newly_last = active & all_rev & (~state.last_turn)
-                state.last_turn = state.last_turn | newly_last
-                state.end_game_player = torch.where(
-                    newly_last,
-                    torch.full_like(state.end_game_player, pid),
-                    state.end_game_player,
-                )
-
-        # Compute final scores for each game
-        for n in range(N):
-            sa = int(seat_a[n].item())
-            sb = int(seat_b[n].item())
-            score_a_n = compute_final_score(
-                state.player_cards[n:n+1, sa, :], device
-            ).item()
-            score_b_n = compute_final_score(
-                state.player_cards[n:n+1, sb, :], device
-            ).item()
-            total_a[n] += score_a_n
-            total_b[n] += score_b_n
-
-    total_holes = holes
-    avg_a = total_a.sum().item() / (N * total_holes)
-    avg_b = total_b.sum().item() / (N * total_holes)
-    wins_a = 1.0 if avg_a < avg_b else 0.0
-    wins_b = 1.0 if avg_b < avg_a else 0.0
-    return avg_a, avg_b, wins_a, wins_b
 
 
 # ---------------------------------------------------------------------------
@@ -971,15 +749,18 @@ class TournamentTrainer:
             ))
             hidden_dim = random.choice(self.config.hidden_dim_choices)
 
+            # Split population ~50/50 between v1 and v2
+            variant = "v2" if i % 2 == 1 else "v1"
+
             agent_id = f"gen0_agent{i}"
             record = AgentRecord(
                 agent_id=agent_id,
                 generation=0,
-                hyperparams={"lr": float(lr), "hidden_dim": hidden_dim},
+                hyperparams={"lr": float(lr), "hidden_dim": hidden_dim, "model_variant": variant},
             )
 
-            model = GolfDQN(self.config.embedding_dim, hidden_dim).to(self.device)
-            target = GolfDQN(self.config.embedding_dim, hidden_dim).to(self.device)
+            model = make_model(variant, self.config.embedding_dim, hidden_dim, self.device)
+            target = make_model(variant, self.config.embedding_dim, hidden_dim, self.device)
 
             if base_state is not None:
                 # Only load if architecture matches
@@ -996,7 +777,7 @@ class TournamentTrainer:
 
         print(f"Initialized {len(self.population)} agents")
         for rec, _, _, _, _ in self.population:
-            print(f"  {rec.agent_id}: lr={rec.hyperparams['lr']:.2e} hidden={rec.hyperparams['hidden_dim']}")
+            print(f"  {rec.agent_id}: lr={rec.hyperparams['lr']:.2e} hidden={rec.hyperparams['hidden_dim']} variant={rec.hyperparams.get('model_variant', 'v1')}")
 
     # ----- Training phase -----
 
@@ -1012,6 +793,9 @@ class TournamentTrainer:
             is_child = record.generation == self.generation
             agent_eps = min(epsilon + 0.15, 0.5) if is_child else epsilon
 
+            variant = record.hyperparams.get("model_variant", "v1")
+            obs_fn = get_obs_fn(variant)
+
             loss, _ = train_episodes_vectorized(
                 N=n_eps,
                 model=model,
@@ -1022,171 +806,187 @@ class TournamentTrainer:
                 config=self.config,
                 epsilon=agent_eps,
                 global_step=0,
+                obs_fn=obs_fn,
             )
 
             print(
-                f"  {record.agent_id}: trained {n_eps} vectorized eps, "
+                f"  {record.agent_id} ({variant}): trained {n_eps} vectorized eps, "
                 f"buf={len(buf):,d}, loss={loss:.4f}, eps={agent_eps:.3f}"
             )
 
-    # ----- Round-robin tournament -----
+    # ----- Structured evaluation -----
 
-    def _run_tournament(self) -> None:
-        """Round-robin matches between all agents using vectorized play."""
-        # Reset ELO so tournament measures current-generation strength only
-        for rec, _, _, _, _ in self.population:
-            rec.elo = DEFAULT_ELO
-            rec.wins = 0
-            rec.losses = 0
-            rec.draws = 0
-            rec.total_score = 0.0
-            rec.games_played = 0
+    def _run_eval_config(
+        self,
+        seat_roles: List[str],
+        model: Optional[nn.Module],
+        obs_fn,
+        num_games: int,
+        holes: int,
+    ) -> Dict[int, float]:
+        """Run num_games games with specified seat roles and return avg score per hole per seat.
 
-        n = len(self.population)
-        for i in range(n):
-            for j in range(i + 1, n):
-                rec_a, model_a, _, _, _ = self.population[i]
-                rec_b, model_b, _, _, _ = self.population[j]
-                model_a.eval()
-                model_b.eval()
-
-                score_a, score_b, wa, wb = play_matches_vectorized(
-                    model_a, model_b, self.device,
-                    num_games=self.config.matches_per_pair,
-                    holes=self.config.match_holes,
-                )
-
-                # In golf, lower score wins
-                if score_a < score_b:
-                    actual_a = 1.0
-                elif score_a > score_b:
-                    actual_a = 0.0
-                else:
-                    actual_a = 0.5
-
-                rec_a.elo, rec_b.elo = update_elo(rec_a.elo, rec_b.elo, actual_a)
-
-                rec_a.total_score += score_a * self.config.matches_per_pair * self.config.match_holes
-                rec_b.total_score += score_b * self.config.matches_per_pair * self.config.match_holes
-                rec_a.games_played += self.config.matches_per_pair
-                rec_b.games_played += self.config.matches_per_pair
-
-                if actual_a > 0.5:
-                    rec_a.wins += 1
-                    rec_b.losses += 1
-                elif actual_a < 0.5:
-                    rec_b.wins += 1
-                    rec_a.losses += 1
-                else:
-                    rec_a.draws += 1
-                    rec_b.draws += 1
-
-        # Also play each agent vs heuristic baseline
-        for rec, model, _, _, _ in self.population:
-            model.eval()
-            score_agent, score_heur, _, _ = play_matches_vectorized(
-                model, None, self.device,
-                num_games=self.config.matches_per_pair,
-                holes=self.config.match_holes,
-            )
-            rec.hyperparams["vs_heuristic_score"] = round(score_agent, 2)
-
-    # ----- Mixed-table evaluation -----
-
-    def _run_mixed_table_eval(self, num_games: int = 1000) -> None:
-        """Evaluate each agent in mixed-table games (Heuristic/Random/DQN/Random).
-
-        Runs num_games 9-hole games per agent with DQN at seat 2.
-        Stores average score per hole in rec.hyperparams["mixed_table_score"].
+        seat_roles: list of 4 strings, each "dqn", "heuristic", or "random".
+        model/obs_fn: used for "dqn" seats (ignored if no dqn seats).
+        Returns: {seat_idx: avg_score_per_hole}.
         """
-        LEARNER_SEAT = 2
+        N = num_games
+        totals = {i: torch.zeros(N, dtype=torch.float32, device=self.device) for i in range(4)}
+
+        for hole in range(1, holes + 1):
+            state = reset_games(N, self.device)
+            max_rounds = 30
+
+            for round_num in range(max_rounds):
+                if state.done.all():
+                    break
+
+                for pid in range(4):
+                    active = ~state.done
+                    back_to_trigger = state.last_turn & (state.end_game_player == pid)
+                    state.done = state.done | (back_to_trigger & active)
+                    active = ~state.done
+
+                    if not active.any():
+                        break
+
+                    role = seat_roles[pid]
+
+                    # -- Stage 0 --
+                    state.current_stage.fill_(0)
+
+                    if role == "heuristic":
+                        actions_s0 = heuristic_stage0(state, pid)
+                    elif role == "dqn":
+                        obs = obs_fn(state, pid)
+                        st = obs.to(self.device)
+                        sg = torch.zeros(N, dtype=torch.long, device=self.device)
+                        with torch.no_grad():
+                            q = model(st, sg)
+                        s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
+                        s0_mask[:, 0] = True
+                        s0_mask[:, 1] = state.deck_ptr < 52
+                        actions_s0 = eps_greedy_batched(q, 0.0, s0_mask)
+                    else:  # random
+                        s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
+                        s0_mask[:, 0] = True
+                        s0_mask[:, 1] = state.deck_ptr < 52
+                        dummy_q = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
+                        actions_s0 = eps_greedy_batched(dummy_q, 1.0, s0_mask)
+
+                    step_stage0(state, actions_s0, pid)
+                    if state.done.all():
+                        break
+
+                    # -- Stage 1 --
+                    state.current_stage.fill_(1)
+
+                    if role == "heuristic":
+                        actions_s1 = heuristic_stage1(state, pid)
+                    elif role == "dqn":
+                        obs1 = obs_fn(state, pid)
+                        st1 = obs1.to(self.device)
+                        sg1 = torch.ones(N, dtype=torch.long, device=self.device)
+                        with torch.no_grad():
+                            q1 = model(st1, sg1)
+                        mask1 = get_valid_action_mask(state, pid)
+                        actions_s1 = eps_greedy_batched(q1, 0.0, mask1)
+                    else:  # random
+                        mask1 = get_valid_action_mask(state, pid)
+                        dummy_q1 = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
+                        actions_s1 = eps_greedy_batched(dummy_q1, 1.0, mask1)
+
+                    step_stage1(state, actions_s1, pid)
+
+                    all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                    newly_last = active & all_rev & (~state.last_turn)
+                    state.last_turn = state.last_turn | newly_last
+                    state.end_game_player = torch.where(
+                        newly_last,
+                        torch.full_like(state.end_game_player, pid),
+                        state.end_game_player,
+                    )
+
+            # Accumulate each seat's score for this hole
+            for sid in range(4):
+                hole_scores = compute_final_score(
+                    state.player_cards[:, sid, :], self.device
+                )
+                totals[sid] += hole_scores
+
+        return {sid: totals[sid].mean().item() / holes for sid in range(4)}
+
+    def _run_baseline_calibration(self, num_games: int = 1000) -> None:
+        """Run baseline configs once to establish heuristic reference scores."""
+        holes = self.config.match_holes
+
+        # Config A baseline: [H, H, H, H]
+        print("  Config A baseline [H,H,H,H]...")
+        scores_a = self._run_eval_config(
+            ["heuristic", "heuristic", "heuristic", "heuristic"],
+            model=None, obs_fn=None, num_games=num_games, holes=holes,
+        )
+        self.baseline_a_seats_02 = (scores_a[0] + scores_a[2]) / 2.0
+        self.baseline_a_seats_13 = (scores_a[1] + scores_a[3]) / 2.0
+
+        # Config B baseline: [H, R, R, R]
+        print("  Config B baseline [H,R,R,R]...")
+        scores_b = self._run_eval_config(
+            ["heuristic", "random", "random", "random"],
+            model=None, obs_fn=None, num_games=num_games, holes=holes,
+        )
+        self.baseline_b_score = scores_b[0]
+
+        print(f"  Config A raw scores: [{scores_a[0]:.3f}, {scores_a[1]:.3f}, {scores_a[2]:.3f}, {scores_a[3]:.3f}]")
+        print(f"  Config B raw scores: [{scores_b[0]:.3f}, {scores_b[1]:.3f}, {scores_b[2]:.3f}, {scores_b[3]:.3f}]")
+        print(
+            f"  Baselines: config_a seats[0,2]={self.baseline_a_seats_02:.3f} "
+            f"seats[1,3]={self.baseline_a_seats_13:.3f}, config_b={self.baseline_b_score:.3f}"
+        )
+
+    def _run_structured_eval(self, num_games: int = 1000) -> None:
+        """Evaluate each agent with structured configs A and B."""
         holes = self.config.match_holes
 
         for rec, model, _, _, _ in self.population:
             model.eval()
-            N = num_games
-            total_score = torch.zeros(N, dtype=torch.float32, device=self.device)
+            variant = rec.hyperparams.get("model_variant", "v1")
+            agent_obs_fn = get_obs_fn(variant)
 
-            for hole in range(1, holes + 1):
-                state = reset_games(N, self.device)
-                max_rounds = 30
+            # Config A: [DQN, H, DQN, H]
+            scores_a = self._run_eval_config(
+                ["dqn", "heuristic", "dqn", "heuristic"],
+                model=model, obs_fn=agent_obs_fn, num_games=num_games, holes=holes,
+            )
+            dqn_avg_a = (scores_a[0] + scores_a[2]) / 2.0
+            heur_avg_a = (scores_a[1] + scores_a[3]) / 2.0
 
-                for round_num in range(max_rounds):
-                    if state.done.all():
-                        break
+            # Config B: [DQN, R, R, R]
+            scores_b = self._run_eval_config(
+                ["dqn", "random", "random", "random"],
+                model=model, obs_fn=agent_obs_fn, num_games=num_games, holes=holes,
+            )
+            dqn_score_b = scores_b[0]
 
-                    for pid in range(4):
-                        active = ~state.done
-                        back_to_trigger = state.last_turn & (state.end_game_player == pid)
-                        state.done = state.done | (back_to_trigger & active)
-                        active = ~state.done
+            # Normalized metrics
+            config_a_dqn_norm = dqn_avg_a / max(self.baseline_a_seats_02, 0.01)
+            config_a_impact = heur_avg_a / max(self.baseline_a_seats_13, 0.01)
+            config_b_dqn_norm = dqn_score_b / max(self.baseline_b_score, 0.01)
 
-                        if not active.any():
-                            break
+            ranking_score = config_a_dqn_norm - config_a_impact + config_b_dqn_norm
 
-                        # -- Stage 0 --
-                        state.current_stage.fill_(0)
-                        obs = get_observation(state, pid)
+            rec.hyperparams["config_a_dqn_norm"] = round(config_a_dqn_norm, 4)
+            rec.hyperparams["config_a_impact"] = round(config_a_impact, 4)
+            rec.hyperparams["config_b_dqn_norm"] = round(config_b_dqn_norm, 4)
+            rec.hyperparams["ranking_score"] = round(ranking_score, 4)
 
-                        if pid == 0:
-                            actions_s0 = heuristic_stage0(state, pid)
-                        elif pid == LEARNER_SEAT:
-                            st = obs.to(self.device)
-                            sg = torch.zeros(N, dtype=torch.long, device=self.device)
-                            with torch.no_grad():
-                                q = model(st, sg)
-                            s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
-                            s0_mask[:, 0] = True
-                            s0_mask[:, 1] = state.deck_ptr < 52
-                            actions_s0 = eps_greedy_batched(q, 0.0, s0_mask)
-                        else:
-                            s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
-                            s0_mask[:, 0] = True
-                            s0_mask[:, 1] = state.deck_ptr < 52
-                            dummy_q = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
-                            actions_s0 = eps_greedy_batched(dummy_q, 1.0, s0_mask)
-
-                        step_stage0(state, actions_s0, pid)
-                        if state.done.all():
-                            break
-
-                        # -- Stage 1 --
-                        state.current_stage.fill_(1)
-                        obs1 = get_observation(state, pid)
-
-                        if pid == 0:
-                            actions_s1 = heuristic_stage1(state, pid)
-                        elif pid == LEARNER_SEAT:
-                            st1 = obs1.to(self.device)
-                            sg1 = torch.ones(N, dtype=torch.long, device=self.device)
-                            with torch.no_grad():
-                                q1 = model(st1, sg1)
-                            mask1 = get_valid_action_mask(state, pid)
-                            actions_s1 = eps_greedy_batched(q1, 0.0, mask1)
-                        else:
-                            mask1 = get_valid_action_mask(state, pid)
-                            dummy_q1 = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
-                            actions_s1 = eps_greedy_batched(dummy_q1, 1.0, mask1)
-
-                        step_stage1(state, actions_s1, pid)
-
-                        all_rev = state.player_revealed[:, pid, :].all(dim=1)
-                        newly_last = active & all_rev & (~state.last_turn)
-                        state.last_turn = state.last_turn | newly_last
-                        state.end_game_player = torch.where(
-                            newly_last,
-                            torch.full_like(state.end_game_player, pid),
-                            state.end_game_player,
-                        )
-
-                # Accumulate learner's score for this hole
-                hole_scores = compute_final_score(
-                    state.player_cards[:, LEARNER_SEAT, :], self.device
-                )
-                total_score += hole_scores
-
-            avg_per_hole = total_score.mean().item() / holes
-            rec.hyperparams["mixed_table_score"] = round(avg_per_hole, 3)
+            print(
+                f"  {rec.agent_id} ({variant}): ranking={ranking_score:.4f} "
+                f"a_dqn={config_a_dqn_norm:.3f} a_impact={config_a_impact:.3f} "
+                f"b_dqn={config_b_dqn_norm:.3f} | "
+                f"raw_a=[{scores_a[0]:.1f},{scores_a[1]:.1f},{scores_a[2]:.1f},{scores_a[3]:.1f}] "
+                f"raw_b=[{scores_b[0]:.1f},{scores_b[1]:.1f},{scores_b[2]:.1f},{scores_b[3]:.1f}]"
+            )
 
     # ----- Selection and mutation -----
 
@@ -1194,24 +994,11 @@ class TournamentTrainer:
         """Keep elite agents, replace the rest with mutated copies of top performers."""
         n = len(self.population)
 
-        # Rank by ELO (descending) -> position 0 = best
-        elo_order = sorted(range(n), key=lambda i: self.population[i][0].elo, reverse=True)
-        elo_rank = [0] * n
-        for pos, idx in enumerate(elo_order):
-            elo_rank[idx] = pos
-
-        # Rank by mixed_table_score (ascending, lower is better) -> position 0 = best
-        mts_order = sorted(
+        # Rank by ranking_score (lower is better)
+        ranked = sorted(
             range(n),
-            key=lambda i: self.population[i][0].hyperparams.get("mixed_table_score", 999.0),
+            key=lambda i: self.population[i][0].hyperparams.get("ranking_score", 999.0),
         )
-        mts_rank = [0] * n
-        for pos, idx in enumerate(mts_order):
-            mts_rank[idx] = pos
-
-        # Combined rank = mean of both rank positions, sort ascending
-        combined = [(elo_rank[i] + mts_rank[i]) / 2.0 for i in range(n)]
-        ranked = sorted(range(n), key=lambda i: combined[i])
 
         elites = ranked[: self.config.elitism_count]
         new_population = []
@@ -1238,9 +1025,10 @@ class TournamentTrainer:
             parent_idx = random.choice(top_half)
             parent_rec, parent_model, _, _, parent_buf = self.population[parent_idx]
 
-            # Mutate hyperparameters
+            # Mutate hyperparameters (variant is inherited, never mutated)
             lr = parent_rec.hyperparams["lr"]
             hidden_dim = parent_rec.hyperparams["hidden_dim"]
+            variant = parent_rec.hyperparams.get("model_variant", "v1")
 
             if random.random() < self.config.mutation_rate:
                 lr = lr * np.exp(np.random.normal(0, self.config.mutation_sigma))
@@ -1254,17 +1042,17 @@ class TournamentTrainer:
                 agent_id=agent_id,
                 generation=self.generation + 1,
                 parent_id=parent_rec.agent_id,
-                hyperparams={"lr": float(lr), "hidden_dim": hidden_dim},
+                hyperparams={"lr": float(lr), "hidden_dim": hidden_dim, "model_variant": variant},
             )
 
             # Copy model weights (may need new architecture if hidden_dim changed)
-            child_model = GolfDQN(self.config.embedding_dim, hidden_dim).to(self.device)
+            child_model = make_model(variant, self.config.embedding_dim, hidden_dim, self.device)
             try:
                 child_model.load_state_dict(parent_model.state_dict())
             except RuntimeError:
                 pass  # Architecture changed, start fresh but keep parent's idea
 
-            child_target = GolfDQN(self.config.embedding_dim, hidden_dim).to(self.device)
+            child_target = make_model(variant, self.config.embedding_dim, hidden_dim, self.device)
             child_target.load_state_dict(child_model.state_dict())
             child_opt = torch.optim.AdamW(child_model.parameters(), lr=lr, weight_decay=1e-5)
             child_buf = parent_buf.copy()
@@ -1290,29 +1078,28 @@ class TournamentTrainer:
                 "config": {
                     "embedding_dim": self.config.embedding_dim,
                     "hidden_dim": rec.hyperparams["hidden_dim"],
+                    "model_variant": rec.hyperparams.get("model_variant", "v1"),
                 },
                 "agent_record": rec.to_dict(),
             }, path)
             rankings.append(rec.to_dict())
 
-        # Sort by ELO
-        rankings.sort(key=lambda x: x["elo"], reverse=True)
+        # Sort by ranking_score (lower is better)
+        rankings.sort(key=lambda x: x.get("hyperparams", {}).get("ranking_score", 999.0))
 
         # Save generation summary
         summary = {
             "generation": self.generation,
             "rankings": rankings,
             "best_agent": rankings[0]["agent_id"],
-            "best_elo": rankings[0]["elo"],
-            "best_vs_heuristic": rankings[0].get("hyperparams", {}).get("vs_heuristic_score", "N/A"),
-            "best_mixed_table_score": rankings[0].get("hyperparams", {}).get("mixed_table_score", "N/A"),
+            "best_ranking_score": rankings[0].get("hyperparams", {}).get("ranking_score", "N/A"),
         }
         (gen_dir / "generation_summary.json").write_text(json.dumps(summary, indent=2))
 
-        # Also save the best model as the generation champion
-        best_idx = max(
+        # Also save the best model as the generation champion (lowest ranking_score)
+        best_idx = min(
             range(len(self.population)),
-            key=lambda i: self.population[i][0].elo,
+            key=lambda i: self.population[i][0].hyperparams.get("ranking_score", 999.0),
         )
         best_model = self.population[best_idx][1]
         best_rec = self.population[best_idx][0]
@@ -1322,6 +1109,7 @@ class TournamentTrainer:
             "config": {
                 "embedding_dim": self.config.embedding_dim,
                 "hidden_dim": best_rec.hyperparams["hidden_dim"],
+                "model_variant": best_rec.hyperparams.get("model_variant", "v1"),
             },
             "agent_record": best_rec.to_dict(),
             "generation": self.generation,
@@ -1342,6 +1130,11 @@ class TournamentTrainer:
         print(f"  Device: {self.device}")
         print()
 
+        # Baseline calibration (once before training)
+        print("Baseline calibration...")
+        self._run_baseline_calibration()
+        print()
+
         for gen in range(1, self.config.generations + 1):
             self.generation = gen
             gen_start = time.time()
@@ -1352,13 +1145,9 @@ class TournamentTrainer:
             print("Training...")
             self._train_generation()
 
-            # Phase 2: Tournament
-            print("Tournament round-robin...")
-            self._run_tournament()
-
-            # Phase 2b: Mixed-table evaluation
-            print("Mixed-table evaluation...")
-            self._run_mixed_table_eval()
+            # Phase 2: Structured evaluation
+            print("Structured evaluation...")
+            self._run_structured_eval()
 
             # Phase 3: Save
             summary = self._save_generation()
@@ -1367,12 +1156,16 @@ class TournamentTrainer:
             print(f"\nGeneration {gen} results ({gen_elapsed:.0f}s):")
             for i, r in enumerate(summary["rankings"][:5]):
                 marker = " *" if i == 0 else ""
-                mts = r['hyperparams'].get('mixed_table_score', 'N/A')
+                hp = r.get('hyperparams', {})
+                var = hp.get('model_variant', 'v1')
+                rs = hp.get('ranking_score', 'N/A')
+                a_dqn = hp.get('config_a_dqn_norm', 'N/A')
+                a_imp = hp.get('config_a_impact', 'N/A')
+                b_dqn = hp.get('config_b_dqn_norm', 'N/A')
                 print(
-                    f"  #{i+1} {r['agent_id']}: ELO={r['elo']:.0f} "
-                    f"mts={mts} score={r['avg_score']} wr={r['win_rate']:.1%} "
-                    f"lr={r['hyperparams']['lr']:.2e} "
-                    f"hid={r['hyperparams']['hidden_dim']}{marker}"
+                    f"  #{i+1} {r['agent_id']} ({var}): ranking={rs} "
+                    f"a_dqn={a_dqn} a_impact={a_imp} b_dqn={b_dqn} "
+                    f"lr={hp['lr']:.2e} hid={hp['hidden_dim']}{marker}"
                 )
             print()
 
@@ -1394,7 +1187,7 @@ class TournamentTrainer:
             "generations": self.config.generations,
             "population_size": self.config.population_size,
             "champion": self.history[-1]["best_agent"] if self.history else None,
-            "champion_elo": self.history[-1]["best_elo"] if self.history else None,
+            "champion_ranking_score": self.history[-1]["best_ranking_score"] if self.history else None,
             "elapsed_seconds": round(elapsed, 1),
         }
 
