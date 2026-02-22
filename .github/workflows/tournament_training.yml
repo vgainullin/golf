@@ -304,7 +304,11 @@ jobs:
           IP="${{ steps.wait.outputs.instance_ip }}"
           KEY="$SSH_KEY_PATH"
           mkdir -p tournament_results
-          scp -o StrictHostKeyChecking=no -r -i $KEY "ubuntu@$IP:~/golf/data/tournament/" tournament_results/ || echo "WARNING: Failed to download tournament data"
+          # Only download JSON summaries and top checkpoints (skip per-gen .pt files)
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -i $KEY ubuntu@$IP"
+          $SSH "cd ~/golf/data/tournament && find . \( -name '*.json' -o -name 'champion.pt' -o -name 'hall_of_fame.pt' \) | tar czf /tmp/tournament_results.tar.gz -T -"
+          scp -o StrictHostKeyChecking=no -i $KEY "ubuntu@$IP:/tmp/tournament_results.tar.gz" /tmp/ && \
+            tar xzf /tmp/tournament_results.tar.gz -C tournament_results/ || echo "WARNING: Failed to download tournament data"
           scp -o StrictHostKeyChecking=no -i $KEY "ubuntu@$IP:~/golf/training.log" tournament_results/ || echo "WARNING: Failed to download training.log"
 
       - name: Upload results artifact
