@@ -116,7 +116,7 @@ class TournamentConfig:
 
     # Hyperparameter mutation
     lr_range: Tuple[float, float] = (1e-4, 3e-3)
-    hidden_dim_choices: List[int] = field(default_factory=lambda: [128, 256, 512])
+    hidden_dim_choices: List[int] = field(default_factory=lambda: [128, 256, 512, 1024])
     embedding_dim: int = 128
     gamma: float = 0.99
     mutation_rate: float = 0.3      # probability of mutating a hyperparameter
@@ -723,6 +723,10 @@ class TournamentTrainer:
         self.generation = 0
         self.history: List[Dict[str, Any]] = []
 
+        # Hall of fame: best-ever agent across all generations
+        self.hall_of_fame_score: float = float("inf")  # lower is better
+        self.hall_of_fame_agent_id: Optional[str] = None
+
         self._init_population()
 
     def _init_population(self) -> None:
@@ -1007,7 +1011,7 @@ class TournamentTrainer:
         for idx in elites:
             rec, model, target, opt, buf = self.population[idx]
             rec.elite_age += 1
-            if rec.elite_age >= 3:
+            if rec.elite_age >= 5:
                 # Force through mutation: fresh optimizer, possible LR change
                 lr = rec.hyperparams["lr"]
                 if random.random() < self.config.mutation_rate:
@@ -1018,11 +1022,11 @@ class TournamentTrainer:
                 rec.elite_age = 0
             new_population.append((rec, model, target, opt, buf))
 
-        # Fill remaining slots by mutating top half
-        top_half = ranked[: max(1, len(ranked) // 2)]
+        # Fill remaining slots by mutating top third
+        top_third = ranked[: max(2, len(ranked) // 3)]
         child_id = 0
         while len(new_population) < self.config.population_size:
-            parent_idx = random.choice(top_half)
+            parent_idx = random.choice(top_third)
             parent_rec, parent_model, _, _, parent_buf = self.population[parent_idx]
 
             # Mutate hyperparameters (variant is inherited, never mutated)
@@ -1059,6 +1063,44 @@ class TournamentTrainer:
 
             new_population.append((child_rec, child_model, child_target, child_opt, child_buf))
             child_id += 1
+
+        # Inject hall-of-fame agent if not already present
+        hof_path = self.config.output_dir / "hall_of_fame.pt"
+        if hof_path.exists() and self.hall_of_fame_agent_id is not None:
+            hof_ids = {rec.agent_id for rec, _, _, _, _ in new_population}
+            if self.hall_of_fame_agent_id not in hof_ids:
+                hof_ckpt = torch.load(hof_path, map_location="cpu", weights_only=True)
+                hof_cfg = hof_ckpt["config"]
+                hof_variant = hof_cfg.get("model_variant", "v1")
+                hof_hidden = hof_cfg["hidden_dim"]
+                hof_embed = hof_cfg["embedding_dim"]
+
+                hof_model = make_model(hof_variant, hof_embed, hof_hidden, self.device)
+                hof_model.load_state_dict(hof_ckpt["model_state_dict"])
+                hof_target = make_model(hof_variant, hof_embed, hof_hidden, self.device)
+                hof_target.load_state_dict(hof_model.state_dict())
+
+                hof_rec = AgentRecord(
+                    agent_id=self.hall_of_fame_agent_id,
+                    generation=hof_ckpt.get("generation", 0),
+                    hyperparams={
+                        "lr": hof_ckpt["agent_record"].get("hyperparams", {}).get("lr", 1e-3),
+                        "hidden_dim": hof_hidden,
+                        "model_variant": hof_variant,
+                    },
+                )
+                lr = hof_rec.hyperparams["lr"]
+                hof_opt = torch.optim.AdamW(hof_model.parameters(), lr=lr, weight_decay=1e-5)
+                hof_buf = ReplayBuffer(self.config.buffer_capacity)
+
+                # Replace the worst slot (last in new_population)
+                worst_idx = max(
+                    range(len(new_population)),
+                    key=lambda i: new_population[i][0].hyperparams.get("ranking_score", 999.0),
+                )
+                replaced = new_population[worst_idx][0].agent_id
+                new_population[worst_idx] = (hof_rec, hof_model, hof_target, hof_opt, hof_buf)
+                print(f"  Injected hall-of-fame {self.hall_of_fame_agent_id} (replacing {replaced})")
 
         self.population = new_population
 
@@ -1104,7 +1146,7 @@ class TournamentTrainer:
         best_model = self.population[best_idx][1]
         best_rec = self.population[best_idx][0]
         champ_path = self.config.output_dir / "champion.pt"
-        torch.save({
+        champ_data = {
             "model_state_dict": best_model.state_dict(),
             "config": {
                 "embedding_dim": self.config.embedding_dim,
@@ -1113,7 +1155,17 @@ class TournamentTrainer:
             },
             "agent_record": best_rec.to_dict(),
             "generation": self.generation,
-        }, champ_path)
+        }
+        torch.save(champ_data, champ_path)
+
+        # Update hall of fame if this generation's best beats the all-time best
+        best_score = best_rec.hyperparams.get("ranking_score", 999.0)
+        if best_score < self.hall_of_fame_score:
+            self.hall_of_fame_score = best_score
+            self.hall_of_fame_agent_id = best_rec.agent_id
+            hof_path = self.config.output_dir / "hall_of_fame.pt"
+            torch.save(champ_data, hof_path)
+            print(f"  New hall of fame: {best_rec.agent_id} (ranking_score={best_score:.4f})")
 
         return summary
 
@@ -1188,6 +1240,8 @@ class TournamentTrainer:
             "population_size": self.config.population_size,
             "champion": self.history[-1]["best_agent"] if self.history else None,
             "champion_ranking_score": self.history[-1]["best_ranking_score"] if self.history else None,
+            "best_ever_agent": self.hall_of_fame_agent_id,
+            "best_ever_ranking_score": self.hall_of_fame_score if self.hall_of_fame_score < float("inf") else None,
             "elapsed_seconds": round(elapsed, 1),
         }
 
