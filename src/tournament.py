@@ -1,8 +1,7 @@
 """Population-based tournament training for Golf DQN agents.
 
-Implements a structured evaluation system where a population of agents
-train via mixed-table self-play, then are evaluated in controlled seating
-configurations against heuristic and random baselines. Top performers
+Implements a league-style evaluation system where agents play in tables
+of 3 DQN + 1 random, ranked by raw average golf score. Top performers
 seed the next generation.
 
 Usage:
@@ -18,6 +17,7 @@ import random
 import time
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -114,6 +114,11 @@ class TournamentConfig:
     updates_per_episode: int = 4
     batch_size: int = 256
 
+    # Adaptive training (early generations)
+    max_train_rounds: int = 5
+    separation_p: float = 0.05
+    adaptive_gen_limit: int = 3
+
     # Hyperparameter mutation
     lr_range: Tuple[float, float] = (1e-4, 3e-3)
     hidden_dim_choices: List[int] = field(default_factory=lambda: [128, 256, 512, 1024])
@@ -136,6 +141,7 @@ class TournamentConfig:
     # Match settings
     matches_per_pair: int = 4       # games per matchup in round-robin
     match_holes: int = 9
+    eval_games_per_matchup: int = 50
 
     # Infrastructure
     output_dir: Path = Path("data/tournament")
@@ -723,9 +729,13 @@ class TournamentTrainer:
         self.generation = 0
         self.history: List[Dict[str, Any]] = []
 
+        # Loss tracking
+        self.loss_history: Dict[str, List[float]] = {}
+
         # Hall of fame: best-ever agent across all generations
         self.hall_of_fame_score: float = float("inf")  # lower is better
         self.hall_of_fame_agent_id: Optional[str] = None
+        self.hall_of_fame_game_scores: List[float] = []
 
         self._init_population()
 
@@ -812,6 +822,9 @@ class TournamentTrainer:
                 global_step=0,
                 obs_fn=obs_fn,
             )
+
+            self.loss_history.setdefault(record.agent_id, []).append(loss)
+            record.hyperparams["loss"] = loss
 
             print(
                 f"  {record.agent_id} ({variant}): trained {n_eps} vectorized eps, "
@@ -920,76 +933,211 @@ class TournamentTrainer:
 
         return {sid: totals[sid].mean().item() / holes for sid in range(4)}
 
-    def _run_baseline_calibration(self, num_games: int = 1000) -> None:
-        """Run baseline configs once to establish heuristic reference scores."""
+    def _run_matchup(
+        self,
+        dqn_entries: List[Tuple[nn.Module, Any]],
+        num_games: int,
+        holes: int,
+    ) -> Dict[int, List[float]]:
+        """Play num_games games with 3 DQN agents + 1 random, shuffling seats each game.
+
+        Args:
+            dqn_entries: list of 3 (model, obs_fn) tuples
+            num_games: number of games to play
+            holes: holes per game
+
+        Returns: {dqn_index: [per-game total scores]} for indices 0,1,2
+        """
+        per_agent_scores: Dict[int, List[float]] = {i: [] for i in range(3)}
+
+        # Pre-generate seat assignments: for each game, randomly assign 3 DQN + 1 random to 4 seats
+        for game_idx in range(num_games):
+            # Assign seats: pick which seat is random, rest are DQN agents
+            seats = list(range(4))
+            random.shuffle(seats)
+            random_seat = seats[0]
+            dqn_seats = seats[1:]  # 3 seats for 3 DQN agents
+            # Map: dqn_idx -> seat_idx
+            dqn_to_seat = {i: dqn_seats[i] for i in range(3)}
+            seat_to_dqn = {v: k for k, v in dqn_to_seat.items()}
+
+            # Build seat_roles and per-seat model/obs_fn
+            seat_roles = ["random"] * 4
+            seat_models = [None] * 4
+            seat_obs_fns = [None] * 4
+            for dqn_idx, seat_idx in dqn_to_seat.items():
+                seat_roles[seat_idx] = "dqn"
+                seat_models[seat_idx] = dqn_entries[dqn_idx][0]
+                seat_obs_fns[seat_idx] = dqn_entries[dqn_idx][1]
+
+            # Play one game of `holes` holes
+            N = 1  # single game
+            game_totals = {sid: torch.zeros(N, dtype=torch.float32, device=self.device) for sid in range(4)}
+
+            for hole in range(1, holes + 1):
+                state = reset_games(N, self.device)
+                max_rounds = 30
+
+                for round_num in range(max_rounds):
+                    if state.done.all():
+                        break
+
+                    for pid in range(4):
+                        active = ~state.done
+                        back_to_trigger = state.last_turn & (state.end_game_player == pid)
+                        state.done = state.done | (back_to_trigger & active)
+                        active = ~state.done
+
+                        if not active.any():
+                            break
+
+                        role = seat_roles[pid]
+                        model_for_seat = seat_models[pid]
+                        obs_fn_for_seat = seat_obs_fns[pid]
+
+                        # -- Stage 0 --
+                        state.current_stage.fill_(0)
+
+                        if role == "dqn":
+                            obs = obs_fn_for_seat(state, pid)
+                            st = obs.to(self.device)
+                            sg = torch.zeros(N, dtype=torch.long, device=self.device)
+                            with torch.no_grad():
+                                q = model_for_seat(st, sg)
+                            s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
+                            s0_mask[:, 0] = True
+                            s0_mask[:, 1] = state.deck_ptr < 52
+                            actions_s0 = eps_greedy_batched(q, 0.0, s0_mask)
+                        else:  # random
+                            s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
+                            s0_mask[:, 0] = True
+                            s0_mask[:, 1] = state.deck_ptr < 52
+                            dummy_q = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
+                            actions_s0 = eps_greedy_batched(dummy_q, 1.0, s0_mask)
+
+                        step_stage0(state, actions_s0, pid)
+                        if state.done.all():
+                            break
+
+                        # -- Stage 1 --
+                        state.current_stage.fill_(1)
+
+                        if role == "dqn":
+                            obs1 = obs_fn_for_seat(state, pid)
+                            st1 = obs1.to(self.device)
+                            sg1 = torch.ones(N, dtype=torch.long, device=self.device)
+                            with torch.no_grad():
+                                q1 = model_for_seat(st1, sg1)
+                            mask1 = get_valid_action_mask(state, pid)
+                            actions_s1 = eps_greedy_batched(q1, 0.0, mask1)
+                        else:  # random
+                            mask1 = get_valid_action_mask(state, pid)
+                            dummy_q1 = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
+                            actions_s1 = eps_greedy_batched(dummy_q1, 1.0, mask1)
+
+                        step_stage1(state, actions_s1, pid)
+
+                        all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                        newly_last = active & all_rev & (~state.last_turn)
+                        state.last_turn = state.last_turn | newly_last
+                        state.end_game_player = torch.where(
+                            newly_last,
+                            torch.full_like(state.end_game_player, pid),
+                            state.end_game_player,
+                        )
+
+                # Accumulate scores for this hole
+                for sid in range(4):
+                    hole_scores = compute_final_score(
+                        state.player_cards[:, sid, :], self.device
+                    )
+                    game_totals[sid] += hole_scores
+
+            # Record per-DQN-agent total score for this game
+            for dqn_idx, seat_idx in dqn_to_seat.items():
+                score = game_totals[seat_idx].item()
+                per_agent_scores[dqn_idx].append(score)
+
+        return per_agent_scores
+
+    def _run_league_eval(self, games_per_matchup: Optional[int] = None) -> None:
+        """Evaluate all agents via league-style play: tables of 3 DQN + 1 random."""
+        if games_per_matchup is None:
+            games_per_matchup = self.config.eval_games_per_matchup
         holes = self.config.match_holes
-
-        # Config A baseline: [H, H, H, H]
-        print("  Config A baseline [H,H,H,H]...")
-        scores_a = self._run_eval_config(
-            ["heuristic", "heuristic", "heuristic", "heuristic"],
-            model=None, obs_fn=None, num_games=num_games, holes=holes,
-        )
-        self.baseline_a_seats_02 = (scores_a[0] + scores_a[2]) / 2.0
-        self.baseline_a_seats_13 = (scores_a[1] + scores_a[3]) / 2.0
-
-        # Config B baseline: [H, R, R, R]
-        print("  Config B baseline [H,R,R,R]...")
-        scores_b = self._run_eval_config(
-            ["heuristic", "random", "random", "random"],
-            model=None, obs_fn=None, num_games=num_games, holes=holes,
-        )
-        self.baseline_b_score = scores_b[0]
-
-        print(f"  Config A raw scores: [{scores_a[0]:.3f}, {scores_a[1]:.3f}, {scores_a[2]:.3f}, {scores_a[3]:.3f}]")
-        print(f"  Config B raw scores: [{scores_b[0]:.3f}, {scores_b[1]:.3f}, {scores_b[2]:.3f}, {scores_b[3]:.3f}]")
-        print(
-            f"  Baselines: config_a seats[0,2]={self.baseline_a_seats_02:.3f} "
-            f"seats[1,3]={self.baseline_a_seats_13:.3f}, config_b={self.baseline_b_score:.3f}"
-        )
-
-    def _run_structured_eval(self, num_games: int = 1000) -> None:
-        """Evaluate each agent with structured configs A and B."""
-        holes = self.config.match_holes
+        n = len(self.population)
 
         for rec, model, _, _, _ in self.population:
             model.eval()
+
+        # Build entries: list of (index, model, obs_fn)
+        entries = []
+        for i, (rec, model, _, _, _) in enumerate(self.population):
             variant = rec.hyperparams.get("model_variant", "v1")
-            agent_obs_fn = get_obs_fn(variant)
+            obs_fn = get_obs_fn(variant)
+            entries.append((i, model, obs_fn))
 
-            # Config A: [DQN, H, DQN, H]
-            scores_a = self._run_eval_config(
-                ["dqn", "heuristic", "dqn", "heuristic"],
-                model=model, obs_fn=agent_obs_fn, num_games=num_games, holes=holes,
-            )
-            dqn_avg_a = (scores_a[0] + scores_a[2]) / 2.0
-            heur_avg_a = (scores_a[1] + scores_a[3]) / 2.0
+        # Generate all combinations of 3 agents
+        agent_indices = list(range(n))
+        matchups = list(combinations(agent_indices, 3))
 
-            # Config B: [DQN, R, R, R]
-            scores_b = self._run_eval_config(
-                ["dqn", "random", "random", "random"],
-                model=model, obs_fn=agent_obs_fn, num_games=num_games, holes=holes,
-            )
-            dqn_score_b = scores_b[0]
+        # If population is small, repeat matchups to get enough games per agent
+        min_games_per_agent = 200
+        games_from_one_pass = (n - 1) * (n - 2) // 2 * games_per_matchup  # C(n-1,2) matchups per agent
+        repeats = max(1, min_games_per_agent // max(1, (len([m for m in matchups if 0 in m]) * games_per_matchup)))
 
-            # Normalized metrics
-            config_a_dqn_norm = dqn_avg_a / max(self.baseline_a_seats_02, 0.01)
-            config_a_impact = heur_avg_a / max(self.baseline_a_seats_13, 0.01)
-            config_b_dqn_norm = dqn_score_b / max(self.baseline_b_score, 0.01)
+        all_matchups = matchups * repeats
 
-            ranking_score = config_a_dqn_norm - config_a_impact + config_b_dqn_norm
+        # Accumulate per-agent stats
+        agent_total_score = {i: 0.0 for i in agent_indices}
+        agent_game_count = {i: 0 for i in agent_indices}
+        agent_game_scores: Dict[int, List[float]] = {i: [] for i in agent_indices}
+        agent_rank_counts = {i: [0, 0, 0, 0] for i in agent_indices}  # ranks 1-4
+        agent_wins = {i: 0 for i in agent_indices}
 
-            rec.hyperparams["config_a_dqn_norm"] = round(config_a_dqn_norm, 4)
-            rec.hyperparams["config_a_impact"] = round(config_a_impact, 4)
-            rec.hyperparams["config_b_dqn_norm"] = round(config_b_dqn_norm, 4)
-            rec.hyperparams["ranking_score"] = round(ranking_score, 4)
+        print(f"  {len(all_matchups)} matchups, {games_per_matchup} games each, {holes} holes/game")
 
+        for matchup_idx, group in enumerate(all_matchups):
+            dqn_entries_for_matchup = [(entries[i][1], entries[i][2]) for i in group]
+            scores = self._run_matchup(dqn_entries_for_matchup, games_per_matchup, holes)
+
+            # Process results: each game has scores for 3 DQN agents
+            for game_idx in range(games_per_matchup):
+                game_scores = [(group[di], scores[di][game_idx]) for di in range(3)]
+                # Add random player score estimate (not tracked, but counts for ranking)
+                # We don't have the random player's score from _run_matchup, so rank among DQN only
+                # Actually, let's rank all 3 DQN agents by their score (lower=better)
+                game_scores.sort(key=lambda x: x[1])
+
+                for rank, (agent_idx, score) in enumerate(game_scores):
+                    agent_total_score[agent_idx] += score
+                    agent_game_count[agent_idx] += 1
+                    agent_game_scores[agent_idx].append(score)
+                    agent_rank_counts[agent_idx][rank] += 1  # rank 0=best among DQN
+                    if rank == 0:
+                        agent_wins[agent_idx] += 1
+
+        # Store results in agent records
+        for i, (rec, _, _, _, _) in enumerate(self.population):
+            games = agent_game_count[i]
+            total = agent_total_score[i]
+            avg = total / max(1, games) / holes  # per-hole average
+            avg_rank = sum(r * c for r, c in enumerate(agent_rank_counts[i])) / max(1, games) + 1  # 1-indexed
+            win_pct = agent_wins[i] / max(1, games)
+
+            rec.hyperparams["avg_score"] = round(avg, 4)
+            rec.hyperparams["avg_rank"] = round(avg_rank, 4)
+            rec.hyperparams["win_pct"] = round(win_pct, 4)
+            rec.hyperparams["eval_games"] = games
+
+            # Store per-game scores for statistical testing (normalized per hole)
+            rec.hyperparams["_game_scores"] = [s / holes for s in agent_game_scores[i]]
+
+            variant = rec.hyperparams.get("model_variant", "v1")
             print(
-                f"  {rec.agent_id} ({variant}): ranking={ranking_score:.4f} "
-                f"a_dqn={config_a_dqn_norm:.3f} a_impact={config_a_impact:.3f} "
-                f"b_dqn={config_b_dqn_norm:.3f} | "
-                f"raw_a=[{scores_a[0]:.1f},{scores_a[1]:.1f},{scores_a[2]:.1f},{scores_a[3]:.1f}] "
-                f"raw_b=[{scores_b[0]:.1f},{scores_b[1]:.1f},{scores_b[2]:.1f},{scores_b[3]:.1f}]"
+                f"  {rec.agent_id} ({variant}): avg_score={avg:.3f} avg_rank={avg_rank:.2f} "
+                f"win_pct={win_pct:.1%} games={games} "
+                f"lr={rec.hyperparams['lr']:.2e} hid={rec.hyperparams['hidden_dim']}"
             )
 
     # ----- Selection and mutation -----
@@ -998,10 +1146,10 @@ class TournamentTrainer:
         """Keep elite agents, replace the rest with mutated copies of top performers."""
         n = len(self.population)
 
-        # Rank by ranking_score (lower is better)
+        # Rank by avg_score (lower is better)
         ranked = sorted(
             range(n),
-            key=lambda i: self.population[i][0].hyperparams.get("ranking_score", 999.0),
+            key=lambda i: self.population[i][0].hyperparams.get("avg_score", 999.0),
         )
 
         elites = ranked[: self.config.elitism_count]
@@ -1022,11 +1170,11 @@ class TournamentTrainer:
                 rec.elite_age = 0
             new_population.append((rec, model, target, opt, buf))
 
-        # Fill remaining slots by mutating top third
-        top_third = ranked[: max(2, len(ranked) // 3)]
+        # Fill remaining slots by mutating top half
+        top_half = ranked[: max(2, len(ranked) // 2)]
         child_id = 0
         while len(new_population) < self.config.population_size:
-            parent_idx = random.choice(top_third)
+            parent_idx = random.choice(top_half)
             parent_rec, parent_model, _, _, parent_buf = self.population[parent_idx]
 
             # Mutate hyperparameters (variant is inherited, never mutated)
@@ -1096,7 +1244,7 @@ class TournamentTrainer:
                 # Replace the worst slot (last in new_population)
                 worst_idx = max(
                     range(len(new_population)),
-                    key=lambda i: new_population[i][0].hyperparams.get("ranking_score", 999.0),
+                    key=lambda i: new_population[i][0].hyperparams.get("avg_score", 999.0),
                 )
                 replaced = new_population[worst_idx][0].agent_id
                 new_population[worst_idx] = (hof_rec, hof_model, hof_target, hof_opt, hof_buf)
@@ -1107,12 +1255,18 @@ class TournamentTrainer:
     # ----- Checkpointing -----
 
     def _save_generation(self) -> None:
+        from scipy import stats as sp_stats
+
         gen_dir = self.config.output_dir / f"gen_{self.generation:03d}"
         gen_dir.mkdir(parents=True, exist_ok=True)
 
         rankings = []
         for rec, model, target, _, _ in self.population:
-            # Save checkpoint
+            # Save checkpoint (exclude internal _game_scores from saved record)
+            rec_dict = rec.to_dict()
+            save_hp = {k: v for k, v in rec_dict.get("hyperparams", {}).items() if not k.startswith("_")}
+            rec_dict["hyperparams"] = save_hp
+
             path = gen_dir / f"{rec.agent_id}.pt"
             torch.save({
                 "model_state_dict": model.state_dict(),
@@ -1122,26 +1276,30 @@ class TournamentTrainer:
                     "hidden_dim": rec.hyperparams["hidden_dim"],
                     "model_variant": rec.hyperparams.get("model_variant", "v1"),
                 },
-                "agent_record": rec.to_dict(),
+                "agent_record": rec_dict,
             }, path)
-            rankings.append(rec.to_dict())
+            rankings.append(rec_dict)
 
-        # Sort by ranking_score (lower is better)
-        rankings.sort(key=lambda x: x.get("hyperparams", {}).get("ranking_score", 999.0))
+        # Sort by avg_score (lower is better)
+        rankings.sort(key=lambda x: x.get("hyperparams", {}).get("avg_score", 999.0))
 
         # Save generation summary
         summary = {
             "generation": self.generation,
             "rankings": rankings,
             "best_agent": rankings[0]["agent_id"],
-            "best_ranking_score": rankings[0].get("hyperparams", {}).get("ranking_score", "N/A"),
+            "best_avg_score": rankings[0].get("hyperparams", {}).get("avg_score", "N/A"),
         }
         (gen_dir / "generation_summary.json").write_text(json.dumps(summary, indent=2))
 
-        # Also save the best model as the generation champion (lowest ranking_score)
+        # Save cumulative loss history
+        loss_path = self.config.output_dir / "loss_history.json"
+        loss_path.write_text(json.dumps(self.loss_history, indent=2))
+
+        # Also save the best model as the generation champion (lowest avg_score)
         best_idx = min(
             range(len(self.population)),
-            key=lambda i: self.population[i][0].hyperparams.get("ranking_score", 999.0),
+            key=lambda i: self.population[i][0].hyperparams.get("avg_score", 999.0),
         )
         best_model = self.population[best_idx][1]
         best_rec = self.population[best_idx][0]
@@ -1153,19 +1311,39 @@ class TournamentTrainer:
                 "hidden_dim": best_rec.hyperparams["hidden_dim"],
                 "model_variant": best_rec.hyperparams.get("model_variant", "v1"),
             },
-            "agent_record": best_rec.to_dict(),
+            "agent_record": {k: v for k, v in best_rec.to_dict().items()
+                            if k != "hyperparams" or not isinstance(v, dict)} | {
+                "hyperparams": {k: v for k, v in best_rec.hyperparams.items() if not k.startswith("_")},
+            },
             "generation": self.generation,
         }
         torch.save(champ_data, champ_path)
 
-        # Update hall of fame if this generation's best beats the all-time best
-        best_score = best_rec.hyperparams.get("ranking_score", 999.0)
-        if best_score < self.hall_of_fame_score:
-            self.hall_of_fame_score = best_score
-            self.hall_of_fame_agent_id = best_rec.agent_id
-            hof_path = self.config.output_dir / "hall_of_fame.pt"
-            torch.save(champ_data, hof_path)
-            print(f"  New hall of fame: {best_rec.agent_id} (ranking_score={best_score:.4f})")
+        # Update hall of fame with Welch's t-test gating
+        best_avg = best_rec.hyperparams.get("avg_score", 999.0)
+        best_game_scores = best_rec.hyperparams.get("_game_scores", [])
+
+        if best_avg < self.hall_of_fame_score:
+            # Check statistical significance if we have a previous hall of fame
+            update_hof = True
+            if self.hall_of_fame_game_scores and best_game_scores:
+                t_stat, p_val = sp_stats.ttest_ind(
+                    best_game_scores, self.hall_of_fame_game_scores,
+                    equal_var=False, alternative="less",
+                )
+                update_hof = p_val < 0.05
+                print(
+                    f"  Hall of fame t-test: t={t_stat:.3f} p={p_val:.4f} "
+                    f"{'SIGNIFICANT' if update_hof else 'not significant'}"
+                )
+
+            if update_hof:
+                self.hall_of_fame_score = best_avg
+                self.hall_of_fame_agent_id = best_rec.agent_id
+                self.hall_of_fame_game_scores = best_game_scores.copy()
+                hof_path = self.config.output_dir / "hall_of_fame.pt"
+                torch.save(champ_data, hof_path)
+                print(f"  New hall of fame: {best_rec.agent_id} (avg_score={best_avg:.4f})")
 
         return summary
 
@@ -1178,13 +1356,10 @@ class TournamentTrainer:
         print(f"\nTournament: {self.config.generations} generations, "
               f"{self.config.population_size} agents")
         print(f"  Episodes/gen: {self.config.episodes_per_gen}")
-        print(f"  Matches/pair: {self.config.matches_per_pair}")
+        print(f"  Eval games/matchup: {self.config.eval_games_per_matchup}")
+        print(f"  Adaptive: max_rounds={self.config.max_train_rounds} "
+              f"p={self.config.separation_p} gen_limit={self.config.adaptive_gen_limit}")
         print(f"  Device: {self.device}")
-        print()
-
-        # Baseline calibration (once before training)
-        print("Baseline calibration...")
-        self._run_baseline_calibration()
         print()
 
         for gen in range(1, self.config.generations + 1):
@@ -1193,13 +1368,34 @@ class TournamentTrainer:
 
             print(f"=== Generation {gen}/{self.config.generations} ===")
 
-            # Phase 1: Train
-            print("Training...")
-            self._train_generation()
+            # Adaptive train+eval loop
+            for round_num in range(self.config.max_train_rounds):
+                print(f"Training (round {round_num + 1})...")
+                self._train_generation()
 
-            # Phase 2: Structured evaluation
-            print("Structured evaluation...")
-            self._run_structured_eval()
+                print("League evaluation...")
+                self._run_league_eval()
+
+                if gen > self.config.adaptive_gen_limit or round_num == self.config.max_train_rounds - 1:
+                    break
+
+                # Check separation between #1 and #2
+                sorted_pop = sorted(
+                    self.population,
+                    key=lambda x: x[0].hyperparams.get("avg_score", 999.0),
+                )
+                scores_1 = sorted_pop[0][0].hyperparams.get("_game_scores", [])
+                scores_2 = sorted_pop[1][0].hyperparams.get("_game_scores", [])
+
+                if scores_1 and scores_2:
+                    from scipy.stats import ttest_ind
+                    _, p = ttest_ind(scores_1, scores_2, equal_var=False, alternative="less")
+                    if p < self.config.separation_p:
+                        print(f"  Clear winner after {round_num + 1} rounds (p={p:.4f})")
+                        break
+                    print(f"  No separation (p={p:.4f}), training round {round_num + 2}...")
+                else:
+                    print(f"  No scores for separation test, training round {round_num + 2}...")
 
             # Phase 3: Save
             summary = self._save_generation()
@@ -1210,13 +1406,12 @@ class TournamentTrainer:
                 marker = " *" if i == 0 else ""
                 hp = r.get('hyperparams', {})
                 var = hp.get('model_variant', 'v1')
-                rs = hp.get('ranking_score', 'N/A')
-                a_dqn = hp.get('config_a_dqn_norm', 'N/A')
-                a_imp = hp.get('config_a_impact', 'N/A')
-                b_dqn = hp.get('config_b_dqn_norm', 'N/A')
+                avg_s = hp.get('avg_score', 'N/A')
+                avg_r = hp.get('avg_rank', 'N/A')
+                wpct = hp.get('win_pct', 'N/A')
                 print(
-                    f"  #{i+1} {r['agent_id']} ({var}): ranking={rs} "
-                    f"a_dqn={a_dqn} a_impact={a_imp} b_dqn={b_dqn} "
+                    f"  #{i+1} {r['agent_id']} ({var}): avg_score={avg_s} "
+                    f"avg_rank={avg_r} win_pct={wpct} "
                     f"lr={hp['lr']:.2e} hid={hp['hidden_dim']}{marker}"
                 )
             print()
@@ -1239,9 +1434,9 @@ class TournamentTrainer:
             "generations": self.config.generations,
             "population_size": self.config.population_size,
             "champion": self.history[-1]["best_agent"] if self.history else None,
-            "champion_ranking_score": self.history[-1]["best_ranking_score"] if self.history else None,
+            "champion_avg_score": self.history[-1]["best_avg_score"] if self.history else None,
             "best_ever_agent": self.hall_of_fame_agent_id,
-            "best_ever_ranking_score": self.hall_of_fame_score if self.hall_of_fame_score < float("inf") else None,
+            "best_ever_avg_score": self.hall_of_fame_score if self.hall_of_fame_score < float("inf") else None,
             "elapsed_seconds": round(elapsed, 1),
         }
 
@@ -1261,10 +1456,14 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--matches-per-pair", type=int, default=4)
     p.add_argument("--match-holes", type=int, default=9)
+    p.add_argument("--eval-games-per-matchup", type=int, default=50)
     p.add_argument("--buffer-capacity", type=int, default=100_000)
     p.add_argument("--target-update-interval", type=int, default=500)
     p.add_argument("--epsilon-start", type=float, default=0.3)
     p.add_argument("--epsilon-end", type=float, default=0.05)
+    p.add_argument("--max-train-rounds", type=int, default=5)
+    p.add_argument("--separation-p", type=float, default=0.05)
+    p.add_argument("--adaptive-gen-limit", type=int, default=3)
     p.add_argument("--output-dir", type=Path, default=Path("data/tournament"))
     p.add_argument("--warmstart-checkpoint", type=Path, default=None)
     p.add_argument("--seed", type=int, default=42)
@@ -1281,8 +1480,12 @@ def parse_args(argv=None) -> TournamentConfig:
         batch_size=args.batch_size,
         matches_per_pair=args.matches_per_pair,
         match_holes=args.match_holes,
+        eval_games_per_matchup=args.eval_games_per_matchup,
         buffer_capacity=args.buffer_capacity,
         target_update_interval=args.target_update_interval,
+        max_train_rounds=args.max_train_rounds,
+        separation_p=args.separation_p,
+        adaptive_gen_limit=args.adaptive_gen_limit,
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
         output_dir=args.output_dir,
