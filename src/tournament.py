@@ -109,13 +109,13 @@ class TournamentConfig:
     elitism_count: int = 2          # top N agents survive unchanged
 
     # Training per generation
-    episodes_per_gen: int = 2000
+    episodes_per_gen: int = 1000
     holes_per_game: int = 9
     updates_per_episode: int = 8
     batch_size: int = 512
 
     # Adaptive training (early generations)
-    max_train_rounds: int = 5
+    max_train_rounds: int = 2
     separation_p: float = 0.05
     adaptive_gen_limit: int = 5
 
@@ -132,7 +132,7 @@ class TournamentConfig:
     epsilon_end: float = 0.02
 
     # Replay buffer (per agent)
-    buffer_capacity: int = 200_000
+    buffer_capacity: int = 100_000
     min_buffer_size: int = 2000
 
     # Target network
@@ -601,7 +601,7 @@ def train_episodes_vectorized(
                     obs_before_s0 = _pad_obs(obs).clone()
                     aid_s0 = actions_s0.clone()
 
-                step_stage0(state, actions_s0, pid)
+                rewards_s0 = step_stage0(state, actions_s0, pid)
 
                 if pid == LEARNER_SEAT:
                     obs_after_s0 = _pad_obs(obs_fn(state, pid))
@@ -767,7 +767,7 @@ class TournamentTrainer:
             ))
             hidden_dim = random.choice(self.config.hidden_dim_choices)
 
-            variant = "v1"
+            variant = "v2" if i % 2 == 1 else "v1"
 
             agent_id = f"gen0_agent{i}"
             record = AgentRecord(
@@ -808,7 +808,7 @@ class TournamentTrainer:
         for idx, (record, model, target, optimizer, buf) in enumerate(self.population):
             # Children (born this generation) get higher epsilon for more exploration
             is_child = record.generation == self.generation
-            agent_eps = min(epsilon + 0.15, 0.5) if is_child else epsilon
+            agent_eps = min(epsilon + 0.05, 0.35) if is_child else epsilon
 
             variant = record.hyperparams.get("model_variant", "v1")
             obs_fn = get_obs_fn(variant)
@@ -1013,9 +1013,6 @@ class TournamentTrainer:
             if random.random() < self.config.mutation_rate:
                 lr = lr * np.exp(np.random.normal(0, self.config.mutation_sigma))
                 lr = np.clip(lr, self.config.lr_range[0], self.config.lr_range[1])
-
-            if random.random() < self.config.mutation_rate:
-                hidden_dim = random.choice(self.config.hidden_dim_choices)
 
             agent_id = f"gen{self.generation + 1}_agent{child_id}"
             child_rec = AgentRecord(
@@ -1364,18 +1361,18 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--population-size", type=int, default=12)
     p.add_argument("--generations", type=int, default=20)
     p.add_argument("--elitism-count", type=int, default=2)
-    p.add_argument("--episodes-per-gen", type=int, default=2000)
+    p.add_argument("--episodes-per-gen", type=int, default=1000)
     p.add_argument("--holes-per-game", type=int, default=9)
     p.add_argument("--updates-per-episode", type=int, default=8)
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--matches-per-pair", type=int, default=4)
     p.add_argument("--match-holes", type=int, default=9)
     p.add_argument("--eval-games-per-matchup", type=int, default=1000)
-    p.add_argument("--buffer-capacity", type=int, default=200_000)
+    p.add_argument("--buffer-capacity", type=int, default=100_000)
     p.add_argument("--target-update-interval", type=int, default=500)
     p.add_argument("--epsilon-start", type=float, default=0.4)
     p.add_argument("--epsilon-end", type=float, default=0.02)
-    p.add_argument("--max-train-rounds", type=int, default=5)
+    p.add_argument("--max-train-rounds", type=int, default=2)
     p.add_argument("--separation-p", type=float, default=0.05)
     p.add_argument("--adaptive-gen-limit", type=int, default=5)
     p.add_argument("--output-dir", type=Path, default=Path("data/tournament"))
