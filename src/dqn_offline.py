@@ -103,6 +103,10 @@ class GolfDQN(nn.Module):
         self.stage_embedding = nn.Embedding(STAGE_VOCAB_SIZE, embedding_dim)
         self.encoder = nn.Sequential(
             nn.Linear((STATE_SEQUENCE_LENGTH + 1) * embedding_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -131,6 +135,10 @@ class GolfDQNv2(nn.Module):
         # 29 card tokens + 1 stage token -> flatten, then append 1 scalar (deck remaining)
         self.encoder = nn.Sequential(
             nn.Linear((STATE_SEQUENCE_LENGTH_V2 + 1) * embedding_dim + 1, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),

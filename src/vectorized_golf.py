@@ -258,7 +258,6 @@ def step_stage0(state: VectorizedGolfState, actions: torch.Tensor, player_id: in
         mask, torch.ones_like(state.current_stage), state.current_stage
     )
 
-    # Reward is 0 for stage 0 (no cards placed yet)
     return torch.zeros(N, dtype=torch.float32, device=device)
 
 

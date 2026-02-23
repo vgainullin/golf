@@ -1,9 +1,6 @@
 name: Verify Instance Cleanup
 
 on:
-  workflow_run:
-    workflows: ["Tournament Training on Lambda Labs"]
-    types: [completed]
   workflow_dispatch: {}
 
 env:
