@@ -17,6 +17,7 @@ import os
 import random
 import time
 from copy import deepcopy
+from itertools import combinations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,6 +28,7 @@ import torch
 from .dqn_offline import (
     GolfDQN,
     GolfDQNv2,
+    GolfDQNv2Shallow,
     NUM_ACTIONS,
     STAGE0_LEGAL,
     STAGE1_LEGAL,
@@ -79,6 +81,7 @@ class AgentRecord:
     games_played: int = 0
     parent_id: Optional[str] = None
     elite_age: int = 0
+    skip_training: bool = False
     hyperparams: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -109,39 +112,43 @@ class TournamentConfig:
     elitism_count: int = 2          # top N agents survive unchanged
 
     # Training per generation
-    episodes_per_gen: int = 1000
+    episodes_per_gen: int = 500
     holes_per_game: int = 9
-    updates_per_episode: int = 8
-    batch_size: int = 512
+    updates_per_episode: int = 4
+    batch_size: int = 256
 
     # Adaptive training (early generations)
-    max_train_rounds: int = 2
+    max_train_rounds: int = 5
     separation_p: float = 0.05
-    adaptive_gen_limit: int = 5
+    adaptive_gen_limit: int = 3
 
     # Hyperparameter mutation
-    lr_range: Tuple[float, float] = (3e-4, 3e-3)
-    hidden_dim_choices: List[int] = field(default_factory=lambda: [128, 256, 512])
+    lr_range: Tuple[float, float] = (1e-4, 3e-3)
+    hidden_dim_choices: List[int] = field(default_factory=lambda: [128, 256, 512, 1024])
     embedding_dim: int = 128
     gamma: float = 0.99
     mutation_rate: float = 0.3      # probability of mutating a hyperparameter
     mutation_sigma: float = 0.2     # std for log-normal LR mutation
 
     # Exploration
-    epsilon_start: float = 0.4
-    epsilon_end: float = 0.02
+    epsilon_start: float = 0.3
+    epsilon_end: float = 0.05
 
     # Replay buffer (per agent)
     buffer_capacity: int = 100_000
     min_buffer_size: int = 2000
 
-    # Target network
+    # Target network: tau > 0 = soft Polyak update; tau = 0 = hard swap every target_update_interval
+    tau: float = 0.0
     target_update_interval: int = 500
 
     # Match settings
     matches_per_pair: int = 4       # games per matchup in round-robin
     match_holes: int = 9
-    eval_games_per_matchup: int = 1000
+    eval_games_per_matchup: int = 20  # per C(n,3) matchup; total per agent = C(n-1,2) * this
+
+    # Model
+    model_variant: Optional[str] = None  # force variant: v1, v2, v2s (None = mixed)
 
     # Infrastructure
     output_dir: Path = Path("data/tournament")
@@ -168,11 +175,13 @@ OBS_DIM = 30  # unified buffer width: v1 uses first 8 (rest zero-padded), v2 use
 def make_model(variant: str, embedding_dim: int, hidden_dim: int, device: torch.device) -> nn.Module:
     if variant == "v2":
         return GolfDQNv2(embedding_dim, hidden_dim).to(device)
+    if variant == "v2s":
+        return GolfDQNv2Shallow(embedding_dim, hidden_dim).to(device)
     return GolfDQN(embedding_dim, hidden_dim).to(device)
 
 
 def get_obs_fn(variant: str):
-    if variant == "v2":
+    if variant in ("v2", "v2s"):
         return get_observation_v2
     return get_observation
 
@@ -505,7 +514,10 @@ def train_episode(
             losses.append(float(loss.item()))
             global_step += 1
 
-            if global_step % config.target_update_interval == 0:
+            if config.tau > 0:
+                for p, tp in zip(model.parameters(), target_model.parameters()):
+                    tp.data.mul_(1 - config.tau).add_(p.data, alpha=config.tau)
+            elif global_step % config.target_update_interval == 0:
                 target_model.load_state_dict(model.state_dict())
 
     avg_loss = float(np.mean(losses)) if losses else float("nan")
@@ -708,7 +720,10 @@ def train_episodes_vectorized(
             losses.append(float(loss.item()))
             global_step += 1
 
-            if global_step % config.target_update_interval == 0:
+            if config.tau > 0:
+                for p, tp in zip(model.parameters(), target_model.parameters()):
+                    tp.data.mul_(1 - config.tau).add_(p.data, alpha=config.tau)
+            elif global_step % config.target_update_interval == 0:
                 target_model.load_state_dict(model.state_dict())
 
     avg_loss = float(np.mean(losses)) if losses else float("nan")
@@ -759,15 +774,28 @@ class TournamentTrainer:
                 )
             print(f"Warm-starting population from {self.config.warmstart_checkpoint}")
 
+        # If warmstarting, use the checkpoint's variant and hidden_dim so weights load,
+        # and reduce LR/epsilon to avoid destroying pretrained weights
+        ws_variant = None
+        ws_hidden = None
+        if base_state is not None:
+            ws_variant = base_state.get("config", {}).get("model_variant")
+            ws_hidden = base_state.get("config", {}).get("hidden_dim")
+            # Cap LR and epsilon for warmstarted agents
+            ws_lr_cap = 5e-4
+            self.config.lr_range = (self.config.lr_range[0], min(self.config.lr_range[1], ws_lr_cap))
+            self.config.epsilon_start = min(self.config.epsilon_start, 0.1)
+            print(f"  Warmstart: lr_range capped to {self.config.lr_range}, epsilon_start={self.config.epsilon_start}")
+
         for i in range(self.config.population_size):
             # Mutate hyperparameters for diversity
             lr = np.exp(np.random.uniform(
                 np.log(self.config.lr_range[0]),
                 np.log(self.config.lr_range[1]),
             ))
-            hidden_dim = random.choice(self.config.hidden_dim_choices)
+            hidden_dim = ws_hidden if ws_hidden else random.choice(self.config.hidden_dim_choices)
 
-            variant = "v2" if i % 2 == 1 else "v1"
+            variant = ws_variant or self.config.model_variant or ("v2s" if i % 2 == 1 else "v1")
 
             agent_id = f"gen0_agent{i}"
             record = AgentRecord(
@@ -780,11 +808,7 @@ class TournamentTrainer:
             target = make_model(variant, self.config.embedding_dim, hidden_dim, self.device)
 
             if base_state is not None:
-                # Only load if architecture matches
-                try:
-                    model.load_state_dict(base_state["model_state_dict"])
-                except RuntimeError:
-                    pass  # Architecture mismatch, start from scratch
+                model.load_state_dict(base_state["model_state_dict"])
             target.load_state_dict(model.state_dict())
 
             optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
@@ -806,9 +830,14 @@ class TournamentTrainer:
         print(f"  epsilon={epsilon:.3f}")
 
         for idx, (record, model, target, optimizer, buf) in enumerate(self.population):
+            if record.skip_training:
+                print(f"  {record.agent_id}: skip training (hall-of-fame)")
+                record.skip_training = False  # only skip once
+                continue
+
             # Children (born this generation) get higher epsilon for more exploration
             is_child = record.generation == self.generation
-            agent_eps = min(epsilon + 0.05, 0.35) if is_child else epsilon
+            agent_eps = min(epsilon + 0.15, 0.5) if is_child else epsilon
 
             variant = record.hyperparams.get("model_variant", "v1")
             obs_fn = get_obs_fn(variant)
@@ -936,35 +965,140 @@ class TournamentTrainer:
 
         return {sid: totals[sid].mean().item() / holes for sid in range(4)}, totals
 
-    def _run_league_eval(self, num_games: Optional[int] = None) -> None:
-        """Evaluate each agent independently: [DQN, R, R, R], fully vectorized.
+    def _run_matchup_vectorized(
+        self,
+        dqn_entries: List[Tuple[nn.Module, Any]],
+        num_games: int,
+        holes: int,
+    ) -> Dict[int, torch.Tensor]:
+        """Play num_games with 3 DQN agents (seats 0-2) + 1 random (seat 3).
 
-        One vectorized call per agent -- O(n) instead of O(n^3).
+        Args:
+            dqn_entries: list of 3 (model, obs_fn) tuples
+            num_games: games to play (vectorized)
+            holes: holes per game
+
+        Returns: {dqn_index: tensor of per-game total scores} for indices 0,1,2
         """
-        if num_games is None:
-            num_games = self.config.eval_games_per_matchup
+        N = num_games
+        totals = {sid: torch.zeros(N, dtype=torch.float32, device=self.device) for sid in range(4)}
+
+        for hole in range(1, holes + 1):
+            state = reset_games(N, self.device)
+            max_rounds = 30
+
+            for round_num in range(max_rounds):
+                if state.done.all():
+                    break
+
+                for pid in range(4):
+                    active = ~state.done
+                    back_to_trigger = state.last_turn & (state.end_game_player == pid)
+                    state.done = state.done | (back_to_trigger & active)
+                    active = ~state.done
+
+                    if not active.any():
+                        break
+
+                    # -- Stage 0 --
+                    state.current_stage.fill_(0)
+
+                    if pid < 3:  # DQN seat
+                        model, obs_fn = dqn_entries[pid]
+                        obs = obs_fn(state, pid)
+                        st = obs.to(self.device)
+                        sg = torch.zeros(N, dtype=torch.long, device=self.device)
+                        with torch.no_grad():
+                            q = model(st, sg)
+                        s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
+                        s0_mask[:, 0] = True
+                        s0_mask[:, 1] = state.deck_ptr < 52
+                        actions_s0 = eps_greedy_batched(q, 0.0, s0_mask)
+                    else:  # random (seat 3)
+                        s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
+                        s0_mask[:, 0] = True
+                        s0_mask[:, 1] = state.deck_ptr < 52
+                        dummy_q = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
+                        actions_s0 = eps_greedy_batched(dummy_q, 1.0, s0_mask)
+
+                    step_stage0(state, actions_s0, pid)
+                    if state.done.all():
+                        break
+
+                    # -- Stage 1 --
+                    state.current_stage.fill_(1)
+
+                    if pid < 3:  # DQN seat
+                        model, obs_fn = dqn_entries[pid]
+                        obs1 = obs_fn(state, pid)
+                        st1 = obs1.to(self.device)
+                        sg1 = torch.ones(N, dtype=torch.long, device=self.device)
+                        with torch.no_grad():
+                            q1 = model(st1, sg1)
+                        mask1 = get_valid_action_mask(state, pid)
+                        actions_s1 = eps_greedy_batched(q1, 0.0, mask1)
+                    else:  # random
+                        mask1 = get_valid_action_mask(state, pid)
+                        dummy_q1 = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
+                        actions_s1 = eps_greedy_batched(dummy_q1, 1.0, mask1)
+
+                    step_stage1(state, actions_s1, pid)
+
+                    all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                    newly_last = active & all_rev & (~state.last_turn)
+                    state.last_turn = state.last_turn | newly_last
+                    state.end_game_player = torch.where(
+                        newly_last,
+                        torch.full_like(state.end_game_player, pid),
+                        state.end_game_player,
+                    )
+
+            for sid in range(4):
+                hole_scores = compute_final_score(
+                    state.player_cards[:, sid, :], self.device
+                )
+                totals[sid] += hole_scores
+
+        return {i: totals[i] for i in range(3)}
+
+    def _run_league_eval(self, games_per_matchup: Optional[int] = None) -> None:
+        """Competitive eval: tables of 3 DQN + 1 random, all C(n,3) combinations."""
+        if games_per_matchup is None:
+            games_per_matchup = self.config.eval_games_per_matchup
         holes = self.config.match_holes
+        n = len(self.population)
 
-        print(f"  {len(self.population)} agents, {num_games} games each, {holes} holes/game")
-
+        entries = []
         for i, (rec, model, _, _, _) in enumerate(self.population):
             model.eval()
             variant = rec.hyperparams.get("model_variant", "v1")
             obs_fn = get_obs_fn(variant)
+            entries.append((model, obs_fn))
 
-            avgs, totals = self._run_eval_config(
-                ["dqn", "random", "heuristic", "random"],
-                model=model, obs_fn=obs_fn, num_games=num_games, holes=holes,
-            )
-            avg = avgs[0]  # DQN seat avg score per hole
-            game_scores = (totals[0] / holes).tolist()  # per-game normalized scores
+        matchups = list(combinations(range(n), 3))
+        agent_scores: Dict[int, List[torch.Tensor]] = {i: [] for i in range(n)}
+
+        print(f"  {len(matchups)} matchups, {games_per_matchup} games each, {holes} holes/game")
+
+        for group in matchups:
+            dqn_entries = [entries[i] for i in group]
+            scores = self._run_matchup_vectorized(dqn_entries, games_per_matchup, holes)
+
+            for di, agent_idx in enumerate(group):
+                agent_scores[agent_idx].append(scores[di])
+
+        for i, (rec, _, _, _, _) in enumerate(self.population):
+            all_scores = torch.cat(agent_scores[i]) / holes  # per-hole avg
+            avg = all_scores.mean().item()
 
             rec.hyperparams["avg_score"] = round(avg, 4)
-            rec.hyperparams["eval_games"] = num_games
-            rec.hyperparams["_game_scores"] = game_scores
+            rec.hyperparams["eval_games"] = len(all_scores)
+            rec.hyperparams["_game_scores"] = all_scores.tolist()
 
+            variant = rec.hyperparams.get("model_variant", "v1")
             print(
                 f"  {rec.agent_id} ({variant}): avg_score={avg:.3f} "
+                f"games={len(all_scores)} "
                 f"lr={rec.hyperparams['lr']:.2e} hid={rec.hyperparams['hidden_dim']}"
             )
 
@@ -983,7 +1117,7 @@ class TournamentTrainer:
         elites = ranked[: self.config.elitism_count]
         new_population = []
 
-        # Keep elites -- but age-limit them (max 3 gens as elite)
+        # Keep elites unchanged, age-limit at 5
         for idx in elites:
             rec, model, target, opt, buf = self.population[idx]
             rec.elite_age += 1
@@ -1013,6 +1147,9 @@ class TournamentTrainer:
             if random.random() < self.config.mutation_rate:
                 lr = lr * np.exp(np.random.normal(0, self.config.mutation_sigma))
                 lr = np.clip(lr, self.config.lr_range[0], self.config.lr_range[1])
+
+            if random.random() < self.config.mutation_rate:
+                hidden_dim = random.choice(self.config.hidden_dim_choices)
 
             agent_id = f"gen{self.generation + 1}_agent{child_id}"
             child_rec = AgentRecord(
@@ -1056,6 +1193,7 @@ class TournamentTrainer:
                 hof_rec = AgentRecord(
                     agent_id=self.hall_of_fame_agent_id,
                     generation=hof_ckpt.get("generation", 0),
+                    skip_training=True,
                     hyperparams={
                         "lr": hof_ckpt["agent_record"].get("hyperparams", {}).get("lr", 1e-3),
                         "hidden_dim": hof_hidden,
@@ -1361,20 +1499,22 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--population-size", type=int, default=12)
     p.add_argument("--generations", type=int, default=20)
     p.add_argument("--elitism-count", type=int, default=2)
-    p.add_argument("--episodes-per-gen", type=int, default=1000)
+    p.add_argument("--episodes-per-gen", type=int, default=500)
     p.add_argument("--holes-per-game", type=int, default=9)
-    p.add_argument("--updates-per-episode", type=int, default=8)
-    p.add_argument("--batch-size", type=int, default=512)
+    p.add_argument("--updates-per-episode", type=int, default=4)
+    p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--matches-per-pair", type=int, default=4)
     p.add_argument("--match-holes", type=int, default=9)
-    p.add_argument("--eval-games-per-matchup", type=int, default=1000)
+    p.add_argument("--eval-games-per-matchup", type=int, default=20)
     p.add_argument("--buffer-capacity", type=int, default=100_000)
+    p.add_argument("--tau", type=float, default=0.0)
     p.add_argument("--target-update-interval", type=int, default=500)
-    p.add_argument("--epsilon-start", type=float, default=0.4)
-    p.add_argument("--epsilon-end", type=float, default=0.02)
-    p.add_argument("--max-train-rounds", type=int, default=2)
+    p.add_argument("--epsilon-start", type=float, default=0.3)
+    p.add_argument("--epsilon-end", type=float, default=0.05)
+    p.add_argument("--max-train-rounds", type=int, default=5)
     p.add_argument("--separation-p", type=float, default=0.05)
-    p.add_argument("--adaptive-gen-limit", type=int, default=5)
+    p.add_argument("--adaptive-gen-limit", type=int, default=3)
+    p.add_argument("--model-variant", type=str, default=None, choices=["v1", "v2", "v2s"])
     p.add_argument("--output-dir", type=Path, default=Path("data/tournament"))
     p.add_argument("--warmstart-checkpoint", type=Path, default=None)
     p.add_argument("--seed", type=int, default=42)
@@ -1397,12 +1537,14 @@ def parse_args(argv=None) -> TournamentConfig:
         match_holes=args.match_holes,
         eval_games_per_matchup=args.eval_games_per_matchup,
         buffer_capacity=args.buffer_capacity,
+        tau=args.tau,
         target_update_interval=args.target_update_interval,
         max_train_rounds=args.max_train_rounds,
         separation_p=args.separation_p,
         adaptive_gen_limit=args.adaptive_gen_limit,
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
+        model_variant=args.model_variant,
         output_dir=args.output_dir,
         warmstart_checkpoint=args.warmstart_checkpoint,
         seed=args.seed,

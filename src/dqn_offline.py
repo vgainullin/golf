@@ -125,6 +125,33 @@ class GolfDQN(nn.Module):
 STATE_SEQUENCE_LENGTH_V2 = 29  # 29 card tokens to embed (excludes deck_remaining scalar)
 
 
+class GolfDQNv2Shallow(nn.Module):
+    """Original 2-layer v2 DQN (no LayerNorm). Compatible with older checkpoints."""
+
+    def __init__(self, embedding_dim: int, hidden_dim: int, num_actions: int = NUM_ACTIONS):
+        super().__init__()
+        self.embedding = nn.Embedding(CARD_VOCAB_SIZE, embedding_dim)
+        self.stage_embedding = nn.Embedding(STAGE_VOCAB_SIZE, embedding_dim)
+        self.encoder = nn.Sequential(
+            nn.Linear((STATE_SEQUENCE_LENGTH_V2 + 1) * embedding_dim + 1, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.head = nn.Linear(hidden_dim, num_actions)
+
+    def forward(self, state_tokens: torch.Tensor, stages: torch.Tensor) -> torch.Tensor:
+        card_tokens = state_tokens[:, :29]
+        deck_remaining = state_tokens[:, 29].float() / 27.0
+        embeds = self.embedding(card_tokens)
+        stage_embed = self.stage_embedding(stages).unsqueeze(1)
+        combined = torch.cat([embeds, stage_embed], dim=1)
+        flat = combined.view(combined.size(0), -1)
+        flat = torch.cat([flat, deck_remaining.unsqueeze(1)], dim=1)
+        features = self.encoder(flat)
+        return self.head(features)
+
+
 class GolfDQNv2(nn.Module):
     """Expanded DQN with full table visibility (v2 observation)."""
 
