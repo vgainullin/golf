@@ -782,14 +782,18 @@ class TournamentTrainer:
         # and reduce LR/epsilon to avoid destroying pretrained weights
         ws_variant = None
         ws_hidden = None
+        ws_embed = None
         if base_state is not None:
             ws_variant = base_state.get("config", {}).get("model_variant")
             ws_hidden = base_state.get("config", {}).get("hidden_dim")
+            ws_embed = base_state.get("config", {}).get("embedding_dim")
+            if ws_embed:
+                self.config.embedding_dim = ws_embed
             # Cap LR and epsilon for warmstarted agents
             ws_lr_cap = 5e-4
             self.config.lr_range = (self.config.lr_range[0], min(self.config.lr_range[1], ws_lr_cap))
             self.config.epsilon_start = min(self.config.epsilon_start, 0.1)
-            print(f"  Warmstart: lr_range capped to {self.config.lr_range}, epsilon_start={self.config.epsilon_start}")
+            print(f"  Warmstart: embedding_dim={self.config.embedding_dim}, lr_range capped to {self.config.lr_range}, epsilon_start={self.config.epsilon_start}")
 
         for i in range(self.config.population_size):
             # Mutate hyperparameters for diversity
