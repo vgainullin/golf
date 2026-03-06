@@ -21,7 +21,7 @@ Eval config: [DQN, Random, Heuristic, Random], 9 holes.
 
 ---
 
-## Experiment 1: Residual DQN with alpha scaling
+## Experiment 1: Residual DQN with alpha scaling (2026-03-06)
 
 **Commit:** `src/dqn_offline.py` (ResidualDQN), `src/residual_dqn.py`
 
@@ -33,7 +33,7 @@ Eval config: [DQN, Random, Heuristic, Random], 9 holes.
 
 ---
 
-## Experiment 2: Alpha removed from forward
+## Experiment 2: Alpha removed from forward (2026-03-06)
 
 **Fix:** Forward changed to `Q_base + Q_residual` (no alpha). Residual gets full gradients.
 
@@ -43,7 +43,7 @@ Eval config: [DQN, Random, Heuristic, Random], 9 holes.
 
 ---
 
-## Experiment 3: Losses on Q_residual alone
+## Experiment 3: Losses on Q_residual alone (2026-03-06)
 
 **Fix:** DQN loss computed on Q_res alone (TD targets from Q_res_target only). Margin loss on Q_res alone. Q_base only used for action selection in Double DQN next-action choice.
 
@@ -118,7 +118,7 @@ Weight specific suboptimal heuristic decisions more heavily:
 
 ---
 
-## Experiment 4: Pure DQfD (Direction A)
+## Experiment 4: Pure DQfD (2026-03-06)
 
 **Script:** `src/dqfd.py`
 
