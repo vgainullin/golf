@@ -145,7 +145,7 @@ class TournamentConfig:
     # Match settings
     matches_per_pair: int = 4       # games per matchup in round-robin
     match_holes: int = 9
-    eval_games_per_matchup: int = 20  # per C(n,3) matchup; total per agent = C(n-1,2) * this
+    eval_games_per_matchup: int = 100  # per C(n,2) matchup; total per agent = (n-1) * this
 
     # Model
     model_variant: Optional[str] = None  # force variant: v1, v2, v2s (None = mixed)
@@ -153,6 +153,7 @@ class TournamentConfig:
     # Infrastructure
     output_dir: Path = Path("data/tournament")
     warmstart_checkpoint: Optional[Path] = None
+    resume: bool = False  # resume from last saved generation in output_dir
     seed: int = 42
     device: str = "auto"
     hf_repo_id: Optional[str] = None
@@ -756,7 +757,10 @@ class TournamentTrainer:
         self.hall_of_fame_agent_id: Optional[str] = None
         self.hall_of_fame_game_scores: List[float] = []
 
-        self._init_population()
+        if config.resume:
+            self._resume_population()
+        else:
+            self._init_population()
 
     def _init_population(self) -> None:
         """Create initial population, optionally warm-starting from a checkpoint."""
@@ -819,6 +823,69 @@ class TournamentTrainer:
         print(f"Initialized {len(self.population)} agents")
         for rec, _, _, _, _ in self.population:
             print(f"  {rec.agent_id}: lr={rec.hyperparams['lr']:.2e} hidden={rec.hyperparams['hidden_dim']} variant={rec.hyperparams.get('model_variant', 'v1')}")
+
+    def _resume_population(self) -> None:
+        """Reload population from the last saved generation in output_dir."""
+        import glob
+        gen_dirs = sorted(glob.glob(str(self.config.output_dir / "gen_*")))
+        if not gen_dirs:
+            raise RuntimeError(f"No generation dirs found in {self.config.output_dir}")
+
+        last_gen_dir = Path(gen_dirs[-1])
+        last_gen = int(last_gen_dir.name.split("_")[1])
+        self.generation = last_gen
+
+        summary_path = last_gen_dir / "generation_summary.json"
+        with open(summary_path) as f:
+            summary = json.load(f)
+
+        # Reload HoF state
+        hof_path = self.config.output_dir / "hall_of_fame.pt"
+        if hof_path.exists():
+            hof_ckpt = torch.load(hof_path, map_location="cpu", weights_only=False)
+            hof_rec = hof_ckpt.get("agent_record", {})
+            self.hall_of_fame_score = hof_rec.get("hyperparams", {}).get("avg_score", float("inf"))
+            self.hall_of_fame_agent_id = hof_rec.get("agent_id")
+            self.hall_of_fame_game_scores = hof_rec.get("hyperparams", {}).get("_game_scores", [])
+
+        # Reload history
+        hist_path = self.config.output_dir / "tournament_history.json"
+        if hist_path.exists():
+            with open(hist_path) as f:
+                self.history = json.load(f)
+
+        # Load each agent checkpoint
+        for agent_data in summary["rankings"]:
+            agent_id = agent_data["agent_id"]
+            hp = agent_data["hyperparams"]
+            variant = hp.get("model_variant", "v1")
+            hidden_dim = hp["hidden_dim"]
+
+            ckpt_path = last_gen_dir / f"{agent_id}.pt"
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+            rec = AgentRecord(
+                agent_id=agent_id,
+                generation=agent_data.get("generation", last_gen),
+                parent_id=agent_data.get("parent_id"),
+                elite_age=agent_data.get("elite_age", 0),
+                hyperparams=hp,
+            )
+
+            model = make_model(variant, self.config.embedding_dim, hidden_dim, self.device)
+            model.load_state_dict(ckpt["model_state_dict"])
+            target = make_model(variant, self.config.embedding_dim, hidden_dim, self.device)
+            target.load_state_dict(model.state_dict())
+
+            lr = hp.get("lr", 1e-3)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+            buf = ReplayBuffer(self.config.buffer_capacity)
+
+            self.population.append((rec, model, target, optimizer, buf))
+
+        print(f"Resumed from generation {last_gen} with {len(self.population)} agents")
+        for rec, _, _, _, _ in self.population:
+            print(f"  {rec.agent_id}: lr={rec.hyperparams['lr']:.2e} hidden={rec.hyperparams['hidden_dim']} variant={rec.hyperparams.get('model_variant', 'v1')} score={rec.hyperparams.get('avg_score', 'N/A')}")
 
     # ----- Training phase -----
 
@@ -965,22 +1032,81 @@ class TournamentTrainer:
 
         return {sid: totals[sid].mean().item() / holes for sid in range(4)}, totals
 
-    def _run_matchup_vectorized(
+    def _run_league_eval(self, games_per_matchup: Optional[int] = None) -> None:
+        """Eval: [DQN_a, R, DQN_b, H] for all C(n,2) pairs + solo [DQN, R, H, R]."""
+        if games_per_matchup is None:
+            games_per_matchup = self.config.eval_games_per_matchup
+        holes = self.config.match_holes
+        n = len(self.population)
+
+        entries = []
+        for i, (rec, model, _, _, _) in enumerate(self.population):
+            model.eval()
+            variant = rec.hyperparams.get("model_variant", "v1")
+            obs_fn = get_obs_fn(variant)
+            entries.append((model, obs_fn))
+
+        matchups = list(combinations(range(n), 2))
+        agent_scores: Dict[int, List[torch.Tensor]] = {i: [] for i in range(n)}
+
+        print(f"  {len(matchups)} matchups [DQN,R,DQN,H], {games_per_matchup} games each")
+
+        for a_idx, b_idx in matchups:
+            # seat layout: [DQN_a, R, DQN_b, H]
+            seat_models: Dict[int, Tuple[nn.Module, Any]] = {
+                0: entries[a_idx],
+                2: entries[b_idx],
+            }
+            totals = self._run_mixed_table(seat_models, games_per_matchup, holes)
+            agent_scores[a_idx].append(totals[0])
+            agent_scores[b_idx].append(totals[2])
+
+        for i, (rec, _, _, _, _) in enumerate(self.population):
+            all_scores = torch.cat(agent_scores[i]) / holes
+            avg = all_scores.mean().item()
+            rec.hyperparams["avg_score"] = round(avg, 4)
+            rec.hyperparams["eval_games"] = len(all_scores)
+            rec.hyperparams["_game_scores"] = all_scores.tolist()
+
+        # Solo eval: [DQN, R, H, R] for absolute strength
+        print(f"  Solo eval [DQN, R, H, R], 500 games each")
+        for i, (rec, model, _, _, _) in enumerate(self.population):
+            model.eval()
+            variant = rec.hyperparams.get("model_variant", "v1")
+            obs_fn = get_obs_fn(variant)
+            avgs, _ = self._run_eval_config(
+                ["dqn", "random", "heuristic", "random"],
+                model=model, obs_fn=obs_fn, num_games=500, holes=holes,
+            )
+            rec.hyperparams["solo_score"] = round(avgs[0], 4)
+
+        for i, (rec, _, _, _, _) in enumerate(self.population):
+            variant = rec.hyperparams.get("model_variant", "v1")
+            print(
+                f"  {rec.agent_id} ({variant}): competitive={rec.hyperparams['avg_score']:.3f} "
+                f"solo={rec.hyperparams['solo_score']:.3f} "
+                f"lr={rec.hyperparams['lr']:.2e} hid={rec.hyperparams['hidden_dim']}"
+            )
+
+    def _run_mixed_table(
         self,
-        dqn_entries: List[Tuple[nn.Module, Any]],
+        seat_models: Dict[int, Tuple[nn.Module, Any]],
         num_games: int,
         holes: int,
     ) -> Dict[int, torch.Tensor]:
-        """Play num_games with 3 DQN agents (seats 0-2) + 1 random (seat 3).
+        """Play num_games on a [DQN, R, DQN, H] table. Seats not in seat_models
+        are random (odd seats) or heuristic (seat 3).
 
-        Args:
-            dqn_entries: list of 3 (model, obs_fn) tuples
-            num_games: games to play (vectorized)
-            holes: holes per game
-
-        Returns: {dqn_index: tensor of per-game total scores} for indices 0,1,2
+        seat_models: {seat_idx: (model, obs_fn)} for DQN seats
+        Returns: {seat_idx: tensor of per-game total scores} for all 4 seats
         """
         N = num_games
+        # seat layout: 0=DQN, 1=random, 2=DQN, 3=heuristic
+        seat_roles = ["random"] * 4
+        for sid in seat_models:
+            seat_roles[sid] = "dqn"
+        seat_roles[3] = "heuristic"
+
         totals = {sid: torch.zeros(N, dtype=torch.float32, device=self.device) for sid in range(4)}
 
         for hole in range(1, holes + 1):
@@ -1000,11 +1126,13 @@ class TournamentTrainer:
                     if not active.any():
                         break
 
+                    role = seat_roles[pid]
+
                     # -- Stage 0 --
                     state.current_stage.fill_(0)
 
-                    if pid < 3:  # DQN seat
-                        model, obs_fn = dqn_entries[pid]
+                    if role == "dqn":
+                        model, obs_fn = seat_models[pid]
                         obs = obs_fn(state, pid)
                         st = obs.to(self.device)
                         sg = torch.zeros(N, dtype=torch.long, device=self.device)
@@ -1014,7 +1142,9 @@ class TournamentTrainer:
                         s0_mask[:, 0] = True
                         s0_mask[:, 1] = state.deck_ptr < 52
                         actions_s0 = eps_greedy_batched(q, 0.0, s0_mask)
-                    else:  # random (seat 3)
+                    elif role == "heuristic":
+                        actions_s0 = heuristic_stage0(state, pid)
+                    else:  # random
                         s0_mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=self.device)
                         s0_mask[:, 0] = True
                         s0_mask[:, 1] = state.deck_ptr < 52
@@ -1028,8 +1158,8 @@ class TournamentTrainer:
                     # -- Stage 1 --
                     state.current_stage.fill_(1)
 
-                    if pid < 3:  # DQN seat
-                        model, obs_fn = dqn_entries[pid]
+                    if role == "dqn":
+                        model, obs_fn = seat_models[pid]
                         obs1 = obs_fn(state, pid)
                         st1 = obs1.to(self.device)
                         sg1 = torch.ones(N, dtype=torch.long, device=self.device)
@@ -1037,6 +1167,8 @@ class TournamentTrainer:
                             q1 = model(st1, sg1)
                         mask1 = get_valid_action_mask(state, pid)
                         actions_s1 = eps_greedy_batched(q1, 0.0, mask1)
+                    elif role == "heuristic":
+                        actions_s1 = heuristic_stage1(state, pid)
                     else:  # random
                         mask1 = get_valid_action_mask(state, pid)
                         dummy_q1 = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
@@ -1059,48 +1191,7 @@ class TournamentTrainer:
                 )
                 totals[sid] += hole_scores
 
-        return {i: totals[i] for i in range(3)}
-
-    def _run_league_eval(self, games_per_matchup: Optional[int] = None) -> None:
-        """Competitive eval: tables of 3 DQN + 1 random, all C(n,3) combinations."""
-        if games_per_matchup is None:
-            games_per_matchup = self.config.eval_games_per_matchup
-        holes = self.config.match_holes
-        n = len(self.population)
-
-        entries = []
-        for i, (rec, model, _, _, _) in enumerate(self.population):
-            model.eval()
-            variant = rec.hyperparams.get("model_variant", "v1")
-            obs_fn = get_obs_fn(variant)
-            entries.append((model, obs_fn))
-
-        matchups = list(combinations(range(n), 3))
-        agent_scores: Dict[int, List[torch.Tensor]] = {i: [] for i in range(n)}
-
-        print(f"  {len(matchups)} matchups, {games_per_matchup} games each, {holes} holes/game")
-
-        for group in matchups:
-            dqn_entries = [entries[i] for i in group]
-            scores = self._run_matchup_vectorized(dqn_entries, games_per_matchup, holes)
-
-            for di, agent_idx in enumerate(group):
-                agent_scores[agent_idx].append(scores[di])
-
-        for i, (rec, _, _, _, _) in enumerate(self.population):
-            all_scores = torch.cat(agent_scores[i]) / holes  # per-hole avg
-            avg = all_scores.mean().item()
-
-            rec.hyperparams["avg_score"] = round(avg, 4)
-            rec.hyperparams["eval_games"] = len(all_scores)
-            rec.hyperparams["_game_scores"] = all_scores.tolist()
-
-            variant = rec.hyperparams.get("model_variant", "v1")
-            print(
-                f"  {rec.agent_id} ({variant}): avg_score={avg:.3f} "
-                f"games={len(all_scores)} "
-                f"lr={rec.hyperparams['lr']:.2e} hid={rec.hyperparams['hidden_dim']}"
-            )
+        return totals
 
     # ----- Selection and mutation -----
 
@@ -1382,7 +1473,8 @@ class TournamentTrainer:
                 },
             )
 
-        for gen in range(1, self.config.generations + 1):
+        start_gen = self.generation + 1 if self.config.resume else 1
+        for gen in range(start_gen, self.config.generations + 1):
             self.generation = gen
             gen_start = time.time()
 
@@ -1505,7 +1597,7 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--matches-per-pair", type=int, default=4)
     p.add_argument("--match-holes", type=int, default=9)
-    p.add_argument("--eval-games-per-matchup", type=int, default=20)
+    p.add_argument("--eval-games-per-matchup", type=int, default=100)
     p.add_argument("--buffer-capacity", type=int, default=100_000)
     p.add_argument("--tau", type=float, default=0.0)
     p.add_argument("--target-update-interval", type=int, default=500)
@@ -1517,6 +1609,7 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--model-variant", type=str, default=None, choices=["v1", "v2", "v2s"])
     p.add_argument("--output-dir", type=Path, default=Path("data/tournament"))
     p.add_argument("--warmstart-checkpoint", type=Path, default=None)
+    p.add_argument("--resume", action="store_true", help="Resume from last saved generation")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     p.add_argument("--hf-repo-id", type=str, default=None)
@@ -1547,6 +1640,7 @@ def parse_args(argv=None) -> TournamentConfig:
         model_variant=args.model_variant,
         output_dir=args.output_dir,
         warmstart_checkpoint=args.warmstart_checkpoint,
+        resume=args.resume,
         seed=args.seed,
         device=args.device,
         hf_repo_id=args.hf_repo_id,
