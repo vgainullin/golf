@@ -186,6 +186,28 @@ class GolfDQNv2(nn.Module):
         return self.head(features)
 
 
+class ResidualDQN(nn.Module):
+    """Frozen base Q-network + trainable residual: Q = Q_base + Q_residual."""
+
+    def __init__(self, base_model: nn.Module, residual_model: nn.Module):
+        super().__init__()
+        self.base_model = base_model
+        self.residual_model = residual_model
+        # Freeze base
+        for p in self.base_model.parameters():
+            p.requires_grad = False
+        # Initialize residual head small so Q_residual starts near zero
+        with torch.no_grad():
+            self.residual_model.head.weight.mul_(0.01)
+            self.residual_model.head.bias.zero_()
+
+    def forward(self, state_tokens: torch.Tensor, stages: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            q_base = self.base_model(state_tokens, stages)
+        q_residual = self.residual_model(state_tokens, stages)
+        return q_base + q_residual
+
+
 def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
