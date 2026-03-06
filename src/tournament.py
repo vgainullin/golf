@@ -789,11 +789,15 @@ class TournamentTrainer:
             ws_embed = base_state.get("config", {}).get("embedding_dim")
             if ws_embed:
                 self.config.embedding_dim = ws_embed
-            # Cap LR and epsilon for warmstarted agents
-            ws_lr_cap = 5e-4
-            self.config.lr_range = (self.config.lr_range[0], min(self.config.lr_range[1], ws_lr_cap))
-            self.config.epsilon_start = min(self.config.epsilon_start, 0.1)
-            print(f"  Warmstart: embedding_dim={self.config.embedding_dim}, lr_range capped to {self.config.lr_range}, epsilon_start={self.config.epsilon_start}")
+            # Lock hidden_dim and cap LR/epsilon for warmstarted agents
+            if ws_hidden:
+                self.config.hidden_dim_choices = [ws_hidden]
+            ws_lr_cap = 1e-4
+            self.config.lr_range = (1e-5, min(self.config.lr_range[1], ws_lr_cap))
+            self.config.epsilon_start = min(self.config.epsilon_start, 0.05)
+            self.config.epsilon_end = min(self.config.epsilon_end, 0.02)
+            print(f"  Warmstart: embedding_dim={self.config.embedding_dim}, hidden_dim={ws_hidden}, "
+                  f"lr_range={self.config.lr_range}, epsilon={self.config.epsilon_start}->{self.config.epsilon_end}")
 
         for i in range(self.config.population_size):
             # Mutate hyperparameters for diversity
@@ -1441,6 +1445,7 @@ class TournamentTrainer:
             def write(self, data):
                 for s in self._streams:
                     s.write(data)
+                    s.flush()
             def flush(self):
                 for s in self._streams:
                     s.flush()
