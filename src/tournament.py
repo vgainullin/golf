@@ -44,6 +44,7 @@ from .simulation import (
 )
 from .tensor_dataset import tensor_to_player_tokens
 from .tensor_logger import decode_action_id, encode_action_id
+from .reward_shaping import HindsightRewardShaper
 from .vectorized_golf import (
     VectorizedGolfState,
     reset_games,
@@ -147,6 +148,9 @@ class TournamentConfig:
     matches_per_pair: int = 4       # games per matchup in round-robin
     match_holes: int = 9
     eval_games_per_matchup: int = 100  # per C(n,2) matchup; total per agent = (n-1) * this
+
+    # Reward shaping
+    reward_shaping: str = "hindsight"  # "hindsight" or "none"
 
     # Model
     model_variant: Optional[str] = None  # force variant: v1, v2, v2s (None = mixed)
@@ -572,6 +576,7 @@ def train_episodes_vectorized(
     epsilon: float,
     global_step: int,
     obs_fn=None,
+    reward_shaper=None,
 ) -> Tuple[float, int]:
     """Run N episodes in parallel using mixed-table seating.
 
@@ -702,8 +707,20 @@ def train_episodes_vectorized(
                 if pid == LEARNER_SEAT:
                     obs_before_s1 = _pad_obs(obs1).clone()
                     aid_s1 = actions_s1.clone()
+                    if reward_shaper is not None:
+                        cards_before_s1 = state.player_cards[:, pid, :].clone()
 
                 rewards_s1 = step_stage1(state, actions_s1, pid)
+
+                if pid == LEARNER_SEAT and reward_shaper is not None:
+                    cards_after_s1 = state.player_cards[:, pid, :].clone()
+                    rewards_s1 = reward_shaper.shape(
+                        rewards_s1,
+                        cards_before=cards_before_s1,
+                        cards_after=cards_after_s1,
+                        active=active,
+                        device=device,
+                    )
 
                 # Defer stage-1 transition for learner -- next_obs not
                 # available until learner's next turn (after opponents act)
@@ -807,6 +824,9 @@ class TournamentTrainer:
         self.population: List[Tuple[AgentRecord, nn.Module, nn.Module, torch.optim.Optimizer, ReplayBuffer]] = []
         self.generation = 0
         self.history: List[Dict[str, Any]] = []
+
+        # Reward shaping
+        self.reward_shaper = HindsightRewardShaper() if config.reward_shaping == "hindsight" else None
 
         # Loss tracking
         self.loss_history: Dict[str, List[float]] = {}
@@ -987,6 +1007,7 @@ class TournamentTrainer:
                 epsilon=agent_eps,
                 global_step=0,
                 obs_fn=obs_fn,
+                reward_shaper=self.reward_shaper,
             )
 
             self.loss_history.setdefault(record.agent_id, []).append(loss)
@@ -1568,6 +1589,7 @@ class TournamentTrainer:
 
         print(f"\nTournament: {self.config.generations} generations, "
               f"{self.config.population_size} agents")
+        print(f"  Reward shaping: {self.config.reward_shaping}")
         print(f"  Episodes/gen: {self.config.episodes_per_gen}")
         print(f"  Eval games/matchup: {self.config.eval_games_per_matchup}")
         print(f"  Adaptive: max_rounds={self.config.max_train_rounds} "
@@ -1741,6 +1763,9 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     p.add_argument("--hf-repo-id", type=str, default=None)
     p.add_argument("--hf-token", type=str, default=None)
+    p.add_argument("--reward-shaping", type=str, default="hindsight",
+                   choices=["hindsight", "none"],
+                   help="Reward shaping for stage-1 training rewards")
     p.add_argument("--wandb-project", type=str, default=None)
     p.add_argument("--wandb-run-name", type=str, default=None)
 
@@ -1764,6 +1789,7 @@ def parse_args(argv=None) -> TournamentConfig:
         adaptive_gen_limit=args.adaptive_gen_limit,
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
+        reward_shaping=args.reward_shaping,
         model_variant=args.model_variant,
         output_dir=args.output_dir,
         warmstart_checkpoint=args.warmstart_checkpoint,
