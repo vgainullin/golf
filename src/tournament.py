@@ -396,6 +396,8 @@ def train_episode(
         golf = Golf(players=players, deck_type="French", verbose=False)
         golf.shuffle()
         golf.deal()
+        # Deferred stage-1 transition: (tok1, aid1, r1) or None
+        pending_s1 = None
 
         while not golf.game_over:
             for pid in range(4):
@@ -403,6 +405,19 @@ def train_episode(
                 if "?" not in golf.players[pid].game_state:
                     golf.game_over = True
                     break
+
+                # Complete pending stage-1 transition (correct next_obs after opponents acted)
+                if pid == learner_id and pending_s1 is not None:
+                    p_tok1, p_aid1, p_r1 = pending_s1
+                    tok1_after = _get_tokens(golf, pid)
+                    buffer.push_single(
+                        state=p_tok1, action=p_aid1, reward=p_r1,
+                        next_state=tok1_after,
+                        done=1.0 if golf.game_over else 0.0,
+                        stage=1, next_stage=0,
+                    )
+                    n_transitions += 1
+                    pending_s1 = None
 
                 # Stage 0
                 if pid == learner_id:
@@ -462,15 +477,9 @@ def train_episode(
                 r1 = golf.take_action(pid, [1, act1, pos1])
                 golf.players[pid].gather_game_state(golf)
 
+                # Defer stage-1 transition for learner
                 if pid == learner_id:
-                    tok1_after = _get_tokens(golf, pid)
-                    buffer.push_single(
-                        state=tok1, action=aid1, reward=float(r1),
-                        next_state=tok1_after,
-                        done=1.0 if golf.game_over else 0.0,
-                        stage=1, next_stage=0,
-                    )
-                    n_transitions += 1
+                    pending_s1 = (tok1, aid1, float(r1))
 
                 if len(golf.deck) < golf.num_players + 2:
                     golf.deck = GolfDeck()
@@ -480,6 +489,18 @@ def train_episode(
                 if "?" not in golf.players[pid].game_state:
                     golf.last_turn = True
                     golf.end_game_player_id = pid
+
+        # Flush remaining pending stage-1 transition as terminal
+        if pending_s1 is not None:
+            p_tok1, p_aid1, p_r1 = pending_s1
+            buffer.push_single(
+                state=p_tok1, action=p_aid1, reward=p_r1,
+                next_state=p_tok1,  # dummy, masked by done=1
+                done=1.0,
+                stage=1, next_stage=0,
+            )
+            n_transitions += 1
+            pending_s1 = None
 
     # Train on buffer (transitions were pushed directly via push_single)
     losses = []
@@ -568,6 +589,9 @@ def train_episodes_vectorized(
     for hole in range(1, config.holes_per_game + 1):
         state = reset_games(N, device)
         max_rounds = 30  # safety limit
+        # Deferred stage-1 transition: next_obs must reflect state after
+        # opponents act, not immediately after the learner's action.
+        pending_s1 = None  # (obs, act, rew, active_np) or None
 
         for round_num in range(max_rounds):
             if state.done.all():
@@ -587,6 +611,24 @@ def train_episodes_vectorized(
                 # -- Stage 0 --
                 state.current_stage.fill_(0)
                 obs = obs_fn(state, pid) if pid == LEARNER_SEAT else get_observation(state, pid)
+
+                # Complete pending stage-1 transition (now we have correct next_obs)
+                if pid == LEARNER_SEAT and pending_s1 is not None:
+                    p_obs, p_act, p_rew, p_active_np = pending_s1
+                    next_obs = _pad_obs(obs).cpu().numpy()
+                    done_np = state.done.float().cpu().numpy()
+                    n_p = int(p_active_np.sum())
+                    if n_p > 0:
+                        buffer.push_batch(
+                            states=p_obs[p_active_np],
+                            actions=p_act[p_active_np],
+                            rewards=p_rew[p_active_np],
+                            next_states=next_obs[p_active_np],
+                            dones=done_np[p_active_np],
+                            stages=np.ones(n_p, dtype=np.int64),
+                            next_stages=np.zeros(n_p, dtype=np.int64),
+                        )
+                    pending_s1 = None
 
                 if pid == 0:
                     # Heuristic
@@ -653,24 +695,22 @@ def train_episodes_vectorized(
                     dummy_q1 = torch.zeros(N, VEC_NUM_ACTIONS, device=device)
                     actions_s1 = eps_greedy_batched(dummy_q1, 1.0, mask1)
 
-                # Record stage1 transition for learner only
+                # Capture stage1 data for learner (transition deferred)
                 if pid == LEARNER_SEAT:
                     obs_before_s1 = _pad_obs(obs1).clone()
                     aid_s1 = actions_s1.clone()
 
                 rewards_s1 = step_stage1(state, actions_s1, pid)
 
+                # Defer stage-1 transition for learner -- next_obs not
+                # available until learner's next turn (after opponents act)
                 if pid == LEARNER_SEAT:
-                    obs_after_s1 = _pad_obs(obs_fn(state, pid))
                     active_np = active.cpu().numpy()
-                    buffer.push_batch(
-                        states=obs_before_s1.cpu().numpy()[active_np],
-                        actions=aid_s1.cpu().numpy()[active_np],
-                        rewards=rewards_s1.float().cpu().numpy()[active_np],
-                        next_states=obs_after_s1.cpu().numpy()[active_np],
-                        dones=state.done.float().cpu().numpy()[active_np],
-                        stages=np.ones(int(active_np.sum()), dtype=np.int64),
-                        next_stages=np.zeros(int(active_np.sum()), dtype=np.int64),
+                    pending_s1 = (
+                        obs_before_s1.cpu().numpy(),
+                        aid_s1.cpu().numpy(),
+                        rewards_s1.float().cpu().numpy(),
+                        active_np.copy(),
                     )
 
                 # Check if all cards revealed -> trigger last turn
@@ -682,6 +722,22 @@ def train_episodes_vectorized(
                     torch.full_like(state.end_game_player, pid),
                     state.end_game_player,
                 )
+
+        # Flush remaining pending stage-1 transition as terminal
+        if pending_s1 is not None:
+            p_obs, p_act, p_rew, p_active_np = pending_s1
+            n_p = int(p_active_np.sum())
+            if n_p > 0:
+                buffer.push_batch(
+                    states=p_obs[p_active_np],
+                    actions=p_act[p_active_np],
+                    rewards=p_rew[p_active_np],
+                    next_states=p_obs[p_active_np],  # dummy, masked by done=1
+                    dones=np.ones(n_p, dtype=np.float32),
+                    stages=np.ones(n_p, dtype=np.int64),
+                    next_stages=np.zeros(n_p, dtype=np.int64),
+                )
+            pending_s1 = None
 
     # Train on buffer (transitions were pushed directly via push_batch)
     # Determine state width for this model variant
