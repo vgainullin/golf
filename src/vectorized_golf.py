@@ -129,6 +129,24 @@ def compute_final_score(cards: torch.Tensor, device: torch.device) -> torch.Tens
     return compute_score(cards, all_revealed, device)
 
 
+def count_column_matches(state: VectorizedGolfState, player_id: int) -> torch.Tensor:
+    """Count column matches (0-3) for a player based on revealed cards.
+
+    A column match occurs when both cards in a column (slots i and i+3)
+    are revealed and have the same rank.
+
+    Returns: (N,) long tensor
+    """
+    ranks = state.player_cards[:, player_id, :] % NUM_RANKS
+    revealed = state.player_revealed[:, player_id, :]
+    N = state.player_cards.shape[0]
+    matches = torch.zeros(N, dtype=torch.long, device=state.player_cards.device)
+    for col in range(3):
+        match = revealed[:, col] & revealed[:, col + 3] & (ranks[:, col] == ranks[:, col + 3])
+        matches += match.long()
+    return matches
+
+
 def get_observation(state: VectorizedGolfState, player_id: int) -> torch.Tensor:
     """Extract model tokens: [card0..5 or 52 if hidden, holding or 52, discard_top].
 

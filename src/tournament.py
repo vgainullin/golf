@@ -53,6 +53,7 @@ from .vectorized_golf import (
     step_stage1,
     compute_score as vec_compute_score,
     compute_final_score,
+    count_column_matches,
     get_valid_action_mask,
     heuristic_stage0,
     heuristic_stage1,
@@ -1005,15 +1006,23 @@ class TournamentTrainer:
         obs_fn,
         num_games: int,
         holes: int,
-    ) -> Dict[int, float]:
+    ) -> Tuple[Dict[int, float], Dict[int, torch.Tensor], Dict[int, Dict[str, float]]]:
         """Run num_games games with specified seat roles and return avg score per hole per seat.
 
         seat_roles: list of 4 strings, each "dqn", "heuristic", or "random".
         model/obs_fn: used for "dqn" seats (ignored if no dqn seats).
-        Returns: {seat_idx: avg_score_per_hole}.
+        Returns: (avg_scores, raw_totals, behavioral_metrics).
         """
         N = num_games
         totals = {i: torch.zeros(N, dtype=torch.float32, device=self.device) for i in range(4)}
+
+        # Behavioral metric accumulators per seat
+        s0_take_count = {i: torch.zeros(N, device=self.device) for i in range(4)}
+        s0_turn_count = {i: torch.zeros(N, device=self.device) for i in range(4)}
+        s1_rev_replace = {i: torch.zeros(N, device=self.device) for i in range(4)}
+        s1_place_count = {i: torch.zeros(N, device=self.device) for i in range(4)}
+        s1_action_hist = {i: torch.zeros(N, VEC_NUM_ACTIONS, device=self.device) for i in range(4)}
+        col_match_sum = {i: torch.zeros(N, device=self.device) for i in range(4)}
 
         for hole in range(1, holes + 1):
             state = reset_games(N, self.device)
@@ -1056,12 +1065,19 @@ class TournamentTrainer:
                         dummy_q = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
                         actions_s0 = eps_greedy_batched(dummy_q, 1.0, s0_mask)
 
+                    # Track stage 0: take rate
+                    s0_take_count[pid] += (active & (actions_s0 == 0)).float()
+                    s0_turn_count[pid] += active.float()
+
                     step_stage0(state, actions_s0, pid)
                     if state.done.all():
                         break
 
                     # -- Stage 1 --
                     state.current_stage.fill_(1)
+
+                    # Snapshot revealed state before stage 1 action
+                    was_revealed = state.player_revealed[:, pid, :].clone()
 
                     if role == "heuristic":
                         actions_s1 = heuristic_stage1(state, pid)
@@ -1078,7 +1094,19 @@ class TournamentTrainer:
                         dummy_q1 = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
                         actions_s1 = eps_greedy_batched(dummy_q1, 1.0, mask1)
 
+                    # Track stage 1: action histogram
+                    one_hot = torch.zeros(N, VEC_NUM_ACTIONS, device=self.device)
+                    one_hot.scatter_(1, actions_s1.unsqueeze(1), 1.0)
+                    s1_action_hist[pid] += one_hot * active.float().unsqueeze(1)
+
                     step_stage1(state, actions_s1, pid)
+
+                    # Track stage 1: revealed card replacement
+                    is_place = (actions_s1 >= 2) & (actions_s1 <= 7)
+                    pos = (actions_s1 - 2).clamp(0, 5)
+                    pos_was_rev = was_revealed.gather(1, pos.unsqueeze(1)).squeeze(1)
+                    s1_rev_replace[pid] += (active & is_place & pos_was_rev).float()
+                    s1_place_count[pid] += (active & is_place).float()
 
                     all_rev = state.player_revealed[:, pid, :].all(dim=1)
                     newly_last = active & all_rev & (~state.last_turn)
@@ -1089,14 +1117,36 @@ class TournamentTrainer:
                         state.end_game_player,
                     )
 
-            # Accumulate each seat's score for this hole
+            # Accumulate each seat's score and column matches for this hole
             for sid in range(4):
                 hole_scores = compute_final_score(
                     state.player_cards[:, sid, :], self.device
                 )
                 totals[sid] += hole_scores
+                col_match_sum[sid] += count_column_matches(state, sid).float()
 
-        return {sid: totals[sid].mean().item() / holes for sid in range(4)}, totals
+        # Compute behavioral metrics per seat
+        behavior: Dict[int, Dict[str, float]] = {}
+        for sid in range(4):
+            take_rate = (s0_take_count[sid].sum() / s0_turn_count[sid].sum().clamp(min=1)).item()
+            rev_rate = (s1_rev_replace[sid].sum() / s1_place_count[sid].sum().clamp(min=1)).item()
+            avg_col = (col_match_sum[sid].mean() / holes).item()
+
+            # Action entropy from aggregated histogram
+            hist = s1_action_hist[sid].sum(dim=0)
+            total_acts = hist.sum().clamp(min=1)
+            probs = hist / total_acts
+            log_p = torch.log(probs.clamp(min=1e-10))
+            entropy = max(0.0, -(probs * log_p).sum().item())
+
+            behavior[sid] = {
+                "col_matches": round(avg_col, 3),
+                "take_rate": round(take_rate, 3),
+                "rev_replace": round(rev_rate, 3),
+                "s1_entropy": round(entropy, 2),
+            }
+
+        return {sid: totals[sid].mean().item() / holes for sid in range(4)}, totals, behavior
 
     def _run_league_eval(self, games_per_matchup: Optional[int] = None) -> None:
         """Eval: [DQN_a, R, DQN_b, H] for all C(n,2) pairs + solo [DQN, R, H, R]."""
@@ -1140,18 +1190,22 @@ class TournamentTrainer:
             model.eval()
             variant = rec.hyperparams.get("model_variant", "v1")
             obs_fn = get_obs_fn(variant)
-            avgs, _ = self._run_eval_config(
+            avgs, _, behavior = self._run_eval_config(
                 ["dqn", "random", "heuristic", "random"],
                 model=model, obs_fn=obs_fn, num_games=500, holes=holes,
             )
             rec.hyperparams["solo_score"] = round(avgs[0], 4)
+            for k, v in behavior[0].items():
+                rec.hyperparams[k] = v
 
         for i, (rec, _, _, _, _) in enumerate(self.population):
             variant = rec.hyperparams.get("model_variant", "v1")
+            hp = rec.hyperparams
             print(
-                f"  {rec.agent_id} ({variant}): competitive={rec.hyperparams['avg_score']:.3f} "
-                f"solo={rec.hyperparams['solo_score']:.3f} "
-                f"lr={rec.hyperparams['lr']:.2e} hid={rec.hyperparams['hidden_dim']}"
+                f"  {rec.agent_id} ({variant}): competitive={hp['avg_score']:.3f} "
+                f"solo={hp['solo_score']:.3f} "
+                f"col={hp.get('col_matches', 0):.2f} take={hp.get('take_rate', 0):.2f} "
+                f"rev={hp.get('rev_replace', 0):.2f} ent={hp.get('s1_entropy', 0):.1f}"
             )
 
     def _run_mixed_table(
@@ -1600,11 +1654,17 @@ class TournamentTrainer:
             )
             scores = [rec.hyperparams.get("avg_score", 999.0) for rec, *_ in sorted_pop]
             losses = [rec.hyperparams.get("loss", float("nan")) for rec, *_ in sorted_pop]
+            best_hp = sorted_pop[0][0].hyperparams
             metrics = {
                 "generation": gen,
                 "eval/best_score": summary["best_avg_score"],
                 "eval/mean_score": float(np.mean(scores)),
                 "eval/worst_score": float(np.max(scores)),
+                "eval/best_solo": best_hp.get("solo_score"),
+                "behavior/col_matches": best_hp.get("col_matches"),
+                "behavior/take_rate": best_hp.get("take_rate"),
+                "behavior/rev_replace": best_hp.get("rev_replace"),
+                "behavior/s1_entropy": best_hp.get("s1_entropy"),
                 "train/mean_loss": float(np.nanmean(losses)),
                 "hof/score": self.hall_of_fame_score if self.hall_of_fame_score < float("inf") else None,
                 "hof/agent_id": self.hall_of_fame_agent_id,

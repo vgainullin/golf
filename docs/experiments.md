@@ -258,3 +258,50 @@ Possible barriers to further improvement:
 1. **Exploration limit:** Boltzmann on Q-values only perturbs around the current policy. Discovering "swap a revealed card for a column match" requires trying actions the heuristic never takes.
 2. **Demo anchor ceiling:** The margin loss anchors to heuristic demonstrations. As the model improves beyond the heuristic, the margin loss pulls it back toward heuristic actions. Note: decaying lambda was blamed for catastrophic forgetting in Exp 4, but that was actually caused by the stale next_obs bug -- decaying lambda may now be safe to revisit.
 3. **Opponent diversity:** Self-play is [DQN, H, H, H]. The model only sees games against heuristic opponents, limiting the state distribution.
+
+---
+
+## Behavioral metrics instrumentation (2026-03-07)
+
+Added per-seat behavioral tracking to `_run_eval_config()` in `src/tournament.py` and `count_column_matches()` to `src/vectorized_golf.py`. Four metrics are tracked during live tournament solo eval [DQN, R, H, R]:
+
+| Metric | What it measures | Diagnostic value |
+|--------|-----------------|------------------|
+| `col_matches` | Avg column matches per hole (0-3, revealed cards only) | Primary skill indicator -- correlates near-perfectly with score |
+| `take_rate` | Fraction of stage 0 turns taking the face card vs drawing | Weak differentiator (~0.31-0.37 for all non-random strategies) |
+| `rev_replace` | Fraction of stage 1 place actions at already-revealed positions | Signature of "improved" strategy (replacing known cards for column matches) |
+| `s1_entropy` | Shannon entropy of stage 1 action distribution | Measures behavioral diversity; high for context-dependent strategies |
+
+### Heuristic baseline reference values
+
+Evaluated each strategy in [STRATEGY, Random, Random, Random] config, 2000 games x 9 holes.
+
+| Strategy | Score | col | take | rev | ent |
+|----------|-------|-----|------|-----|-----|
+| Random | 30.8 | 0.14 | 0.50 | 0.51 | 2.4 |
+| Simple (take low + random place) | 22.4 | 0.22 | 0.31 | 0.00 | 1.8 |
+| Heuristic (column-aware) | 13.6 | 0.53 | 0.35 | 0.00 | 2.5 |
+| Improved (place at revealed too) | 8.1 | 0.70 | 0.34 | 0.33 | 2.4 |
+| simple_s0 + heur_s1 | 15.0 | 0.40 | 0.31 | 0.00 | 2.5 |
+| heur_s0 + simple_s1 | 22.2 | 0.27 | 0.37 | 0.00 | 1.8 |
+
+### What the metrics reveal
+
+**Column matching is the dominant skill.** col_matches correlates near-perfectly with score: random=0.14, simple=0.22, heuristic=0.53, improved=0.70. A DQN at solo=16.0 should show col_matches between 0.22-0.53 if it's learning column matching at all.
+
+**Stage 1 placement drives ~90% of the value.** The mix experiments confirm: heur_s0+simple_s1 (22.2) is barely better than pure simple (22.4), while simple_s0+heur_s1 (15.0) nearly matches full heuristic (13.6). When watching DQN learn, col_matches and rev_replace are the metrics to watch, not take_rate.
+
+**rev_replace is the "improved" strategy detector.** Only random (0.51, accidental) and improved (0.33, deliberate) replace revealed cards. Base heuristic never does (0.00). If a DQN shows rev_replace > 0.05, it has discovered the improved strategy worth 5.5 points.
+
+**Entropy reflects strategic diversity, not quality.** Heuristic (2.5) and improved (2.4) have high entropy because they use context-dependent action selection. Simple has low entropy (1.8) because it always places at a random unrevealed slot. A DQN with near-zero entropy is degenerate (always picking the same action).
+
+### Detection thresholds for DQN tournament monitoring
+
+| Signal | Threshold | Interpretation |
+|--------|-----------|---------------|
+| col_matches > 0.30 | Learning column matching | Corresponds to ~simple-to-heuristic level |
+| col_matches > 0.50 | Full column-matching strategy | Matches base heuristic |
+| rev_replace > 0.05 | Discovered revealed-card replacement | Beginning of "improved" strategy |
+| rev_replace > 0.20 | Systematic revealed-card replacement | Approaching improved heuristic |
+| take_rate < 0.25 or > 0.45 | Degenerate take policy | Too greedy or too passive |
+| s1_entropy < 0.5 | Action collapse | Always picking same action, likely broken |

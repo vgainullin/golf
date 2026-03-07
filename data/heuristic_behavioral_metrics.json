@@ -1,0 +1,50 @@
+{
+  "random": {
+    "score": 30.78,
+    "score_std": 3.18,
+    "col_matches": 0.139,
+    "take_rate": 0.499,
+    "rev_replace": 0.514,
+    "s1_entropy": 2.42
+  },
+  "simple": {
+    "score": 22.4,
+    "score_std": 3.05,
+    "col_matches": 0.22,
+    "take_rate": 0.307,
+    "rev_replace": 0.0,
+    "s1_entropy": 1.79
+  },
+  "heuristic": {
+    "score": 13.57,
+    "score_std": 2.85,
+    "col_matches": 0.531,
+    "take_rate": 0.351,
+    "rev_replace": 0.0,
+    "s1_entropy": 2.48
+  },
+  "improved": {
+    "score": 8.05,
+    "score_std": 2.48,
+    "col_matches": 0.703,
+    "take_rate": 0.339,
+    "rev_replace": 0.328,
+    "s1_entropy": 2.38
+  },
+  "simple_s0+heur_s1": {
+    "score": 14.99,
+    "score_std": 2.86,
+    "col_matches": 0.396,
+    "take_rate": 0.308,
+    "rev_replace": 0.0,
+    "s1_entropy": 2.48
+  },
+  "heur_s0+simple_s1": {
+    "score": 22.25,
+    "score_std": 3.25,
+    "col_matches": 0.273,
+    "take_rate": 0.371,
+    "rev_replace": 0.0,
+    "s1_entropy": 1.79
+  }
+}
