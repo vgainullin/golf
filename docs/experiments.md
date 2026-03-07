@@ -328,3 +328,63 @@ Evaluated all key DQN checkpoints with behavioral metrics. [DQN, Random, Heurist
 3. **The remaining gap is rev_replace.** DQfD is at (col=0.62, rev=0.03); the improved heuristic is at (col=0.70, rev=0.33). The 5-point gap is almost entirely explained by the model not yet learning to replace revealed cards *for column matches*. The margin loss anchoring to heuristic demos (which never do this) is the likely barrier.
 
 4. **take_rate is useless.** Every model from imitation through tournament lands at 0.32-0.33. Stage 0 decisions are uniform across all competent strategies.
+
+---
+
+## Root cause: reward signal bias toward revealed positions (2026-03-07)
+
+### How we found it
+
+The DQN model evaluation above raised a question: why does tournament DQN from scratch converge on the *exact wrong strategy* (high rev_replace, low col_matches)? We investigated in three steps:
+
+**Step 1: Rule out sparse rewards.** Scanned 270k stage-1 decisions and found column-match-creating placements are available in 24% of turns (not rare). The reward when taking them is strong: mean +3.3, 66% positive, 28% above +5. Sparse reward is not the problem.
+
+**Step 2: Probe Q-values.** For 57k column-match opportunities, the tournament DQN selects the match action only 9% of the time (vs 38% for DQfD). The Q-gap is -4.1: the model actively *prefers* non-matching actions. This isn't exploration failure -- the learned Q-function is wrong.
+
+**Step 3: Decompose rewards by action type.** This revealed the root cause:
+
+| Action type | Mean reward (random play) | n |
+|---|---|---|
+| Place at REVEALED position | +0.00 | 254k |
+| Place at UNREVEALED position | -5.17 | 239k |
+| Discard + flip | -5.18 | 239k |
+
+There is a **+5.2 point systematic bias** toward placing at revealed positions.
+
+### The mechanism
+
+`compute_score()` in `step_stage1` treats unrevealed cards as contributing 0 to score:
+
+```
+reward = score_before - score_after
+```
+
+When placing at an **unrevealed** position:
+- `score_before`: hidden card contributes 0
+- `score_after`: held card is now revealed, contributes its actual score (avg 5.5)
+- `reward = 0 - 5.5 = -5.5` (almost always negative)
+
+When placing at a **revealed** position:
+- `score_before`: old card contributes its known score (avg 5.5)
+- `score_after`: held card replaces it (avg 5.5)
+- `reward = 5.5 - 5.5 = 0.0` (roughly neutral)
+
+The reward function penalizes *information gain*. Revealing a new card "increases" the visible score even when the hidden card being replaced was worse. Every position shows the same +5.2 gap regardless of game state.
+
+### Why each approach is affected differently
+
+| Approach | Effect |
+|----------|--------|
+| **Tournament DQN** | Learns the bias directly. Converges on always placing at revealed positions (rev=0.78). Never discovers column matching because it avoids unrevealed positions entirely. |
+| **Heuristic** | Hardcoded to prefer unrevealed positions. Immune to reward bias by construction. |
+| **Imitation DQN** | Clones heuristic behavior. Inherits immunity. |
+| **DQfD** | Margin loss anchors to heuristic demos (unrevealed placement). DQN loss pushes toward revealed placement. These fight to a draw, producing a mild improvement (col 0.53->0.62) without strategy collapse. |
+
+### Implications
+
+This is the same class of bug as the stale next_obs (Experiment 5). The reward signal violates the assumptions of Q-learning: the immediate reward doesn't reflect the true value of the action because `compute_score` has an observability gap between visible and hidden card contributions.
+
+The fix must make the reward function score-neutral with respect to revealing cards. Options:
+1. Use final score (all cards revealed) for rewards instead of intermediate visible score
+2. Impute hidden card values in `score_before` (e.g., expected value of a random card)
+3. Use only end-of-hole reward (sparse but unbiased)
