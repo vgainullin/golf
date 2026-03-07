@@ -411,4 +411,28 @@ This is equivalent to how humans learn card games: you can't see hidden cards du
 - `col_matches` should increase (column matches rewarded equally at all positions)
 - Tournament DQN should no longer converge on the degenerate strategy
 
-**Status:** Not yet evaluated. Next: run tournament with hindsight shaping and compare behavioral metrics.
+### Run 1: eps 0.3->0.05 (default), 20 gens, 12 agents, seed 42
+
+Partial results (killed at gen 7 to restart with higher epsilon):
+
+| Gen | best | solo | col | rev | take | ent |
+|-----|------|------|-----|-----|------|-----|
+| 1 | 22.69 | 22.15 | 0.118 | 0.487 | 0.262 | 2.0 |
+| 2 | 19.15 | 18.74 | 0.172 | 0.352 | 0.544 | 2.3 |
+| 3 | 15.78 | 14.84 | 0.220 | 0.418 | 0.379 | 2.2 |
+| 4 | 16.06 | 14.75 | 0.258 | 0.370 | 0.409 | 2.2 |
+| 5 | 14.80 | 13.73 | 0.270 | 0.336 | 0.320 | 2.3 |
+| 6 | 15.14 | 14.19 | 0.245 | 0.370 | 0.526 | 2.3 |
+| 7 | 13.79 | 13.43 | 0.272 | 0.362 | 0.425 | 2.4 |
+
+**Key findings:**
+
+1. **Reward bias fix confirmed.** `rev_replace` stays at 0.35-0.49 (near random baseline 0.51), never climbing to the 0.78 seen without hindsight shaping. The degenerate "always place at revealed" strategy is gone.
+
+2. **Vanilla DQN from scratch beats the heuristic by gen 5.** Solo=13.73 at gen 5, 13.43 at gen 7, vs heuristic baseline of 14.0. Previous tournament DQN (no shaping) plateaued at 16.0 after 20 gens. No imitation pretraining, no DQfD, no demo buffer.
+
+3. **Low column matching, high score.** col_matches=0.27 at gen 7 -- half the heuristic's 0.53, but the agent scores better. The hindsight reward lets it learn the true value of placing at unrevealed positions (which the biased reward penalized). The agent gets value from better card selection and placement, not column matching.
+
+4. **Column matching is the remaining upside.** The agent discovers column matches (0.27 > random's 0.14) but doesn't systematically seek them. Eps=0.3 limits exploration diversity -- column match discovery is bottlenecked by the chance of randomly placing matching ranks in columns.
+
+**Next:** Restart with eps_start=1.0 for more diverse early exploration to accelerate column match discovery.
