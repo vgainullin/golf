@@ -1041,6 +1041,7 @@ class TournamentTrainer:
         s0_take_count = {i: torch.zeros(N, device=self.device) for i in range(4)}
         s0_turn_count = {i: torch.zeros(N, device=self.device) for i in range(4)}
         s1_rev_replace = {i: torch.zeros(N, device=self.device) for i in range(4)}
+        s1_rev_col_match = {i: torch.zeros(N, device=self.device) for i in range(4)}
         s1_place_count = {i: torch.zeros(N, device=self.device) for i in range(4)}
         s1_action_hist = {i: torch.zeros(N, VEC_NUM_ACTIONS, device=self.device) for i in range(4)}
         col_match_sum = {i: torch.zeros(N, device=self.device) for i in range(4)}
@@ -1126,8 +1127,19 @@ class TournamentTrainer:
                     is_place = (actions_s1 >= 2) & (actions_s1 <= 7)
                     pos = (actions_s1 - 2).clamp(0, 5)
                     pos_was_rev = was_revealed.gather(1, pos.unsqueeze(1)).squeeze(1)
-                    s1_rev_replace[pid] += (active & is_place & pos_was_rev).float()
+                    is_rev_replace = active & is_place & pos_was_rev
+                    s1_rev_replace[pid] += is_rev_replace.float()
                     s1_place_count[pid] += (active & is_place).float()
+
+                    # Check if rev_replace created a column match
+                    # Partner slot: pos<3 -> pos+3, pos>=3 -> pos-3
+                    partner = torch.where(pos < 3, pos + 3, pos - 3)
+                    ranks = state.player_cards[:, pid, :] % 13  # NUM_RANKS
+                    placed_rank = ranks.gather(1, pos.unsqueeze(1)).squeeze(1)
+                    partner_rank = ranks.gather(1, partner.unsqueeze(1)).squeeze(1)
+                    partner_rev = state.player_revealed[:, pid, :].gather(1, partner.unsqueeze(1)).squeeze(1)
+                    created_match = is_rev_replace & partner_rev & (placed_rank == partner_rank)
+                    s1_rev_col_match[pid] += created_match.float()
 
                     all_rev = state.player_revealed[:, pid, :].all(dim=1)
                     newly_last = active & all_rev & (~state.last_turn)
@@ -1160,10 +1172,13 @@ class TournamentTrainer:
             log_p = torch.log(probs.clamp(min=1e-10))
             entropy = max(0.0, -(probs * log_p).sum().item())
 
+            rev_col = (s1_rev_col_match[sid].sum() / s1_rev_replace[sid].sum().clamp(min=1)).item()
+
             behavior[sid] = {
                 "col_matches": round(avg_col, 3),
                 "take_rate": round(take_rate, 3),
                 "rev_replace": round(rev_rate, 3),
+                "rev_col_match": round(rev_col, 3),
                 "s1_entropy": round(entropy, 2),
             }
 
@@ -1226,7 +1241,8 @@ class TournamentTrainer:
                 f"  {rec.agent_id} ({variant}): competitive={hp['avg_score']:.3f} "
                 f"solo={hp['solo_score']:.3f} "
                 f"col={hp.get('col_matches', 0):.2f} take={hp.get('take_rate', 0):.2f} "
-                f"rev={hp.get('rev_replace', 0):.2f} ent={hp.get('s1_entropy', 0):.1f}"
+                f"rev={hp.get('rev_replace', 0):.2f} rcm={hp.get('rev_col_match', 0):.2f} "
+                f"ent={hp.get('s1_entropy', 0):.1f}"
             )
 
     def _run_mixed_table(
@@ -1686,6 +1702,7 @@ class TournamentTrainer:
                 "behavior/col_matches": best_hp.get("col_matches"),
                 "behavior/take_rate": best_hp.get("take_rate"),
                 "behavior/rev_replace": best_hp.get("rev_replace"),
+                "behavior/rev_col_match": best_hp.get("rev_col_match"),
                 "behavior/s1_entropy": best_hp.get("s1_entropy"),
                 "train/mean_loss": float(np.nanmean(losses)),
                 "hof/score": self.hall_of_fame_score if self.hall_of_fame_score < float("inf") else None,

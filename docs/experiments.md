@@ -435,4 +435,44 @@ Partial results (killed at gen 7 to restart with higher epsilon):
 
 4. **Column matching is the remaining upside.** The agent discovers column matches (0.27 > random's 0.14) but doesn't systematically seek them. Eps=0.3 limits exploration diversity -- column match discovery is bottlenecked by the chance of randomly placing matching ranks in columns.
 
-**Next:** Restart with eps_start=1.0 for more diverse early exploration to accelerate column match discovery.
+### Run 2: eps 1.0->0.05, 20 gens, 12 agents, seed 42
+
+Full 20-generation run with high initial exploration.
+
+| Gen | best | solo | col | rev | take | ent |
+|-----|------|------|-----|-----|------|-----|
+| 1 | 23.66 | 23.24 | 0.167 | 0.500 | 0.854 | 2.3 |
+| 2 | 17.04 | 16.61 | 0.214 | 0.402 | 0.337 | 2.3 |
+| 3 | 15.26 | 14.76 | 0.236 | 0.333 | 0.378 | 2.3 |
+| 5 | 14.16 | 13.80 | 0.264 | 0.281 | 0.452 | 2.3 |
+| 7 | 13.82 | 12.60 | 0.276 | 0.318 | 0.345 | 2.3 |
+| 10 | 13.75 | 12.88 | 0.278 | 0.276 | 0.352 | 2.2 |
+| 12 | 13.20 | 12.05 | 0.306 | 0.303 | 0.316 | 2.3 |
+| 15 | 13.67 | 12.79 | 0.278 | 0.288 | 0.412 | 2.3 |
+| 19 | 12.80 | 12.06 | 0.310 | 0.313 | 0.302 | 2.4 |
+| 20 | 13.74 | 12.15 | 0.310 | 0.277 | 0.360 | 2.4 |
+
+Champion eval (2000 games, [DQN, R, H, R]):
+- **Solo: 12.26** (beats heuristic 14.0 by 1.7, beats DQfD 13.3 by 1.0)
+- col_matches=0.30, rev_replace=0.28, rev_col_match=0.055, take_rate=0.36
+
+**Key findings:**
+
+1. **New best: 12.3 solo from vanilla DQN.** No imitation, no demos, no margin loss. Just correct rewards + high exploration. Beats the previous best (DQfD 13.3) by a full point.
+
+2. **High eps helped but didn't change the trajectory.** Both runs converge to similar col_matches (~0.30) and solo scores (~12-13). The high eps let it keep improving through gen 20 instead of plateauing at gen 7, but the strategy is the same.
+
+3. **The DQN discovered value swapping, not column matching.** rev_col_match=0.055 means only 5.5% of revealed-card replacements create column matches. The other 94.5% are pure value swaps: replacing a high revealed card with a lower card from the deck/discard. This is a strategy the heuristic never uses (it only places at unrevealed positions).
+
+4. **Column matching plateaued at 0.30.** Stayed flat from gen 7 through gen 20. Eps-greedy exploration can't systematically discover "match ranks across rows in the same column" -- it requires noticing a rank, holding a matching card, and placing it in the right position. The agent stumbles into it (0.30 > random 0.14) but can't reliably learn it.
+
+### Strategy decomposition: DQN vs heuristic
+
+| Agent | score | col | rev | rcm | Strategy |
+|-------|-------|-----|-----|-----|----------|
+| Heuristic | 13.9 | 0.55 | 0.00 | 0.00 | Column matching at unrevealed positions only |
+| Hindsight DQN | 12.3 | 0.30 | 0.28 | 0.06 | Value swapping at revealed + some column matching |
+| Improved heur | 8.1 | 0.70 | 0.33 | n/a | Both strategies combined |
+
+The DQN found a **complementary strategy** to the heuristic. The heuristic gets value from column matching (col=0.55) but never touches revealed cards. The DQN gets value from replacing revealed high cards with lower ones (rev=0.28) but doesn't systematically column match. Combining both strategies (as the improved heuristic does at 8.1) is the theoretical ceiling.
+
