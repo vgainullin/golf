@@ -50,6 +50,45 @@ from .vectorized_golf import (
 
 
 # ---------------------------------------------------------------------------
+# Helpers for deferred stage-1 transitions
+# ---------------------------------------------------------------------------
+# Stage-1 transitions can't be recorded immediately because the "next_obs"
+# should reflect the state after all opponents have acted (not immediately
+# after this player's action). We store them as pending and complete them
+# when the player's next turn begins.
+
+
+def _complete_pending_s1(pending, next_obs_np, done_np, buf):
+    """Complete a deferred stage-1 transition with the actual next_obs."""
+    p_obs, p_act, p_rew, p_was_active = pending
+    n = int(p_was_active.sum())
+    if n > 0:
+        buf.push_batch(
+            p_obs[p_was_active], p_act[p_was_active],
+            p_rew[p_was_active],
+            next_obs_np[p_was_active],
+            done_np[p_was_active].astype(np.float32),
+            np.ones(n, dtype=np.int64),
+            np.zeros(n, dtype=np.int64),
+        )
+
+
+def _flush_pending_terminal(pending, buf):
+    """Flush a deferred stage-1 transition as terminal (done=1)."""
+    p_obs, p_act, p_rew, p_was_active = pending
+    n = int(p_was_active.sum())
+    if n > 0:
+        buf.push_batch(
+            p_obs[p_was_active], p_act[p_was_active],
+            p_rew[p_was_active],
+            p_obs[p_was_active],  # dummy next_obs, masked by done=1
+            np.ones(n, dtype=np.float32),
+            np.ones(n, dtype=np.int64),
+            np.zeros(n, dtype=np.int64),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Demo buffer collection (heuristic rollouts with full transitions)
 # ---------------------------------------------------------------------------
 
@@ -68,6 +107,7 @@ def collect_demo_transitions(
 
         for hole in range(1, holes + 1):
             state = reset_games(N, device)
+            pending_s1 = [None] * 4
 
             for _ in range(30):
                 if state.done.all():
@@ -81,12 +121,24 @@ def collect_demo_transitions(
                     if not active.any():
                         break
 
+                    # Stage 0 observation (also serves as next_obs for pending)
+                    state.current_stage.fill_(0)
+                    obs_s0 = get_observation_v2(state, pid)
+
+                    # Complete pending stage-1 transition from previous round
+                    if pending_s1[pid] is not None:
+                        _complete_pending_s1(
+                            pending_s1[pid],
+                            obs_s0.cpu().numpy(),
+                            state.done.cpu().numpy(),
+                            buf,
+                        )
+                        pending_s1[pid] = None
+
                     active_np = active.cpu().numpy()
                     n_active = int(active_np.sum())
 
                     # Stage 0
-                    state.current_stage.fill_(0)
-                    obs_s0 = get_observation_v2(state, pid)
                     action_s0 = heuristic_stage0(state, pid)
                     obs_s0_np = obs_s0.cpu().numpy()[active_np]
                     act_s0_np = action_s0.cpu().numpy()[active_np]
@@ -100,7 +152,7 @@ def collect_demo_transitions(
                     obs_s1 = get_observation_v2(state, pid)
                     action_s1 = heuristic_stage1(state, pid)
 
-                    # Record stage 0 transition: obs_s0, act_s0, reward=0, next=obs_s1, done=False
+                    # Record stage 0 -> stage 1 transition (same turn, next_obs correct)
                     obs_s1_np = obs_s1.cpu().numpy()[active_np]
                     buf.push_batch(
                         obs_s0_np, act_s0_np,
@@ -113,8 +165,6 @@ def collect_demo_transitions(
 
                     # Take stage 1 action and get reward
                     reward_s1 = step_stage1(state, action_s1, pid)
-                    act_s1_np = action_s1.cpu().numpy()[active_np]
-                    rew_s1_np = reward_s1.cpu().numpy()[active_np]
 
                     # End-game detection
                     all_rev = state.player_revealed[:, pid, :].all(dim=1)
@@ -126,20 +176,20 @@ def collect_demo_transitions(
                         state.end_game_player,
                     )
 
-                    # Next obs for stage 1 transition (next player's perspective doesn't matter;
-                    # use same player's next obs which will be their next stage 0)
-                    # For terminal transitions, next_obs doesn't matter (masked by done)
-                    done_np = state.done.cpu().numpy()[active_np].astype(np.float32)
-                    # Get next observation for this player
-                    state.current_stage.fill_(0)
-                    next_obs = get_observation_v2(state, pid).cpu().numpy()[active_np]
-
-                    buf.push_batch(
-                        obs_s1_np, act_s1_np,
-                        rew_s1_np, next_obs, done_np,
-                        np.ones(n_active, dtype=np.int64),
-                        np.zeros(n_active, dtype=np.int64),
+                    # Defer stage-1 transition -- next_obs not available until
+                    # this player's next turn (after opponents act)
+                    pending_s1[pid] = (
+                        obs_s1.cpu().numpy(),
+                        action_s1.cpu().numpy(),
+                        reward_s1.cpu().numpy(),
+                        active_np.copy(),
                     )
+
+            # Flush remaining pending transitions as terminal
+            for pid in range(4):
+                if pending_s1[pid] is not None:
+                    _flush_pending_terminal(pending_s1[pid], buf)
+                    pending_s1[pid] = None
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +227,7 @@ def collect_agent_transitions(
 
         for hole in range(1, holes + 1):
             state = reset_games(N, device)
+            pending_s1 = [None] * 4
 
             for _ in range(30):
                 if state.done.all():
@@ -192,10 +243,22 @@ def collect_agent_transitions(
 
                     role = seat_roles[pid]
 
-                    # Stage 0
+                    # Stage 0 observation (also serves as next_obs for pending)
                     state.current_stage.fill_(0)
+                    obs_s0 = get_observation_v2(state, pid)
+
+                    # Complete pending stage-1 transition from previous round
+                    if pending_s1[pid] is not None:
+                        _complete_pending_s1(
+                            pending_s1[pid],
+                            obs_s0.cpu().numpy(),
+                            state.done.cpu().numpy(),
+                            buf,
+                        )
+                        pending_s1[pid] = None
+
+                    # Stage 0
                     if role == "dqn":
-                        obs_s0 = get_observation_v2(state, pid)
                         sg0 = torch.zeros(N, dtype=torch.long, device=device)
                         with torch.no_grad():
                             q0 = model(obs_s0, sg0)
@@ -222,7 +285,7 @@ def collect_agent_transitions(
                     else:
                         actions_s1 = heuristic_stage1(state, pid)
 
-                    # Record DQN seat transitions
+                    # Record stage 0 -> stage 1 transition for DQN seats
                     if role == "dqn":
                         active_np = active.cpu().numpy()
                         n_active = int(active_np.sum())
@@ -231,7 +294,6 @@ def collect_agent_transitions(
                         act_s0_np = actions_s0.cpu().numpy()[active_np]
                         obs_s1_np = obs_s1.cpu().numpy()[active_np]
 
-                        # Stage 0 transition
                         buf.push_batch(
                             obs_s0_np, act_s0_np,
                             np.zeros(n_active, dtype=np.float32),
@@ -253,20 +315,20 @@ def collect_agent_transitions(
                         state.end_game_player,
                     )
 
-                    # Stage 1 transition for DQN seat
+                    # Defer stage-1 transition for DQN seats
                     if role == "dqn":
-                        act_s1_np = actions_s1.cpu().numpy()[active_np]
-                        rew_s1_np = reward_s1.cpu().numpy()[active_np]
-                        done_np = state.done.cpu().numpy()[active_np].astype(np.float32)
-                        state.current_stage.fill_(0)
-                        next_obs = get_observation_v2(state, pid).cpu().numpy()[active_np]
-
-                        buf.push_batch(
-                            obs_s1_np, act_s1_np,
-                            rew_s1_np, next_obs, done_np,
-                            np.ones(n_active, dtype=np.int64),
-                            np.zeros(n_active, dtype=np.int64),
+                        pending_s1[pid] = (
+                            obs_s1.cpu().numpy(),
+                            actions_s1.cpu().numpy(),
+                            reward_s1.cpu().numpy(),
+                            active_np.copy(),
                         )
+
+            # Flush remaining pending transitions as terminal
+            for pid in range(4):
+                if pending_s1[pid] is not None:
+                    _flush_pending_terminal(pending_s1[pid], buf)
+                    pending_s1[pid] = None
 
 
 # ---------------------------------------------------------------------------
