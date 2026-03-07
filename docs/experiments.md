@@ -388,3 +388,27 @@ The fix must make the reward function score-neutral with respect to revealing ca
 1. Use final score (all cards revealed) for rewards instead of intermediate visible score
 2. Impute hidden card values in `score_before` (e.g., expected value of a random card)
 3. Use only end-of-hole reward (sparse but unbiased)
+
+---
+
+## Experiment 6: Hindsight reward shaping (2026-03-07)
+
+**Commit:** `src/reward_shaping.py`, `src/tournament.py`
+
+**Approach:** Option 1 from above. After each stage-1 action, compute reward using `compute_final_score` (treats all 6 cards as revealed) instead of the biased `compute_score` (treats unrevealed cards as 0). The agent's policy still conditions on partial observations; only the training reward signal uses hindsight.
+
+This is equivalent to how humans learn card games: you can't see hidden cards during play, but afterward you know what they were and learn from the outcome.
+
+**Implementation:** `HindsightRewardShaper` in `src/reward_shaping.py`. Before `step_stage1`, snapshot `player_cards`. After, compute `compute_final_score(before) - compute_final_score(after)`. The shaped reward replaces the biased one in the replay buffer. Enabled by default (`--reward-shaping hindsight`).
+
+**What this fixes:**
+- Place at unrevealed: before-score now includes the hidden card's true value, so revealing it is score-neutral
+- Place at revealed: unchanged (both before/after are fully visible)
+- Column matching: correctly rewarded regardless of whether the position was previously revealed
+
+**Expected effect on behavioral metrics:**
+- `rev_replace` should decrease from 0.78 (no longer rewarded for revealed placement per se)
+- `col_matches` should increase (column matches rewarded equally at all positions)
+- Tournament DQN should no longer converge on the degenerate strategy
+
+**Status:** Not yet evaluated. Next: run tournament with hindsight shaping and compare behavioral metrics.
