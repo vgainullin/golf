@@ -1,5 +1,22 @@
 # Experiments: Improving Beyond Heuristic
 
+## Game: 6-Card Golf
+
+4 players, 9 holes, French deck (no jokers). Each player has 6 cards in a 2x3 grid, initially face-down. Two cards are revealed at deal.
+
+**Scoring:** 2=-2, 3-9=face value, 10/J/Q=10, K=0, A=1. Column match (same rank in both rows of a column) zeroes both cards. Lower is better.
+
+**Turn structure (2 stages):**
+- Stage 0: Take the face-up discard pile card, or draw from the deck.
+- Stage 1: Place the held card at any grid position (replacing that card, which goes to discard), or discard it and flip one face-down card.
+
+Game ends when any player has all 6 cards revealed, then each other player gets one final turn.
+
+**Heuristic strategy:**
+- S0: Take face card if score < 4 or rank matches a revealed card (column match opportunity). Else draw.
+- S1: Only considers placing at unrevealed positions. Place if improvement >= 4, or if it doesn't make score worse (information gain). Else discard + flip.
+- Weakness: never swaps revealed cards to create column matches (theoretical 9.6 vs actual 14.0).
+
 ## Goal
 
 Beat the heuristic baseline (~14.0/hole) using RL on top of an imitation-learned DQN.
@@ -199,12 +216,45 @@ Tested whether higher LR and lower temperature would accelerate learning.
 
 Both runs converge to the same plateau (~13.3). Higher LR makes the DQN loss converge faster (2.1 at iter 10 vs 3.3) but eval improvement is identical. The bottleneck is not gradient speed.
 
+### Heuristic decomposition (2026-03-07)
+
+Measured how much each strategic component contributes by testing variant heuristics in 4-player self-play (20k games, 9 holes, avg across all seats). Lower is better.
+
+**Strategy isolation** (random draw/placement as controls):
+
+| Variant | Avg/hole | vs random |
+|---------|---------|-----------|
+| Random | 30.84 | -- |
+| Random draw + base placement | 21.61 | -9.2 |
+| Random draw + improved placement | 19.28 | -11.6 |
+| Smart draw + random placement | 22.41 | -8.4 |
+| Base (smart draw + smart placement) | 15.48 | -15.4 |
+| Improved (base + place at revealed) | 11.73 | -19.1 |
+
+Smart placement (-9.2) contributes more than smart draw (-8.4), and they synergize: combined (-15.4) beats the sum of individual contributions (-17.6). Taking good cards matters more when you place them well, and vice versa.
+
+**Cutoff threshold sweep** (cutoff = minimum card score to take from discard):
+
+| Cutoff | Simple (random place) | Base heuristic |
+|--------|----------------------|----------------|
+| 0 | 27.78 | 17.64 |
+| 2 | 23.55 | 15.97 |
+| 4 (default) | 22.41 | 15.47 |
+| **5** | 21.69 | **15.39** |
+| **6** | **21.37** | 15.81 |
+| 8 | 22.06 | 18.39 |
+| 11 | 30.83 | 30.85 |
+
+Optimal cutoff shifts from 5 (base) to 6 (simple) -- without column awareness, it pays to be greedier about taking cards. Either way, tuning the threshold is worth at most **0.08-1.04 points** depending on variant. The DQN's 0.7 improvement over heuristic is not from finding a better threshold.
+
+**Seat bias:** Improved heuristic shows strong first-mover advantage (seat 0: 10.65, seat 3: 12.62, std=0.73). Base heuristic has mild bias (std=0.16). Random/simple have none.
+
 ### Current plateau analysis
 
-The DQfD plateaus at ~13.3 regardless of LR or temperature. Possible explanations:
+The DQfD plateaus at ~13.3 regardless of LR or temperature. The 0.7-point improvement over base heuristic (~14.0 in [DQN,R,H,R] eval) cannot be explained by threshold tuning (worth 0.08 at most). The model likely learns partial/situational column matching or better position selection, but has not discovered the full strategy of placing at revealed positions (worth 3.76 points).
 
-1. **Exploration limit:** Boltzmann on Q-values only perturbs around the current policy. It can find small improvements over the heuristic but can't discover fundamentally different strategies (e.g., column matching, endgame timing).
-2. **Opponent diversity:** Self-play is [DQN, H, H, H]. The model only sees games against heuristic opponents, limiting the state distribution.
-3. **Demo anchor ceiling:** The margin loss anchors to heuristic demonstrations. As the model improves beyond the heuristic, the margin loss pulls it back toward heuristic actions, creating tension with the DQN loss that wants to diverge.
+Possible barriers to further improvement:
 
-The gap to improved heuristic (9.6) remains 3.7 points.
+1. **Exploration limit:** Boltzmann on Q-values only perturbs around the current policy. Discovering "swap a revealed card for a column match" requires trying actions the heuristic never takes.
+2. **Demo anchor ceiling:** The margin loss anchors to heuristic demonstrations. As the model improves beyond the heuristic, the margin loss pulls it back toward heuristic actions. Note: decaying lambda was blamed for catastrophic forgetting in Exp 4, but that was actually caused by the stale next_obs bug -- decaying lambda may now be safe to revisit.
+3. **Opponent diversity:** Self-play is [DQN, H, H, H]. The model only sees games against heuristic opponents, limiting the state distribution.

@@ -406,7 +406,9 @@ def train_episode(
                     golf.game_over = True
                     break
 
-                # Complete pending stage-1 transition (correct next_obs after opponents acted)
+                # Complete pending stage-1 transition (correct next_obs after opponents acted).
+                # Note: if the game ended during an opponent's turn, the while-loop
+                # exits before we get here; the flush after the loop handles that case.
                 if pid == learner_id and pending_s1 is not None:
                     p_tok1, p_aid1, p_r1 = pending_s1
                     tok1_after = _get_tokens(golf, pid)
