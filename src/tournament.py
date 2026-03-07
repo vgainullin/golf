@@ -163,6 +163,7 @@ class TournamentConfig:
     device: str = "auto"
     hf_repo_id: Optional[str] = None
     hf_token: Optional[str] = None
+    sanity_check: bool = False
     wandb_project: Optional[str] = None
     wandb_run_name: Optional[str] = None
 
@@ -1632,6 +1633,17 @@ class TournamentTrainer:
                 },
             )
 
+        if self.config.sanity_check:
+            from .diagnostics import collect_golf_transitions, run_all_checks
+            print("Running pre-training MDP diagnostics...")
+            batch = collect_golf_transitions(device=str(self.device))
+            results = run_all_checks(batch)
+            for r in results:
+                print(r)
+            if any(r.status == "FAIL" for r in results):
+                raise RuntimeError("Pre-training diagnostics failed")
+            print()
+
         start_gen = self.generation + 1 if self.config.resume else 1
         for gen in range(start_gen, self.config.generations + 1):
             self.generation = gen
@@ -1783,6 +1795,8 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--reward-shaping", type=str, default="hindsight",
                    choices=["hindsight", "none"],
                    help="Reward shaping for stage-1 training rewards")
+    p.add_argument("--sanity-check", action="store_true",
+                   help="Run MDP diagnostics before training")
     p.add_argument("--wandb-project", type=str, default=None)
     p.add_argument("--wandb-run-name", type=str, default=None)
 
@@ -1807,6 +1821,7 @@ def parse_args(argv=None) -> TournamentConfig:
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
         reward_shaping=args.reward_shaping,
+        sanity_check=args.sanity_check,
         model_variant=args.model_variant,
         output_dir=args.output_dir,
         warmstart_checkpoint=args.warmstart_checkpoint,

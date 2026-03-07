@@ -476,3 +476,103 @@ Champion eval (2000 games, [DQN, R, H, R]):
 
 The DQN found a **complementary strategy** to the heuristic. The heuristic gets value from column matching (col=0.55) but never touches revealed cards. The DQN gets value from replacing revealed high cards with lower ones (rev=0.28) but doesn't systematically column match. Combining both strategies (as the improved heuristic does at 8.1) is the theoretical ceiling.
 
+---
+
+## The bitter lesson (so far)
+
+Richard Sutton's [bitter lesson](http://www.incompleteideas.net/IncIdeas/BitterLesson.html) (2019): AI researchers repeatedly try to bake human knowledge about the *solution* into their agents -- chess evaluation functions, Go heuristics, speech phonetics. This helps short-term but plateaus. General methods that scale with computation (search and learning) consistently win in the long run. The lesson is "bitter" because researchers want their domain expertise to matter, but it doesn't.
+
+### Taking the bitter lesson at face value
+
+If we believe Sutton, then a DQN with correct training signals should learn to play 6-card golf well without any human knowledge injected -- no imitation pretraining, no heuristic demos, no margin loss. The algorithm is general. The game is small (8 actions, ~50-dimensional observation, episodes under 30 steps). If it doesn't work, the problem is in our implementation, not in the approach.
+
+This is exactly what happened. The imitation pipeline (Exp 1-4) was never meant to be the final approach -- it was a diagnostic tool to verify the network architecture could represent a good policy at all. When DQfD plateaued and collapsed, the natural conclusion was "RL can't improve on imitation for this game." The actual conclusion should have been: something in the training loop is broken, find it.
+
+Two bugs were found, both in the training signal:
+
+1. **Stale next_obs (Exp 5).** Transitions recorded the board state before opponents acted. The agent was learning Q-values for an MDP that didn't match the actual game.
+
+2. **Reward bias (Exp 6).** `compute_score` treats unrevealed cards as 0, creating a +5.2 bias toward placing at revealed positions. The agent learned exactly what the reward told it.
+
+After both fixes, vanilla DQN from scratch reached 12.3 -- beating the heuristic (14.0) and the imitation-anchored DQfD (13.3). No human knowledge needed. Sutton's lesson confirmed: the general method works when the problem specification is correct.
+
+### What's troubling
+
+The bitter lesson says the general method should work. It did work -- but only after extensive human diagnosis of what the agent was learning and why.
+
+Without behavioral metrics (col, rev, take, ent), we would never have noticed that tournament DQN converged on "always place at revealed positions." Without decomposing rewards by action type, we would never have found the +5.2 bias. Without understanding the multi-player turn structure, we would never have caught the stale next_obs. Each fix required deep domain understanding of both the game mechanics and the RL training loop.
+
+The diagnostic sequence that produced results was:
+
+1. Add behavioral metrics to see *what* the agent learned
+2. Notice the agent learned something obviously wrong (rev=0.78, col=0.12)
+3. Ask "why would Q-learning converge on this specific wrong strategy?"
+4. Trace the answer back to the training signal
+5. Fix the signal
+
+This process is the opposite of Sutton's vision. We didn't let the general method run and scale. We dissected its behavior, interpreted it through human understanding of the game, and surgically fixed the training signal. The general method needed a human to debug it before it could work.
+
+The question is whether this invalidates the bitter lesson or just reflects the current state of the implementation. Sutton's examples (chess, Go, speech) all involved teams spending years getting the infrastructure right before the general method took over. Deep Blue's search worked because the game tree was correctly implemented. AlphaGo's self-play worked because the Go engine was bug-free. The general method scales, but only on a correct foundation -- and building that foundation required exactly the kind of domain expertise Sutton says doesn't matter for the solution.
+
+### The uncomfortable middle ground
+
+The bitter lesson draws a clean line: human knowledge about the solution is wasted effort; general methods win. This project suggests the line is blurrier in practice:
+
+- **Human knowledge about the solution:** The heuristic's column-matching rules, the DQfD margin loss anchoring to heuristic demos. These *did* constrain the agent. DQN from scratch (12.3) beat DQfD (13.3). Sutton is right here.
+
+- **Human knowledge about the problem:** Correct state transitions, unbiased rewards, behavioral metrics for diagnosis. These were *essential*. Without them, the general method confidently solved the wrong problem. Sutton doesn't address this because his examples (chess, Go) had correct game engines from the start.
+
+- **Human knowledge about what the agent is learning:** The behavioral metrics, the reward decomposition, the "why is it doing that?" investigation. This is the most uncomfortable category. It's not knowledge about the solution (we didn't tell the agent to column-match). It's not knowledge about the problem (the reward function was already defined). It's knowledge about the learning process itself -- the thing Sutton says we should trust to work on its own.
+
+The current col_matches plateau (0.30, flat from gen 7-20) sits right on this boundary. The agent discovered value swapping on its own -- a strategy the human designer missed. But it hasn't discovered systematic column matching, which the human designer encoded trivially. Is this a bug in the training signal (another stale-next_obs-class problem waiting to be found)? A representation gap? Or just insufficient scale -- and if we trained for 200 generations instead of 20, would the general method find it?
+
+If the pattern from Experiments 1-6 holds, the answer is probably another signal/representation issue. But the bitter lesson says we should at least try scaling first, because the instinct to diagnose and intervene is the same instinct that led to four failed experiments before we found the actual bugs.
+
+---
+
+## MDP Diagnostics Toolkit (2026-03-07)
+
+**File:** `src/diagnostics.py`
+
+Both bugs that took multiple failed experiments to find (stale next_obs, reward bias) are general RL failure modes. Gymnasium's `env_checker` validates the environment interface but doesn't check for these. We built diagnostics that complement Gym's approach: Gym checks the interface is correct, we check the MDP is correct.
+
+### Pre-training probes
+
+Four checks run on random-policy rollouts (~500 games, ~2 seconds on CPU):
+
+| Check | What it catches | Pass/Fail |
+|-------|----------------|-----------|
+| **Transition fidelity** | Stale next_obs: compares immediate vs deferred next_obs, reports mismatch rate and L1 distance | FLAG if L1 > 1.0 |
+| **Reward-action distribution** | Reward bias: groups rewards by action, reports spread across actions. Compares raw vs hindsight reference rewards | FLAG if spread > 2.0 |
+| **Determinism** | Hidden state, non-deterministic obs, RNG leaks: runs two episodes with same seed, asserts identical trajectories | FAIL on any mismatch |
+| **Observation sanity** | NaN/Inf, shape mismatches, impure observation functions | FAIL on any violation |
+
+### Results on current environment
+
+```
+Transition Fidelity (7576 transitions): [FLAG]
+  immediate != deferred: 48.7% (3689/7576)
+  mean L1 distance: 41.83
+
+Reward-Action Distribution (3631 stage-1 transitions): [FLAG]
+  place actions (2-7):          mean reward ~-2.5
+  discard+flip actions (9-14):  mean reward ~-5.1
+  spread: 3.28
+  reference (hindsight) spread: 0.50
+
+Determinism: [OK]
+Observation Sanity: [OK]
+```
+
+Both FLAGs are expected and already mitigated:
+- **Fidelity FLAG:** 48.7% of transitions (all stage-1) show large immediate/deferred gap because 3 opponents act between the player's action and next turn. Training loop stores deferred version (fixed in Exp 5).
+- **Reward FLAG:** 3.28 spread from `compute_score`'s revealed/unrevealed asymmetry. Hindsight shaping reduces spread to 0.50 (fixed in Exp 6).
+
+These checks would have caught both bugs immediately if run before the first training attempt. The fidelity check shows the gap exists; the reward check shows the bias. No domain knowledge needed to read the output -- just "large gap, investigate" and "large spread, investigate."
+
+### Integration
+
+- **Standalone:** `uv run python -m src.diagnostics` runs all 4 checks
+- **Tournament:** `--sanity-check` flag runs probes before training, aborts on FAIL
+- **Passive assertions:** `assert_transition_batch()` available for training loop integration (validates NaN/Inf, shapes, action bounds per batch)
+
