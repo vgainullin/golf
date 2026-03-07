@@ -1,0 +1,65 @@
+{
+  "imitation": {
+    "score": 13.98,
+    "score_std": 2.78,
+    "h_score": 14.07,
+    "col_matches": 0.551,
+    "take_rate": 0.323,
+    "rev_replace": 0.0,
+    "s1_entropy": 2.48
+  },
+  "dqfd_fixed (best, 13.3)": {
+    "score": 13.47,
+    "score_std": 2.79,
+    "h_score": 14.16,
+    "col_matches": 0.584,
+    "take_rate": 0.324,
+    "rev_replace": 0.022,
+    "s1_entropy": 2.48
+  },
+  "dqfd_fast (lr=1e-3)": {
+    "score": 13.23,
+    "score_std": 2.81,
+    "h_score": 14.13,
+    "col_matches": 0.617,
+    "take_rate": 0.326,
+    "rev_replace": 0.032,
+    "s1_entropy": 2.48
+  },
+  "tourn_nextobs_fix (hof)": {
+    "score": 16.23,
+    "score_std": 2.81,
+    "h_score": 14.24,
+    "col_matches": 0.198,
+    "take_rate": 0.334,
+    "rev_replace": 0.778,
+    "s1_entropy": 2.23
+  },
+  "tourn_nextobs_fix (champ)": {
+    "score": 16.24,
+    "score_std": 2.78,
+    "h_score": 14.25,
+    "col_matches": 0.197,
+    "take_rate": 0.332,
+    "rev_replace": 0.777,
+    "s1_entropy": 2.23
+  },
+  "tourn_v2s (pre-fix hof)": {
+    "score": 18.36,
+    "score_std": 2.92,
+    "h_score": 14.17,
+    "col_matches": 0.12,
+    "take_rate": 0.325,
+    "rev_replace": 0.86,
+    "s1_entropy": 2.21
+  },
+  "tourn_imitation (hof)": {
+    "score": 13.93,
+    "score_std": 2.77,
+    "h_score": 13.93,
+    "col_matches": 0.548,
+    "take_rate": 0.323,
+    "rev_replace": 0.0,
+    "s1_entropy": 2.48
+  }
+}

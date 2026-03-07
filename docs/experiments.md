@@ -251,12 +251,12 @@ Optimal cutoff shifts from 5 (base) to 6 (simple) -- without column awareness, i
 
 ### Current plateau analysis
 
-The DQfD plateaus at ~13.3 regardless of LR or temperature. The 0.7-point improvement over base heuristic (~14.0 in [DQN,R,H,R] eval) cannot be explained by threshold tuning (worth 0.08 at most). The model likely learns partial/situational column matching or better position selection, but has not discovered the full strategy of placing at revealed positions (worth 3.76 points).
+The DQfD plateaus at ~13.2 regardless of LR or temperature. Behavioral metrics (see below) confirm the improvement comes from sharper column matching (col 0.53 -> 0.62), not from revealed-card replacement or take-rate changes.
 
 Possible barriers to further improvement:
 
-1. **Exploration limit:** Boltzmann on Q-values only perturbs around the current policy. Discovering "swap a revealed card for a column match" requires trying actions the heuristic never takes.
-2. **Demo anchor ceiling:** The margin loss anchors to heuristic demonstrations. As the model improves beyond the heuristic, the margin loss pulls it back toward heuristic actions. Note: decaying lambda was blamed for catastrophic forgetting in Exp 4, but that was actually caused by the stale next_obs bug -- decaying lambda may now be safe to revisit.
+1. **Margin loss ceiling:** The margin loss anchors to heuristic demos. The heuristic *never* replaces revealed cards, so the margin loss actively penalizes the one action worth 5.5 points. Decaying lambda was blamed for catastrophic forgetting in Exp 4, but that was the stale next_obs bug -- decaying lambda may now be safe.
+2. **Exploration limit:** Boltzmann on Q-values only perturbs around the current policy. Discovering "swap a revealed card for a column match" requires trying actions the heuristic never takes.
 3. **Opponent diversity:** Self-play is [DQN, H, H, H]. The model only sees games against heuristic opponents, limiting the state distribution.
 
 ---
@@ -305,3 +305,26 @@ Evaluated each strategy in [STRATEGY, Random, Random, Random] config, 2000 games
 | rev_replace > 0.20 | Systematic revealed-card replacement | Approaching improved heuristic |
 | take_rate < 0.25 or > 0.45 | Degenerate take policy | Too greedy or too passive |
 | s1_entropy < 0.5 | Action collapse | Always picking same action, likely broken |
+
+### DQN model evaluation (2026-03-07)
+
+Evaluated all key DQN checkpoints with behavioral metrics. [DQN, Random, Heuristic, Random], 2000 games x 9 holes.
+
+| Model | Score | col | take | rev | ent | Notes |
+|-------|-------|-----|------|-----|-----|-------|
+| imitation | 14.0 | 0.55 | 0.32 | 0.00 | 2.5 | Near-perfect heuristic clone |
+| tourn_imitation (hof) | 13.9 | 0.55 | 0.32 | 0.00 | 2.5 | Tournament training preserved imitation policy |
+| dqfd_fixed (lr=1e-4) | 13.5 | 0.58 | 0.32 | 0.02 | 2.5 | Slight col improvement, hint of rev_replace |
+| dqfd_fast (lr=1e-3) | 13.2 | 0.62 | 0.33 | 0.03 | 2.5 | Best model; col matching explains the gain |
+| tourn_nextobs_fix (hof) | 16.2 | 0.20 | 0.33 | 0.78 | 2.2 | Broken: high rev_replace without column matching |
+| tourn_v2s (pre-fix hof) | 18.4 | 0.12 | 0.33 | 0.86 | 2.2 | Same broken pattern, worse with stale next_obs |
+
+**Key findings:**
+
+1. **DQfD improves through better column matching.** The best model (dqfd_fast, 13.2) reaches col=0.62 vs the heuristic's 0.53. It is behaviorally identical to the heuristic in every other dimension -- same take_rate, same entropy, near-zero rev_replace. The 0.8-point improvement is entirely from sharper column awareness on unrevealed positions.
+
+2. **Tournament DQN from scratch learns the wrong strategy.** Both pre-fix (18.4) and post-fix (16.2) models have col=0.12-0.20 (near random) with rev_replace=0.78-0.86 (far above random's 0.51). They aggressively replace revealed cards *without* column matching -- the worst combination. They learned "place at positions you can see" without understanding *why*.
+
+3. **The remaining gap is rev_replace.** DQfD is at (col=0.62, rev=0.03); the improved heuristic is at (col=0.70, rev=0.33). The 5-point gap is almost entirely explained by the model not yet learning to replace revealed cards *for column matches*. The margin loss anchoring to heuristic demos (which never do this) is the likely barrier.
+
+4. **take_rate is useless.** Every model from imitation through tournament lands at 0.32-0.33. Stage 0 decisions are uniform across all competent strategies.
