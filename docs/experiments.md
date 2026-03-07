@@ -140,12 +140,71 @@ The DQN loss is fundamentally destructive when starting from imitation logits. T
 2. The TD loss reshapes the entire output distribution, not just action ordering
 3. By the time Q-values are Bellman-consistent, the policy is already degraded
 
-### Key insight
+### Key insight (REVISED -- see Experiment 5)
 
-**You cannot run DQN loss on a model that outputs logits.** The model needs to output actual Q-values first. Options:
+The diagnosis above was wrong. The real issue was a bug in transition recording: `next_obs` was captured immediately after the player's action, before opponents acted. The agent never sees that state -- it sees the board after all opponents complete their turns. This broke the Markov property, making TD targets inconsistent and causing the Q-values to diverge.
 
-1. **Pre-train Q-values:** Before DQfD, first convert the imitation model to output proper Q-values (e.g., run TD learning on demo data only until convergence, then switch to DQfD)
-2. **Separate policy and value heads:** Keep the imitation logits for action selection, train a separate Q-value head with DQN loss. Only use the Q-head to adjust action selection gradually.
-3. **Policy gradient instead of DQN:** Use the imitation model as a policy network. Apply policy gradient (REINFORCE/PPO) which doesn't need Q-values at all -- just adjusts action probabilities based on returns. No logit/Q-value mismatch.
+---
 
-**Recommended next:** Option 3 (policy gradient) avoids the logit/Q-value incompatibility entirely.
+## Experiment 5: DQfD with next_obs fix (2026-03-06)
+
+**Fix:** Defer stage-1 transition recording until the player's next turn, when the correct post-opponent-actions observation is available. Applied to `collect_demo_transitions`, `collect_agent_transitions` (residual_dqn.py), `train_episode`, and `train_episodes_vectorized` (tournament.py).
+
+**Commit:** `38194d3`
+
+### Vanilla tournament DQN (from scratch)
+
+Re-ran tournament training with identical config to the `tournament_v2s` baseline (20 gens, 12 agents, v2s, seed 42).
+
+| Metric | Old (stale next_obs) | Fixed |
+|--------|---------------------|-------|
+| Best solo score | 18.2 | **16.0** |
+| Champion solo gen 20 | 18.3-19.0 | **16.2** |
+
+The fix cut the solo-vs-heuristic gap roughly in half (4.2 -> 2.0).
+
+### DQfD from imitation checkpoint
+
+Re-ran DQfD with lr=1e-4, lambda_margin=1.0 constant, 200 iterations. Same config as Experiment 4 Run 1 but with correct transitions.
+
+| Iteration | Old DQfD (Run 2, lr=3e-5) | Fixed DQfD (lr=1e-4) |
+|-----------|--------------------------|----------------------|
+| 1 | 13.9 | 13.9 |
+| 50 | ~14.0 | 14.3 (brief drift) |
+| 100 | ~14.5 (degrading) | **13.6** (improving) |
+| 150 | **16.5** (collapsed) | **13.6** (stable) |
+| 200 | n/a | **13.5** |
+| Best | 13.9 at iter 1 | **13.3** at iter 170 |
+
+The DQN now **beats the heuristic baseline** (13.3 vs 14.0). No catastrophic forgetting through 200 iterations. The logit/Q-value transition that Experiment 4 diagnosed as "fundamentally destructive" is actually manageable when TD targets are computed from correct states.
+
+### Why the fix matters
+
+In a 4-player game, 3 opponents act between a player's turns. The stale `next_obs` reflected the board state immediately after the player's action, not the state they actually see next. This meant:
+
+1. TD targets `r + gamma * Q(s')` used phantom states `s'` that never occur in actual play
+2. The Q-function couldn't converge to correct Bellman values
+3. The resulting gradient noise was destructive enough to overcome the margin loss anchor
+
+With correct `next_obs`, the TD targets are consistent with the actual game dynamics, allowing the Q-values to converge properly while the margin loss preserves the policy.
+
+### DQfD hyperparameter sweep (2026-03-07)
+
+Tested whether higher LR and lower temperature would accelerate learning.
+
+| Config | Best score | Iter at best | Plateau |
+|--------|-----------|-------------|---------|
+| lr=1e-4, temp 1.0->0.1 | **13.3** | 170 | ~13.3-13.6 |
+| lr=1e-3, temp 0.3->0.1 | **13.3** | 195 | ~13.3-13.5 |
+
+Both runs converge to the same plateau (~13.3). Higher LR makes the DQN loss converge faster (2.1 at iter 10 vs 3.3) but eval improvement is identical. The bottleneck is not gradient speed.
+
+### Current plateau analysis
+
+The DQfD plateaus at ~13.3 regardless of LR or temperature. Possible explanations:
+
+1. **Exploration limit:** Boltzmann on Q-values only perturbs around the current policy. It can find small improvements over the heuristic but can't discover fundamentally different strategies (e.g., column matching, endgame timing).
+2. **Opponent diversity:** Self-play is [DQN, H, H, H]. The model only sees games against heuristic opponents, limiting the state distribution.
+3. **Demo anchor ceiling:** The margin loss anchors to heuristic demonstrations. As the model improves beyond the heuristic, the margin loss pulls it back toward heuristic actions, creating tension with the DQN loss that wants to diverge.
+
+The gap to improved heuristic (9.6) remains 3.7 points.

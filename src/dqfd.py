@@ -52,6 +52,8 @@ def train_dqfd(
     gamma: float = 0.99,
     margin: float = 0.8,
     target_update_interval: int = 500,
+    temp_start: float = 1.0,
+    temp_end: float = 0.1,
     agent_buffer_capacity: int = 200_000,
     demo_buffer_capacity: int = 200_000,
     eval_interval: int = 10,
@@ -96,7 +98,7 @@ def train_dqfd(
         # Schedules
         demo_ratio = linear_schedule(0.25, 0.1, progress)
         lambda_margin = 1.0  # keep constant -- decaying caused catastrophic forgetting
-        temperature = linear_schedule(1.0, 0.1, progress)
+        temperature = linear_schedule(temp_start, temp_end, progress)
 
         # Collect self-play transitions
         collect_agent_transitions(
@@ -236,6 +238,8 @@ def main(argv=None):
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--margin", type=float, default=0.8)
     p.add_argument("--target-update-interval", type=int, default=500)
+    p.add_argument("--temp-start", type=float, default=1.0)
+    p.add_argument("--temp-end", type=float, default=0.1)
     p.add_argument("--agent-buffer-capacity", type=int, default=200_000)
     p.add_argument("--demo-buffer-capacity", type=int, default=200_000)
     p.add_argument("--eval-interval", type=int, default=10)
@@ -263,6 +267,8 @@ def main(argv=None):
         gamma=args.gamma,
         margin=args.margin,
         target_update_interval=args.target_update_interval,
+        temp_start=args.temp_start,
+        temp_end=args.temp_end,
         agent_buffer_capacity=args.agent_buffer_capacity,
         demo_buffer_capacity=args.demo_buffer_capacity,
         eval_interval=args.eval_interval,
