@@ -375,7 +375,7 @@ def get_valid_action_mask(state: VectorizedGolfState, player_id: int) -> torch.T
     return mask
 
 
-def heuristic_stage0(state: VectorizedGolfState, player_id: int) -> torch.Tensor:
+def heuristic_stage0(state: VectorizedGolfState, player_id: int, cutoff: float = RANK_CUTOFF) -> torch.Tensor:
     """Heuristic decision for stage 0: take face card or draw.
 
     Take face card if score < cutoff OR rank matches a revealed card.
@@ -391,7 +391,7 @@ def heuristic_stage0(state: VectorizedGolfState, player_id: int) -> torch.Tensor
     face_score = rank_scores[face_rank.long()]  # (N,)
 
     # Check if face card score < cutoff
-    take_low = face_score < RANK_CUTOFF  # (N,)
+    take_low = face_score < cutoff  # (N,)
 
     # Check if face rank matches any revealed card rank
     player_cards = state.player_cards[:, player_id, :]  # (N, 6)
@@ -408,7 +408,7 @@ def heuristic_stage0(state: VectorizedGolfState, player_id: int) -> torch.Tensor
                        torch.ones(N, dtype=torch.long, device=device))
 
 
-def heuristic_stage1(state: VectorizedGolfState, player_id: int) -> torch.Tensor:
+def heuristic_stage1(state: VectorizedGolfState, player_id: int, cutoff: float = RANK_CUTOFF) -> torch.Tensor:
     """Heuristic decision for stage 1.
 
     Only tries UNREVEALED positions (matching iterative calc_opt_heuristic_position).
@@ -453,10 +453,10 @@ def heuristic_stage1(state: VectorizedGolfState, player_id: int) -> torch.Tensor
     first_unrevealed = unrevealed_idx.min(dim=1).values.clamp(0, 5)  # (N,)
 
     # Decision logic (matches get_player_action stage 1):
-    # 1. If optimal_score <= current_score - rank_cutoff: place at best_pos
-    big_improvement = best_score <= (current_score - RANK_CUTOFF)
-    # 2. Elif (optimal_score - current_score) < rank_cutoff and has unrevealed: place at first unrevealed
-    small_ok = (best_score - current_score) < RANK_CUTOFF
+    # 1. If optimal_score <= current_score - cutoff: place at best_pos
+    big_improvement = best_score <= (current_score - cutoff)
+    # 2. Elif (optimal_score - current_score) < cutoff and has unrevealed: place at first unrevealed
+    small_ok = (best_score - current_score) < cutoff
     place_unrevealed = (~big_improvement) & small_ok & has_unrevealed
     # 3. Else: discard + flip first unrevealed
     discard_flip = (~big_improvement) & (~place_unrevealed) & has_unrevealed
@@ -485,6 +485,121 @@ def heuristic_stage1(state: VectorizedGolfState, player_id: int) -> torch.Tensor
         action = torch.where(no_unrevealed, 2 + best_pos, action)
 
     return action
+
+
+# ---------------------------------------------------------------------------
+# Variant heuristics
+# ---------------------------------------------------------------------------
+
+
+def simple_stage0(state: VectorizedGolfState, player_id: int, cutoff: float = RANK_CUTOFF) -> torch.Tensor:
+    """Take face card if score < cutoff, else draw. No rank-matching."""
+    device = state.player_cards.device
+    rank_scores = RANK_SCORES.to(device)
+    N = state.player_cards.shape[0]
+
+    face_rank = state.discard_top % NUM_RANKS
+    face_score = rank_scores[face_rank.long()]
+    take = face_score < cutoff
+    return torch.where(take, torch.zeros(N, dtype=torch.long, device=device),
+                       torch.ones(N, dtype=torch.long, device=device))
+
+
+def simple_stage1(state: VectorizedGolfState, player_id: int) -> torch.Tensor:
+    """Place held card at a random unrevealed position, or random position if all revealed."""
+    device = state.player_cards.device
+    N = state.player_cards.shape[0]
+    revealed = state.player_revealed[:, player_id, :]  # (N, 6)
+    unrevealed = ~revealed
+
+    # Random priority per position, masked by unrevealed
+    rand = torch.rand(N, 6, device=device)
+    rand = torch.where(unrevealed, rand, torch.full_like(rand, -1.0))
+
+    has_unrevealed = unrevealed.any(dim=1)
+    # If all revealed, allow any position
+    rand = torch.where(has_unrevealed.unsqueeze(1), rand, torch.rand(N, 6, device=device))
+
+    pos = rand.argmax(dim=1)  # (N,)
+    return 2 + pos  # always place (action 2-7)
+
+
+def improved_stage1(state: VectorizedGolfState, player_id: int) -> torch.Tensor:
+    """Like heuristic_stage1 but considers ALL positions (including revealed)."""
+    device = state.player_cards.device
+    N = state.player_cards.shape[0]
+
+    cards = state.player_cards[:, player_id, :].clone()
+    revealed = state.player_revealed[:, player_id, :].clone()
+    held = state.player_holding[:, player_id]
+    unrevealed = ~revealed
+
+    current_score = compute_score(cards, revealed, device)
+
+    # Try placing at ALL 6 positions
+    best_score = torch.full((N,), 1e6, dtype=torch.float32, device=device)
+    best_pos = torch.zeros(N, dtype=torch.long, device=device)
+
+    for pos in range(6):
+        trial_cards = cards.clone()
+        trial_cards[:, pos] = held
+        trial_revealed = revealed.clone()
+        trial_revealed[:, pos] = True
+        score = compute_score(trial_cards, trial_revealed, device)
+        better = score < best_score
+        best_score = torch.where(better, score, best_score)
+        best_pos = torch.where(better, torch.full_like(best_pos, pos), best_pos)
+
+    # Find first unrevealed position (for discard+flip fallback)
+    has_unrevealed = unrevealed.any(dim=1)
+    unrevealed_idx = torch.where(
+        unrevealed,
+        torch.arange(6, device=device).unsqueeze(0).expand(N, -1),
+        torch.full((N, 6), 99, dtype=torch.long, device=device),
+    )
+    first_unrevealed = unrevealed_idx.min(dim=1).values.clamp(0, 5)
+
+    # 1. Big improvement: place at best_pos
+    big_improvement = best_score <= (current_score - RANK_CUTOFF)
+    # 2. Small/neutral: place at first unrevealed for info gain
+    small_ok = (best_score - current_score) < RANK_CUTOFF
+    place_unrevealed = (~big_improvement) & small_ok & has_unrevealed
+    # 3. Else: discard + flip
+    discard_flip = (~big_improvement) & (~place_unrevealed) & has_unrevealed
+
+    action = 2 + best_pos
+    action = torch.where(place_unrevealed, 2 + first_unrevealed, action)
+    action = torch.where(discard_flip, 9 + first_unrevealed, action)
+
+    # No unrevealed: place at best_pos (already the default)
+    return action
+
+
+def random_stage0(state: VectorizedGolfState, player_id: int) -> torch.Tensor:
+    """Random stage 0: uniformly pick a valid action (take face or draw)."""
+    N = state.player_cards.shape[0]
+    device = state.player_cards.device
+    deck_not_empty = state.deck_ptr < NUM_CARDS
+    # If deck empty, must take face (action 0); else uniform over {0, 1}
+    draw = deck_not_empty & (torch.rand(N, device=device) < 0.5)
+    return draw.long()
+
+
+def random_stage1(state: VectorizedGolfState, player_id: int) -> torch.Tensor:
+    """Random stage 1: uniformly pick a valid action (place or discard+flip)."""
+    N = state.player_cards.shape[0]
+    device = state.player_cards.device
+    revealed = state.player_revealed[:, player_id, :]  # (N, 6)
+
+    # Build valid action mask: 2-7 always valid, 9-14 valid if unrevealed
+    mask = torch.zeros(N, NUM_ACTIONS, dtype=torch.bool, device=device)
+    for pos in range(6):
+        mask[:, 2 + pos] = True
+        mask[:, 9 + pos] = ~revealed[:, pos]
+
+    uniform = torch.rand(N, NUM_ACTIONS, device=device)
+    uniform.masked_fill_(~mask, 0.0)
+    return uniform.argmax(dim=1)
 
 
 def eps_greedy_batched(
