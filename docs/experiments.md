@@ -683,7 +683,77 @@ The score=10 group (10, J, Q) is the smoking gun. Imitation: within_rank=0.64, c
 
 This is a representation learning failure inherent to end-to-end RL with learned embeddings. The training signal determines what structure the embeddings develop, and when multiple strategies require different structures, the winner-take-all dynamics of gradient descent mean the first-discovered strategy monopolizes the representation.
 
-### The general problem
+### The general problem: representation monopolization
 
 Adding explicit rank features to the observation would fix golf but not solve anything. The real question is general: how does an RL system learn the right representation when multiple strategies require different structure and the first one discovered monopolizes the embeddings? This is the problem worth solving next -- not as a golf-specific patch, but as a systemic issue that will recur in any domain where learned representations must serve multiple competing strategies.
+
+---
+
+## Representation monopolization: literature and parallels
+
+The col_matches plateau is not an isolated phenomenon. It sits at the intersection of several well-characterized failure modes in deep learning and deep RL.
+
+### Established theory
+
+**Gradient starvation** (Pezeshki et al., NeurIPS 2021). The closest theoretical match. Once a subset of features reduces the loss sufficiently, samples classified correctly by those features stop contributing gradient, starving other features of learning signal. The authors prove this with dynamical systems theory: feature learning dynamics decouple, and the dominant feature suppresses the secondary one. In golf: value swapping provides enough reward signal to shape embeddings; the weak column-matching gradient (~3% reinforcement rate) is starved.
+
+**Simplicity bias** (Shah et al., NeurIPS 2020). SGD systematically learns simpler features first. When a simple attribute correlates with reward, networks latch onto it and fail to learn more complex but useful features. Value ordering (1D comparison) is simpler than rank equality (13-class discrete partition masked by suit). The simpler one wins.
+
+**Primacy bias** (Nikishin et al., ICML 2022). Specific to deep RL: agents overfit to early interactions, shaping representations that make subsequent learning from novel situations impossible. The problem is not data collection but the inability to learn from it. Early experiences monopolize the representation. This explains why more generations don't break the col_matches plateau -- the representation is locked, not undertrained.
+
+**Implicit under-parameterization** (Kumar et al., ICLR 2021). Bootstrapped value learning with gradient descent causes the effective rank of learned features to collapse. Networks with 512-dimensional feature layers show only 20-100 active singular components. The network behaves as low-capacity despite being high-capacity. This is the mechanism by which monopolization becomes irreversible: feature rank collapses around the dominant strategy, leaving no representational room for the secondary one.
+
+**Dormant neuron phenomenon** (Sokar et al., ICML 2023). As training progresses, an increasing fraction of neurons become inactive. A few neurons monopolize activation while many contribute nothing. The neuron-level manifestation of representation monopolization: neurons that could serve column matching go dormant because value swapping dominates.
+
+**Loss of plasticity** (Abbas et al., Nature 2024). The umbrella term. Neural networks in continual learning settings gradually lose the ability to learn from new data. Weights become committed to the existing solution and resist modification, even when new data would benefit from different feature structure.
+
+**Critical learning periods** (Achille et al., ICLR 2019). Analogous to biological critical periods: the first few epochs create strong connections that do not change during additional training. Information plasticity is lost after the initial transient. In golf, the early phase when value swapping is discovered constitutes the critical period that locks embedding structure.
+
+These compound: simplicity bias determines *which* strategy wins. Gradient starvation explains *why* the secondary strategy can't catch up. Primacy bias explains *why it's irreversible*. Implicit under-parameterization and dormant neurons describe the *mechanism* of irreversibility.
+
+### The same failure in other games
+
+**KataGo's cyclic group blind spot** (Wang et al., ICML 2023). The strongest parallel. Superhuman Go AI fails catastrophically on large cyclic groups of stones. The CNN learned local life/death patterns (dominant, easy strategy) and this representation cannot handle global topological reasoning (secondary strategy requiring different structure). An adversary exploiting this beats KataGo in 94/100 games with 8% of KataGo's training compute. Adversarial retraining patches specific patterns rather than learning a general representation of group connectivity -- the representation is too committed.
+
+**AlphaStar strategy collapse** (Vinyals et al., Nature 2019). DeepMind explicitly diagnosed this: "Because some strategies are easier to improve on, naive reinforcement learning would narrowly focus on these. Other strategies may require more learning... This creates a vicious cycle in which some valid strategies appear less and less effective because the agent abandons them in favour of a dominant strategy." Their fix required an entire league of exploiter agents to force representational diversity. The scale of the infrastructure needed is evidence of the severity.
+
+**TD-Gammon's doubling weakness** (Tesauro, 1995). Superhuman positional play but poor doubling decisions. The learned representation encoded positional evaluation features that didn't transfer to cube decisions. Tesauro had to supplement with hand-crafted expert features, acknowledging that the self-taught representation was missing structure.
+
+**Poker RL and bluffing suppression**. Deep RL poker agents learn value betting (exploiting strong hands) but suppress bluffing. Bluffing requires modeling opponent belief states -- a different feature structure than hand-strength evaluation, which pays off first and monopolizes the representation.
+
+**DQN on Montezuma's Revenge**. Usually framed as sparse rewards + poor exploration, but there's a representation component. CNN features learned from dying in room 1 serve "avoid death" but can't represent key-and-door reasoning. Go-Explore sidesteps the representation problem entirely by using hand-designed cell representations.
+
+**AlphaGo's ko avoidance**. AlphaGo appeared to systematically avoid ko fights rather than learn to handle them. Ko reading requires global board assessment of ko threats -- different from the local pattern matching that dominates the learned representation.
+
+### The pattern across games
+
+| Game | Dominant strategy (easy) | Suppressed strategy (hard) | Representation gap |
+|------|-------------------------|---------------------------|-------------------|
+| Golf | Value swapping (1D ordering) | Column matching (rank equality) | Embeddings encode value, not rank |
+| Go (KataGo) | Local life/death patterns | Global cyclic group reasoning | CNN features are local, not topological |
+| StarCraft | Dominant race/build order | Counter-strategies | Features serve the winning build, not diverse play |
+| Backgammon | Positional evaluation | Doubling cube decisions | Features encode position, not decision theory |
+| Poker | Value betting (hand strength) | Bluffing (opponent modeling) | Features encode cards, not beliefs |
+| Montezuma | Obstacle avoidance | Key-and-door reasoning | Features encode spatial danger, not object relations |
+
+In every case: the dominant strategy requires simpler representational structure, gets discovered first, and locks the embeddings/features. The secondary strategy requires qualitatively different structure that can't develop once the representation is committed. More training doesn't help because the bottleneck is representational, not temporal.
+
+### Proposed solutions from the literature
+
+**Spectral decoupling** (Pezeshki et al., NeurIPS 2021). Replace weight decay with L2 penalty on network *outputs* (logits). Decouples feature learning dynamics so the dominant feature can't suppress the secondary one. Directly targets gradient starvation. Low implementation cost, theoretically grounded for exactly this failure mode.
+
+**Periodic network resets** (Nikishin et al., ICML 2022). Re-initialize the last few layers while preserving the replay buffer. Overcomes primacy bias by letting the network re-learn from accumulated data without the locked representation. In golf: reset embedding layer every N generations; the buffer already contains column-matching experiences that the locked embeddings can't learn from.
+
+**Dormant neuron recycling / ReDo** (Sokar et al., ICML 2023). Identify dormant neurons and reinitialize their incoming weights. More surgical than full layer resets: targets specifically the neurons that could serve column matching but went dormant.
+
+**Continual backpropagation** (Abbas et al., Nature 2024). Reinitialize a small fraction of less-used units after each example. Maintains a steady stream of fresh neurons available for new features. Maintains plasticity indefinitely.
+
+**Relational attention** (Zambaldi et al., ICLR 2019). Self-attention over entity embeddings computes pairwise relations explicitly, making "does card A have the same rank as card B?" a first-class operation rather than something that must emerge from embedding geometry. Demonstrated in StarCraft mini-games for relational reasoning. Architectural rather than regularization-based.
+
+**Factored embeddings**. Decompose tokens along known compositional axes: `card_repr = concat(rank_embed, suit_embed)`. Forces rank structure into the representation by construction. Domain-general wherever tokens have compositional structure (rank x suit, piece x position, item x modifier).
+
+**Population diversity / DvD** (Parker-Holder et al., NeurIPS 2020). Behavioral diversity pressure alongside fitness in population-based training. Uses determinantal point processes to ensure agents span different strategies rather than clustering. Integrates naturally with tournament training.
+
+**Gradient surgery / PCGrad** (Yu et al., NeurIPS 2020). When gradients from different objectives conflict, project each onto the normal plane of the other. Prevents destructive interference without separate networks.
+
 
