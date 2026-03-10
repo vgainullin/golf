@@ -639,5 +639,47 @@ Compare to value swapping, which only requires "is this card's score lower than 
 
 The imitation model learns rank equivalence easily (col=0.55) because supervised learning directly tells it which action to take. RL from scratch finds value swapping first (easier gradient signal), shapes the embeddings around score comparison, and then the weak column-match gradient (~3% reinforcement rate) can't reshape embeddings that are already committed to a different structure.
 
-**Investigation needed:** Check whether the learned card embeddings actually cluster by rank or are sparse/unstructured. If same-rank cards aren't near each other in embedding space, the 2-layer MLP can't compute rank equality without dedicating significant capacity to it. This would confirm the representation bottleneck and motivate adding explicit rank features to the observation.
+### Embedding analysis (2026-03-10)
+
+**Script:** `src/analyze_embeddings.py`
+
+Extracted and compared the card embedding weights (53 tokens, token 0-51 = cards, 52 = unknown) from the hindsight DQN champion (gen19_agent9, solo 12.3) and the imitation model (solo 14.0). Card encoding is `suit * 13 + rank`, so same-rank cards across 4 suits are at indices `{rank, rank+13, rank+26, rank+39}`.
+
+| Metric | Imitation (64d) | Hindsight DQN (128d) |
+|--------|----------------|---------------------|
+| Within-rank cosine sim | 0.54 | 0.15 |
+| Between-rank cosine sim | -0.02 | -0.00 |
+| **Separation** | **+0.56** | **+0.15** |
+
+The imitation model's embeddings strongly cluster by rank. Same-rank cards point in roughly the same direction (cosine 0.54), while different-rank cards are near-orthogonal (-0.02). The network can trivially compute rank equality from these embeddings.
+
+The hindsight DQN's embeddings are barely structured by rank. Within-rank similarity (0.15) is only marginally above the between-rank noise floor (-0.00). Same-rank cards are scattered almost randomly in embedding space.
+
+**Per-rank breakdown:**
+
+| Rank | Score | Imitation | Hindsight DQN |
+|------|-------|-----------|---------------|
+| 2 | -2 | 0.33 | 0.28 |
+| 3 | 3 | 0.31 | 0.08 |
+| 4 | 4 | 0.64 | 0.05 |
+| 5 | 5 | 0.66 | 0.08 |
+| 6 | 6 | 0.57 | 0.06 |
+| 7 | 7 | 0.66 | 0.06 |
+| 8 | 8 | 0.65 | 0.10 |
+| 9 | 9 | 0.53 | 0.18 |
+| 10 | 10 | 0.61 | 0.25 |
+| J | 10 | 0.65 | 0.24 |
+| Q | 10 | 0.66 | 0.21 |
+| K | 0 | 0.34 | 0.14 |
+| A | 1 | 0.38 | 0.16 |
+
+The DQN's embeddings encode card *value*, not card *rank*. The only cards with any within-rank clustering (0.20+) are the extreme-value cards: 2 (score -2), 10/J/Q (score 10). Mid-rank cards (3-8) are at 0.05-0.10 -- indistinguishable from noise.
+
+The score=10 group (10, J, Q) is the smoking gun. Imitation: within_rank=0.64, cross_rank=-0.06 -- it knows 10s, Js, and Qs are different ranks despite identical scores. DQN: within_rank=0.23, cross_rank=0.24 -- it treats them interchangeably because they have the same score. The DQN learned "these are all high cards" but not "these are three distinct ranks for matching purposes."
+
+**Conclusion:** The representation bottleneck hypothesis is confirmed. The hindsight DQN cannot compute rank equality because its embeddings don't encode rank. It learned value-based structure (enough for value swapping) but never developed rank-based structure (required for column matching). The col_matches plateau at 0.30 is a direct consequence: the network literally lacks the representational substrate to identify column match opportunities.
+
+**The general phenomenon:** When RL's dominant early strategy requires only one kind of structure from learned embeddings (here: value ordering for card swapping), the embeddings lock into that structure during early training. A secondary strategy that requires different structure (here: rank equivalence for column matching) becomes unreachable -- not because the architecture can't represent it (the imitation model proves it can), but because the optimization landscape funnels the embeddings toward whichever structure pays off first. The weak gradient from the secondary strategy (~3% reinforcement rate) can't reshape embeddings that are already committed to serving the dominant strategy.
+
+This is a representation learning failure inherent to end-to-end RL with learned embeddings. The training signal determines what structure the embeddings develop, and when multiple strategies require different structures, the winner-take-all dynamics of gradient descent mean the first-discovered strategy monopolizes the representation.
 
