@@ -19,7 +19,7 @@ Game ends when any player has all 6 cards revealed, then each other player gets 
 
 ## Goal
 
-Beat the heuristic baseline (~14.0/hole) using RL on top of an imitation-learned DQN.
+Develop a generalized RL training system applicable to any game-playing domain. Golf is the first test case.
 
 | Baseline | Score (avg/hole) |
 |----------|-----------------|
@@ -682,4 +682,8 @@ The score=10 group (10, J, Q) is the smoking gun. Imitation: within_rank=0.64, c
 **The general phenomenon:** When RL's dominant early strategy requires only one kind of structure from learned embeddings (here: value ordering for card swapping), the embeddings lock into that structure during early training. A secondary strategy that requires different structure (here: rank equivalence for column matching) becomes unreachable -- not because the architecture can't represent it (the imitation model proves it can), but because the optimization landscape funnels the embeddings toward whichever structure pays off first. The weak gradient from the secondary strategy (~3% reinforcement rate) can't reshape embeddings that are already committed to serving the dominant strategy.
 
 This is a representation learning failure inherent to end-to-end RL with learned embeddings. The training signal determines what structure the embeddings develop, and when multiple strategies require different structures, the winner-take-all dynamics of gradient descent mean the first-discovered strategy monopolizes the representation.
+
+### The general problem
+
+Adding explicit rank features to the observation would fix golf but not solve anything. The real question is general: how does an RL system learn the right representation when multiple strategies require different structure and the first one discovered monopolizes the embeddings? This is the problem worth solving next -- not as a golf-specific patch, but as a systemic issue that will recur in any domain where learned representations must serve multiple competing strategies.
 
