@@ -576,3 +576,56 @@ These checks would have caught both bugs immediately if run before the first tra
 - **Tournament:** `--sanity-check` flag runs probes before training, aborts on FAIL
 - **Passive assertions:** `assert_transition_batch()` available for training loop integration (validates NaN/Inf, shapes, action bounds per batch)
 
+---
+
+## Next: Breaking the column matching plateau
+
+col_matches stuck at 0.30 (gen 7-20). The metrics confirm this is a genuine plateau, not slow growth:
+
+| Gen range | col_matches |
+|-----------|-------------|
+| 1-3 | 0.17, 0.21, 0.24 |
+| 5-7 | 0.26, 0.29, 0.28 |
+| 10-12 | 0.28, 0.31, 0.31 |
+| 15-20 | 0.28, 0.27, 0.29, 0.29, 0.31, 0.31 |
+
+Score continued improving (12.6 at gen 7 -> 12.1 at gen 19) but the gains come from better value swapping and take_rate refinement, not column matching. More generations won't break this -- the agent is stuck.
+
+### Root cause: stage-0/stage-1 bootstrapping deadlock
+
+Column matching requires two coordinated actions:
+1. **Stage 0:** take a card whose rank matches a revealed card in one of your columns
+2. **Stage 1:** place that card at the column partner position
+
+Stage-0 gets zero immediate reward. With 1-step TD, its Q-value depends entirely on bootstrapped Q(stage-1 state). But stage-1 Q-values for column-match placements are only learned from episodes where the agent happened to hold the right card AND placed it correctly. At eps=0.05 with wrong Q-rankings, the chance of correct placement is ~1/8 = 12.5%. Column match opportunities exist in ~24% of turns (measured in the reward bias analysis). So the effective reinforcement rate is ~3% of all turns.
+
+This creates a deadlock:
+1. Stage-1 Q-values for column-match actions are weak (few reinforcing examples)
+2. Stage-0 Q-values for taking matching cards are weak (bootstrapped from weak stage-1 values)
+3. Stage-0 rarely takes matching cards (low Q-values)
+4. Stage-1 rarely sees column-match opportunities (stage-0 doesn't set them up)
+5. Goto 1
+
+The agent escapes this enough to reach col=0.30 (2x random) from accidental successes, but can't go further because the signal-to-noise ratio at 3% reinforcement is too low to sharpen the Q-values past the noise floor.
+
+### Why previous suggestions miss the mark
+
+**Boltzmann exploration** doesn't fix this. At gen 20, eps=0.05 -- only 5% of actions are random. If Q-values correctly ranked column-match placements, col would be much higher. Boltzmann softens the same wrong Q-values. It helps coordination at the margin but doesn't address why the Q-values are wrong in the first place.
+
+**Longer training** doesn't fix this either. Col is flat from gen 7, not slowly climbing. The plateau is structural, not temporal.
+
+**DQfD + hindsight** combines two known approaches but doesn't address the bootstrapping deadlock. The margin loss anchors column matching from imitation, but the DQN loss still can't independently discover or improve column matching because of the same credit assignment gap.
+
+### Proposed fix: n-step returns (n=2)
+
+The bootstrapping deadlock exists because 1-step TD can't propagate the stage-1 column match reward back to the stage-0 action that set it up. With n=2, stage-0 directly sees the stage-1 reward:
+
+```
+Q_1step(s0, a0) = r0 + gamma * max Q(s1)     -- r0=0, depends on noisy Q(s1)
+Q_2step(s0, a0) = r0 + gamma * r1 + gamma^2 * max Q(s2)  -- directly sees r1 (column match reward)
+```
+
+The stage-0 action "take card with matching rank" would get direct credit from the stage-1 column match reward (r1), without relying on bootstrapped Q(s1) being accurate. This breaks the deadlock by providing unambiguous signal: "taking this card led to a +10 reward two steps later."
+
+n=2 is specifically the number that bridges the stage-0/stage-1 gap (one step per stage within a turn). This isn't a generic "use n-step because the DQfD paper does" -- it's the minimum n that solves the credit assignment problem for column matching.
+
