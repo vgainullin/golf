@@ -629,3 +629,15 @@ The stage-0 action "take card with matching rank" would get direct credit from t
 
 n=2 is specifically the number that bridges the stage-0/stage-1 gap (one step per stage within a turn). This isn't a generic "use n-step because the DQfD paper does" -- it's the minimum n that solves the credit assignment problem for column matching.
 
+### Alternative hypothesis: representation bottleneck
+
+The n-step diagnosis assumes the problem is credit assignment between stage-0 and stage-1. But stage-1 gets *immediate, large reward* for column matches (+3 to +10 points). If stage-1 itself can't learn to reliably place for column matches despite direct reward signal, the bottleneck isn't temporal -- it's representational.
+
+Cards are encoded as single tokens (0-52) through a learned embedding. A 7 of hearts and a 7 of spades are completely different token IDs. For column matching, the network must independently discover that 4 tokens per rank are equivalent for matching purposes, then compute "does my held card's rank equal the rank of a revealed card in column j?" across all 3 columns. This is a discrete equality check over a 13-class space, masked by suit.
+
+Compare to value swapping, which only requires "is this card's score lower than that card's score?" -- a 1D comparison that's much easier to learn from reward signal.
+
+The imitation model learns rank equivalence easily (col=0.55) because supervised learning directly tells it which action to take. RL from scratch finds value swapping first (easier gradient signal), shapes the embeddings around score comparison, and then the weak column-match gradient (~3% reinforcement rate) can't reshape embeddings that are already committed to a different structure.
+
+**Investigation needed:** Check whether the learned card embeddings actually cluster by rank or are sparse/unstructured. If same-rank cards aren't near each other in embedding space, the 2-layer MLP can't compute rank equality without dedicating significant capacity to it. This would confirm the representation bottleneck and motivate adding explicit rank features to the observation.
+
