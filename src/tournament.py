@@ -28,7 +28,9 @@ import torch
 from .dqn_offline import (
     GolfDQN,
     GolfDQNv2,
+    GolfDQNv2Factored,
     GolfDQNv2Shallow,
+    GolfDQNv3,
     NUM_ACTIONS,
     STAGE0_LEGAL,
     STAGE1_LEGAL,
@@ -152,8 +154,18 @@ class TournamentConfig:
     # Reward shaping
     reward_shaping: str = "hindsight"  # "hindsight" or "none"
 
+    # Spectral decoupling (7B)
+    spectral_decoupling: bool = False
+    lambda_sd: float = 0.01
+
+    # N-step returns (7C)
+    n_step: int = 1
+
+    # Periodic embedding resets (7D)
+    embedding_reset_interval: int = 0  # 0 = disabled
+
     # Model
-    model_variant: Optional[str] = None  # force variant: v1, v2, v2s (None = mixed)
+    model_variant: Optional[str] = None  # force variant: v1, v2, v2s, v2sf (None = mixed)
 
     # Infrastructure
     output_dir: Path = Path("data/tournament")
@@ -184,11 +196,15 @@ def make_model(variant: str, embedding_dim: int, hidden_dim: int, device: torch.
         return GolfDQNv2(embedding_dim, hidden_dim).to(device)
     if variant == "v2s":
         return GolfDQNv2Shallow(embedding_dim, hidden_dim).to(device)
+    if variant == "v2sf":
+        return GolfDQNv2Factored(embedding_dim, hidden_dim).to(device)
+    if variant == "v3":
+        return GolfDQNv3(embedding_dim, hidden_dim).to(device)
     return GolfDQN(embedding_dim, hidden_dim).to(device)
 
 
 def get_obs_fn(variant: str):
-    if variant in ("v2", "v2s"):
+    if variant in ("v2", "v2s", "v2sf", "v3"):
         return get_observation_v2
     return get_observation
 
@@ -196,8 +212,9 @@ def get_obs_fn(variant: str):
 class ReplayBuffer:
     """Array-based circular replay buffer -- no per-transition Python objects."""
 
-    def __init__(self, capacity: int):
+    def __init__(self, capacity: int, n_step: int = 1):
         self._capacity = capacity
+        self._n_step = n_step
         self.states = np.zeros((capacity, OBS_DIM), dtype=np.int64)
         self.actions = np.zeros(capacity, dtype=np.int64)
         self.rewards = np.zeros(capacity, dtype=np.float32)
@@ -205,6 +222,12 @@ class ReplayBuffer:
         self.dones = np.zeros(capacity, dtype=np.float32)
         self.stages = np.zeros(capacity, dtype=np.int64)
         self.next_stages = np.zeros(capacity, dtype=np.int64)
+        # N-step fields (only allocated when n_step >= 2)
+        if n_step >= 2:
+            self.rewards2 = np.zeros(capacity, dtype=np.float32)
+            self.next_states2 = np.zeros((capacity, OBS_DIM), dtype=np.int64)
+            self.next_stages2 = np.zeros(capacity, dtype=np.int64)
+            self.has_nstep = np.zeros(capacity, dtype=np.bool_)
         self._ptr = 0
         self._size = 0
 
@@ -218,10 +241,12 @@ class ReplayBuffer:
         dones: np.ndarray,
         stages: np.ndarray,
         next_stages: np.ndarray,
-    ) -> None:
+    ) -> int:
+        """Insert a batch of transitions. Returns the buffer index of the first inserted element."""
         n = len(states)
         if n == 0:
-            return
+            return self._ptr
+        start_ptr = self._ptr
         end = self._ptr + n
         if end <= self._capacity:
             self.states[self._ptr:end] = states
@@ -231,6 +256,8 @@ class ReplayBuffer:
             self.dones[self._ptr:end] = dones
             self.stages[self._ptr:end] = stages
             self.next_stages[self._ptr:end] = next_stages
+            if self._n_step >= 2:
+                self.has_nstep[self._ptr:end] = False
         else:
             first = self._capacity - self._ptr
             self.states[self._ptr:] = states[:first]
@@ -248,8 +275,27 @@ class ReplayBuffer:
             self.dones[:rest] = dones[first:]
             self.stages[:rest] = stages[first:]
             self.next_stages[:rest] = next_stages[first:]
+            if self._n_step >= 2:
+                self.has_nstep[self._ptr:] = False
+                self.has_nstep[:rest] = False
         self._ptr = end % self._capacity
         self._size = min(self._size + n, self._capacity)
+        return start_ptr
+
+    def backfill_nstep(
+        self,
+        indices: np.ndarray,
+        rewards2: np.ndarray,
+        next_states2: np.ndarray,
+        next_stages2: np.ndarray,
+    ) -> None:
+        """Backfill 2-step data for previously inserted stage-0 transitions."""
+        if self._n_step < 2:
+            return
+        self.rewards2[indices] = rewards2
+        self.next_states2[indices] = next_states2
+        self.next_stages2[indices] = next_stages2
+        self.has_nstep[indices] = True
 
     # -- single insert (backward compat for train_episode) --
     def push_single(
@@ -277,7 +323,7 @@ class ReplayBuffer:
     def sample(self, n: int, device: torch.device) -> Dict[str, torch.Tensor]:
         k = min(n, self._size)
         idx = np.random.choice(self._size, size=k, replace=False)
-        return {
+        batch = {
             "states": torch.as_tensor(self.states[idx], dtype=torch.long, device=device),
             "actions": torch.as_tensor(self.actions[idx], dtype=torch.long, device=device),
             "rewards": torch.as_tensor(self.rewards[idx], dtype=torch.float32, device=device),
@@ -286,9 +332,15 @@ class ReplayBuffer:
             "stages": torch.as_tensor(self.stages[idx], dtype=torch.long, device=device),
             "next_stages": torch.as_tensor(self.next_stages[idx], dtype=torch.long, device=device),
         }
+        if self._n_step >= 2:
+            batch["has_nstep"] = torch.as_tensor(self.has_nstep[idx], dtype=torch.bool, device=device)
+            batch["rewards2"] = torch.as_tensor(self.rewards2[idx], dtype=torch.float32, device=device)
+            batch["next_states2"] = torch.as_tensor(self.next_states2[idx], dtype=torch.long, device=device)
+            batch["next_stages2"] = torch.as_tensor(self.next_stages2[idx], dtype=torch.long, device=device)
+        return batch
 
     def copy(self) -> "ReplayBuffer":
-        new = ReplayBuffer(self._capacity)
+        new = ReplayBuffer(self._capacity, n_step=self._n_step)
         new.states[:] = self.states
         new.actions[:] = self.actions
         new.rewards[:] = self.rewards
@@ -296,6 +348,11 @@ class ReplayBuffer:
         new.dones[:] = self.dones
         new.stages[:] = self.stages
         new.next_stages[:] = self.next_stages
+        if self._n_step >= 2:
+            new.rewards2[:] = self.rewards2
+            new.next_states2[:] = self.next_states2
+            new.next_stages2[:] = self.next_stages2
+            new.has_nstep[:] = self.has_nstep
         new._ptr = self._ptr
         new._size = self._size
         return new
@@ -601,6 +658,8 @@ def train_episodes_vectorized(
         # Deferred stage-1 transition: next_obs must reflect state after
         # opponents act, not immediately after the learner's action.
         pending_s1 = None  # (obs, act, rew, active_np) or None
+        # N-step: track buffer indices of most recent stage-0 push per env
+        pending_s0_buf_idx = None  # (buf_start, active_np) or None
 
         for round_num in range(max_rounds):
             if state.done.all():
@@ -637,6 +696,31 @@ def train_episodes_vectorized(
                             stages=np.ones(n_p, dtype=np.int64),
                             next_stages=np.zeros(n_p, dtype=np.int64),
                         )
+                        # Backfill 2-step data for preceding stage-0 transition
+                        if config.n_step >= 2 and pending_s0_buf_idx is not None:
+                            s0_start, s0_active, s0_n = pending_s0_buf_idx
+                            # Both s0 and s1 used the same active mask at their time;
+                            # find the intersection of envs active in both
+                            both_active = s0_active & p_active_np
+                            # Map env indices to buffer positions
+                            s0_indices_all = (s0_start + np.arange(s0_n)) % buffer._capacity
+                            # s0_active was the mask at s0 time; p_active_np at s1 time
+                            # s0_indices_all has s0_n entries for envs where s0_active was True
+                            # We need the subset where p_active_np is also True
+                            s0_env_indices = np.where(s0_active)[0]
+                            s1_env_indices = np.where(p_active_np)[0]
+                            common_envs = np.intersect1d(s0_env_indices, s1_env_indices)
+                            if len(common_envs) > 0:
+                                # Map common envs to s0 buffer positions
+                                s0_pos_map = {env: i for i, env in enumerate(s0_env_indices)}
+                                buf_positions = np.array([s0_indices_all[s0_pos_map[e]] for e in common_envs])
+                                buffer.backfill_nstep(
+                                    indices=buf_positions,
+                                    rewards2=p_rew[common_envs],
+                                    next_states2=next_obs[common_envs],
+                                    next_stages2=np.zeros(len(common_envs), dtype=np.int64),
+                                )
+                            pending_s0_buf_idx = None
                     pending_s1 = None
 
                 if pid == 0:
@@ -670,15 +754,18 @@ def train_episodes_vectorized(
                 if pid == LEARNER_SEAT:
                     obs_after_s0 = _pad_obs(obs_fn(state, pid))
                     active_np = active.cpu().numpy()
-                    buffer.push_batch(
+                    n_active = int(active_np.sum())
+                    s0_start = buffer.push_batch(
                         states=obs_before_s0.cpu().numpy()[active_np],
                         actions=aid_s0.cpu().numpy()[active_np],
-                        rewards=np.zeros(int(active_np.sum()), dtype=np.float32),
+                        rewards=np.zeros(n_active, dtype=np.float32),
                         next_states=obs_after_s0.cpu().numpy()[active_np],
                         dones=state.done.float().cpu().numpy()[active_np],
-                        stages=np.zeros(int(active_np.sum()), dtype=np.int64),
-                        next_stages=np.ones(int(active_np.sum()), dtype=np.int64),
+                        stages=np.zeros(n_active, dtype=np.int64),
+                        next_stages=np.ones(n_active, dtype=np.int64),
                     )
+                    if config.n_step >= 2 and n_active > 0:
+                        pending_s0_buf_idx = (s0_start, active_np.copy(), n_active)
 
                 if state.done.all():
                     break
@@ -758,6 +845,23 @@ def train_episodes_vectorized(
                     stages=np.ones(n_p, dtype=np.int64),
                     next_stages=np.zeros(n_p, dtype=np.int64),
                 )
+                # Backfill 2-step for terminal stage-0 (done=1 zeroes the V term)
+                if config.n_step >= 2 and pending_s0_buf_idx is not None:
+                    s0_start, s0_active, s0_n = pending_s0_buf_idx
+                    s0_indices_all = (s0_start + np.arange(s0_n)) % buffer._capacity
+                    s0_env_indices = np.where(s0_active)[0]
+                    s1_env_indices = np.where(p_active_np)[0]
+                    common_envs = np.intersect1d(s0_env_indices, s1_env_indices)
+                    if len(common_envs) > 0:
+                        s0_pos_map = {env: i for i, env in enumerate(s0_env_indices)}
+                        buf_positions = np.array([s0_indices_all[s0_pos_map[e]] for e in common_envs])
+                        buffer.backfill_nstep(
+                            indices=buf_positions,
+                            rewards2=p_rew[common_envs],
+                            next_states2=p_obs[common_envs],  # dummy, done=1
+                            next_stages2=np.zeros(len(common_envs), dtype=np.int64),
+                        )
+                    pending_s0_buf_idx = None
             pending_s1 = None
 
     # Train on buffer (transitions were pushed directly via push_batch)
@@ -791,6 +895,30 @@ def train_episodes_vectorized(
                 targets = rewards + config.gamma * (1.0 - dones) * nq_val
 
             loss = F.smooth_l1_loss(q_sel, targets)
+            if config.spectral_decoupling:
+                loss = loss + config.lambda_sd * q.pow(2).mean()
+
+            # N-step returns: mix 2-step TD target for stage-0 transitions
+            if config.n_step >= 2 and "has_nstep" in batch:
+                has_ns = batch["has_nstep"].bool()
+                is_s0 = stages == 0
+                ns_mask = has_ns & is_s0
+                if ns_mask.any():
+                    rewards2 = batch["rewards2"]
+                    ns2 = batch["next_states2"][:, :state_width]
+                    nstages2 = batch["next_stages2"]
+                    with torch.no_grad():
+                        nq2_online = model(ns2[ns_mask], nstages2[ns_mask])
+                        masked2 = mask_illegal_actions(nq2_online, nstages2[ns_mask])
+                        best2 = masked2.argmax(dim=1)
+                        nq2_target = target_model(ns2[ns_mask], nstages2[ns_mask])
+                        nq2_val = nq2_target.gather(1, best2.unsqueeze(1)).squeeze(1)
+                        nq2_val = torch.where(torch.isfinite(nq2_val), nq2_val, torch.zeros_like(nq2_val))
+                        g2 = rewards[ns_mask] + config.gamma * rewards2[ns_mask] + \
+                             config.gamma ** 2 * (1.0 - dones[ns_mask]) * nq2_val
+                    loss_2step = F.smooth_l1_loss(q_sel[ns_mask], g2)
+                    loss = 0.5 * loss + 0.5 * loss_2step
+
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -841,6 +969,11 @@ class TournamentTrainer:
             self._resume_population()
         else:
             self._init_population()
+
+    def _make_optimizer(self, model: nn.Module, lr: float) -> torch.optim.Optimizer:
+        if self.config.spectral_decoupling:
+            return torch.optim.Adam(model.parameters(), lr=lr)
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
 
     def _init_population(self) -> None:
         """Create initial population, optionally warm-starting from a checkpoint."""
@@ -903,8 +1036,8 @@ class TournamentTrainer:
                 model.load_state_dict(base_state["model_state_dict"])
             target.load_state_dict(model.state_dict())
 
-            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-            buf = ReplayBuffer(self.config.buffer_capacity)
+            optimizer = self._make_optimizer(model, lr)
+            buf = ReplayBuffer(self.config.buffer_capacity, n_step=self.config.n_step)
 
             self.population.append((record, model, target, optimizer, buf))
 
@@ -966,8 +1099,8 @@ class TournamentTrainer:
             target.load_state_dict(model.state_dict())
 
             lr = hp.get("lr", 1e-3)
-            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-            buf = ReplayBuffer(self.config.buffer_capacity)
+            optimizer = self._make_optimizer(model, lr)
+            buf = ReplayBuffer(self.config.buffer_capacity, n_step=self.config.n_step)
 
             self.population.append((rec, model, target, optimizer, buf))
 
@@ -1377,7 +1510,7 @@ class TournamentTrainer:
                     lr = lr * np.exp(np.random.normal(0, self.config.mutation_sigma))
                     lr = np.clip(lr, self.config.lr_range[0], self.config.lr_range[1])
                     rec.hyperparams["lr"] = float(lr)
-                opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+                opt = self._make_optimizer(model, lr)
                 rec.elite_age = 0
             new_population.append((rec, model, target, opt, buf))
 
@@ -1417,7 +1550,7 @@ class TournamentTrainer:
 
             child_target = make_model(variant, self.config.embedding_dim, hidden_dim, self.device)
             child_target.load_state_dict(child_model.state_dict())
-            child_opt = torch.optim.AdamW(child_model.parameters(), lr=lr, weight_decay=1e-5)
+            child_opt = self._make_optimizer(child_model, lr)
             child_buf = parent_buf.copy()
 
             new_population.append((child_rec, child_model, child_target, child_opt, child_buf))
@@ -1450,8 +1583,8 @@ class TournamentTrainer:
                     },
                 )
                 lr = hof_rec.hyperparams["lr"]
-                hof_opt = torch.optim.AdamW(hof_model.parameters(), lr=lr, weight_decay=1e-5)
-                hof_buf = ReplayBuffer(self.config.buffer_capacity)
+                hof_opt = self._make_optimizer(hof_model, lr)
+                hof_buf = ReplayBuffer(self.config.buffer_capacity, n_step=self.config.n_step)
 
                 # Replace the worst slot (last in new_population)
                 worst_idx = max(
@@ -1731,6 +1864,22 @@ class TournamentTrainer:
             if _wandb_run is not None:
                 _wandb_run.log(metrics, step=gen)
 
+            # Periodic embedding resets (7D)
+            if (self.config.embedding_reset_interval > 0
+                    and gen % self.config.embedding_reset_interval == 0
+                    and gen < self.config.generations):
+                print(f"  Resetting embedding weights (interval={self.config.embedding_reset_interval})")
+                for _, model, target, _, _ in self.population:
+                    for m in (model, target):
+                        if hasattr(m, 'embedding'):
+                            nn.init.xavier_uniform_(m.embedding.weight)
+                        if hasattr(m, 'rank_embedding'):
+                            nn.init.xavier_uniform_(m.rank_embedding.weight)
+                        if hasattr(m, 'suit_embedding'):
+                            nn.init.xavier_uniform_(m.suit_embedding.weight)
+                        if hasattr(m, 'stage_embedding'):
+                            nn.init.xavier_uniform_(m.stage_embedding.weight)
+
             # Phase 4: Selection + Mutation (except last gen)
             if gen < self.config.generations:
                 self._select_and_mutate()
@@ -1784,7 +1933,15 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--max-train-rounds", type=int, default=5)
     p.add_argument("--separation-p", type=float, default=0.05)
     p.add_argument("--adaptive-gen-limit", type=int, default=3)
-    p.add_argument("--model-variant", type=str, default=None, choices=["v1", "v2", "v2s"])
+    p.add_argument("--model-variant", type=str, default=None, choices=["v1", "v2", "v2s", "v2sf", "v3"])
+    p.add_argument("--spectral-decoupling", action="store_true",
+                   help="Use spectral decoupling regularization (7B)")
+    p.add_argument("--lambda-sd", type=float, default=0.01,
+                   help="Spectral decoupling penalty coefficient")
+    p.add_argument("--n-step", type=int, default=1,
+                   help="N-step returns (1=standard, 2=mixed 2-step for stage-0)")
+    p.add_argument("--embedding-reset-interval", type=int, default=0,
+                   help="Reset embedding weights every N generations (0=disabled)")
     p.add_argument("--output-dir", type=Path, default=Path("data/tournament"))
     p.add_argument("--warmstart-checkpoint", type=Path, default=None)
     p.add_argument("--resume", action="store_true", help="Resume from last saved generation")
@@ -1822,6 +1979,10 @@ def parse_args(argv=None) -> TournamentConfig:
         epsilon_end=args.epsilon_end,
         reward_shaping=args.reward_shaping,
         sanity_check=args.sanity_check,
+        spectral_decoupling=args.spectral_decoupling,
+        lambda_sd=args.lambda_sd,
+        n_step=args.n_step,
+        embedding_reset_interval=args.embedding_reset_interval,
         model_variant=args.model_variant,
         output_dir=args.output_dir,
         warmstart_checkpoint=args.warmstart_checkpoint,

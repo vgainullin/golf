@@ -756,4 +756,133 @@ In every case: the dominant strategy requires simpler representational structure
 
 **Gradient surgery / PCGrad** (Yu et al., NeurIPS 2020). When gradients from different objectives conflict, project each onto the normal plane of the other. Prevents destructive interference without separate networks.
 
+## Experiment 7: Breaking the col_matches plateau (2026-03-11)
+
+### Setup
+
+Four controlled experiments, each changing one variable from the Exp 6 Run 2 baseline (hindsight DQN, eps 1.0->0.05, 20 gens, 12 agents, seed 42). Baseline reproduced first as control.
+
+### Results
+
+| Experiment | col_matches (gen 7-20) | Best solo | HoF | Hypothesis tested |
+|---|---|---|---|---|
+| Baseline | 0.261 - 0.314 | 12.03 | 13.12 | (control) |
+| 7A: Factored embeddings (v2sf) | 0.265 - 0.319 | 11.82 | 13.07 | Representation bottleneck |
+| 7B: Spectral decoupling | 0.253 - 0.315 | 11.71 | 12.73 | Gradient starvation |
+| 7C: 2-step returns | 0.256 - 0.310 | 12.27 | 13.07 | Credit assignment delay |
+| 7D: Periodic resets (every 5 gens) | 0.274 - 0.338 | 12.16 | 13.13 | Primacy bias / plasticity loss |
+
+### Key finding: representation is not the bottleneck
+
+7A gave the model factored rank+suit embeddings where same-rank cards share identical rank vectors by construction. Embedding analysis confirms:
+
+| Model | Within-rank cosine | Between-rank cosine | Separation |
+|---|---|---|---|
+| Baseline (monolithic) | 0.103 | -0.010 | +0.113 |
+| 7B Spectral (monolithic) | 0.118 | -0.012 | +0.130 |
+| 7A Factored (rank+suit) | 0.786 | +0.031 | +0.755 |
+
+7A has 6.7x stronger rank clustering. The rank embedding learned value ordering (face cards > low cards by norm) and suit embeddings are near-orthogonal (suits treated as interchangeable). The representational substrate for column matching is present. Yet col_matches didn't improve -- the agent can see rank equivalence but still doesn't exploit it.
+
+This rules out the representation bottleneck hypothesis from the Exp 6 analysis. The problem is not that the agent can't represent "same rank" -- it's that the reward signal from column matching is too delayed or too sparse relative to the immediate payoff from value swapping.
+
+### 7A: factored embeddings -- faster early learning, same ceiling
+
+Gen-by-gen comparison shows factored is consistently ahead in gen 1-10 (mean +0.031 col_matches in gen 1-6, +0.035 in gen 7-10) but the advantage fades to zero by gen 11-20. The representation gave a head start on discovering column matching but didn't raise the ceiling. Once exploration decays (epsilon drops), both converge to the same plateau.
+
+### 7B: spectral decoupling -- better solo, same col_matches
+
+Spectral decoupling (L2 penalty on Q-values, Adam instead of AdamW) improved solo score (11.71 vs 12.03) and HoF (12.73 vs 13.12) without touching col_matches. Better overall learning quality but gradient starvation is not the specific barrier to column matching.
+
+### 7C: 2-step returns -- faster gen 1, same plateau
+
+2-step returns accelerated early learning dramatically (solo 17.97 at gen 1 vs baseline's 23.18) but col_matches plateaued at the same level. Bridging the stage-0-to-stage-1 credit gap didn't help. The column matching reward is not about the 2-step delay between take and place -- it's about the much longer delay to end-of-hole scoring where column zeroing pays off.
+
+### 7D: periodic resets -- only experiment that moved the ceiling
+
+col_matches range shifted up to 0.274-0.338 (baseline: 0.261-0.314). Visible pattern around resets: gen 10 reset caused a dip (0.274) followed by recovery to 0.338 at gen 12 -- the highest col_matches in any experiment. Subsequent resets show smaller bumps. The fresh embedding weights briefly allow the agent to reorganize toward column matching before re-converging. Plasticity loss is a contributing factor but not sufficient on its own.
+
+### Synthesis
+
+No single intervention broke the plateau. The decision matrix:
+
+- **7A null, 7B null**: representation and gradient dynamics are not the bottleneck
+- **7C null**: short-horizon credit assignment (2-step) insufficient
+- **7D marginal**: plasticity loss contributes but doesn't explain the plateau alone
+- **7A early advantage + 7D ceiling bump**: both help at the margins, suggesting the problem is multifaceted
+
+The remaining hypothesis is **exploration**: eps-greedy with decaying epsilon doesn't generate enough column-matching experiences in later generations. The agent can learn from them when encountered (7A early advantage proves this) but stops encountering them. A directed exploration strategy (e.g., intrinsic reward for column matches, or Boltzmann exploration with temperature tied to column-match Q-values) may be needed rather than representation or optimization fixes.
+
+## Experiment 8: Self-attention DQN (GolfDQNv3) (2026-03-14)
+
+### Hypothesis
+
+Exp 7A showed factored embeddings guarantee rank alignment but a flat MLP over concatenated tokens can't cheaply compute cross-position rank comparisons. Self-attention makes pairwise token comparison a structural primitive: dot-product between two same-rank card embeddings naturally produces high attention weight, letting the downstream MLP read "which positions share a rank" directly. Factored embeddings + attention should be synergistic.
+
+### Architecture: GolfDQNv3
+
+```
+29 card tokens --> factored rank+suit embed --> (batch, 29, emb_dim)
+stage          --> stage embed               --> (batch,  1, emb_dim)
+                                                  |
+                                    + learned positional embeddings (30 pos)
+                                                  |
+                                    TransformerEncoder(2 layers, 4 heads, pre-norm)
+                                                  |
+                                    mean pool own cards + holding [0:7]
+                                                  |
+                                    LayerNorm --> concat deck_remaining scalar
+                                                  |
+                                    Linear(emb+1, hidden) -> ReLU
+                                    Linear(hidden, hidden) -> ReLU
+                                    Linear(hidden, 16) -> Q-values
+```
+
+- Factored embeddings: `rank_embed(14, emb//2) + suit_embed(5, emb - emb//2)`, same decomposition as v2sf
+- 2 attention layers, 4 heads (head_dim=32 at emb=128), 4x FFN expansion, no dropout, pre-norm
+- Mean pool positions [0:7] (own 6 grid cards + holding card)
+- Deck remaining: scalar, normalized /27.0, concatenated after pooling
+- MLP head: 3-layer with mutable hidden_dim, outputs 16 Q-values
+- Param count at emb=128: ~740K (hidden=512), smaller than v2s because attention replaces the massive flatten layer
+
+### Config
+
+Identical to Exp 6 Run 2 baseline: eps 1.0->0.05, 20 gens, 12 agents, 500 eps/gen, 20 eval games/matchup, hindsight reward shaping, seed 42.
+
+### Results
+
+| Gen | Best competitive | Best solo | col_matches | rev_col_match | HoF |
+|-----|-----------------|-----------|-------------|---------------|-----|
+| 1 | 26.06 | 25.66 | 0.10 | 0.02 | 26.06 |
+| 2 | 21.62 | 20.99 | 0.13 | 0.02 | 21.62 |
+| 3 | 19.67 | 19.07 | 0.17 | 0.04 | 19.67 |
+| 5 | 18.71 | 18.50 | 0.20 | 0.10 | 18.71 |
+| 7 | 17.89 | 16.90 | 0.26 | 0.06 | 18.02 |
+| 10 | 16.14 | 14.84 | 0.26 | 0.07 | 16.41 |
+| 12 | 15.71 | 14.27 | 0.30 | 0.07 | 15.76 |
+| 15 | 15.59 | 13.97 | 0.28 | 0.09 | 14.73 |
+| 17 | 13.73 | 13.03 | 0.28 | 0.05 | 13.73 |
+| 18 | 13.80 | 12.64 | 0.29 | 0.07 | 13.73 |
+| 20 | 13.24 | 13.19 | 0.25 | 0.05 | 13.24 |
+
+Champion: gen20_agent9 (v3, hidden=512, lr=4.3e-4). Best solo: **12.6** (gen 18).
+
+### Comparison with baselines
+
+| Model | Best solo | HoF (gen 20) | col_matches | rev_col_match |
+|-------|-----------|-------------|-------------|---------------|
+| v2s baseline (Exp 6 Run 2) | **12.03** | 13.12 | 0.31 | 0.06 |
+| v3 self-attention | 12.64 | 13.24 | 0.30 | 0.07 |
+| v2sf factored (Exp 7A) | 11.82 | 13.07 | 0.32 | 0.06 |
+
+### Conclusion
+
+v3 matches v2s within noise. The self-attention mechanism did not break the col_matches plateau (~0.30 for both). The learning curve shape, convergence speed, and final performance are essentially identical.
+
+The hypothesis was that attention would make pairwise rank comparison a structural primitive, enabling the agent to discover column matching. In practice, the attention heads had no more success exploiting rank structure than the flat MLP. The tournament converged all agents to hidden=512, lr~4e-4 -- the same regime v2s prefers.
+
+s1_entropy was consistently higher for v3 (2.2-2.4 vs ~2.3 for v2s), suggesting the attention model maintains slightly more diverse action distributions, but this didn't translate to better column matching.
+
+This result, combined with 7A (factored embeddings alone) and 7B (spectral decoupling), further confirms that the col_matches plateau is not a representation or architecture problem. The bottleneck is upstream: the agent doesn't encounter enough column-matching experiences under decaying epsilon to learn the strategy, regardless of how well the network can represent rank relationships.
+
 

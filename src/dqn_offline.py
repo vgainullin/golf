@@ -152,6 +152,118 @@ class GolfDQNv2Shallow(nn.Module):
         return self.head(features)
 
 
+class GolfDQNv2Factored(nn.Module):
+    """v2s with factored rank+suit embeddings instead of monolithic card embedding.
+
+    Decomposes the 53-token vocabulary into rank (14: 13 ranks + unknown)
+    and suit (5: 4 suits + unknown), concatenating their embeddings to form
+    the same-width representation as the original embedding_dim.
+    """
+
+    def __init__(self, embedding_dim: int, hidden_dim: int, num_actions: int = NUM_ACTIONS):
+        super().__init__()
+        rank_dim = embedding_dim // 2
+        suit_dim = embedding_dim - rank_dim  # handles odd embedding_dim
+        self.rank_embedding = nn.Embedding(14, rank_dim)   # 13 ranks + unknown
+        self.suit_embedding = nn.Embedding(5, suit_dim)    # 4 suits + unknown
+        self.stage_embedding = nn.Embedding(STAGE_VOCAB_SIZE, embedding_dim)
+        self.encoder = nn.Sequential(
+            nn.Linear((STATE_SEQUENCE_LENGTH_V2 + 1) * embedding_dim + 1, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.head = nn.Linear(hidden_dim, num_actions)
+
+    def forward(self, state_tokens: torch.Tensor, stages: torch.Tensor) -> torch.Tensor:
+        card_tokens = state_tokens[:, :29]
+        deck_remaining = state_tokens[:, 29].float() / 27.0
+
+        known = card_tokens < 52
+        rank_ids = torch.where(known, card_tokens % 13, torch.full_like(card_tokens, 13))
+        suit_ids = torch.where(known, card_tokens // 13, torch.full_like(card_tokens, 4))
+        embeds = torch.cat([self.rank_embedding(rank_ids), self.suit_embedding(suit_ids)], dim=-1)
+
+        stage_embed = self.stage_embedding(stages).unsqueeze(1)
+        combined = torch.cat([embeds, stage_embed], dim=1)
+        flat = combined.view(combined.size(0), -1)
+        flat = torch.cat([flat, deck_remaining.unsqueeze(1)], dim=1)
+        features = self.encoder(flat)
+        return self.head(features)
+
+
+class GolfDQNv3(nn.Module):
+    """Self-attention DQN with factored rank+suit embeddings.
+
+    Uses TransformerEncoder over card token embeddings to enable
+    pairwise rank comparison across positions (for column matching).
+    Mean-pools own cards + holding, then MLP head to Q-values.
+    """
+
+    def __init__(self, embedding_dim: int, hidden_dim: int, num_actions: int = NUM_ACTIONS):
+        super().__init__()
+        rank_dim = embedding_dim // 2
+        suit_dim = embedding_dim - rank_dim
+        self.rank_embedding = nn.Embedding(14, rank_dim)   # 13 ranks + unknown
+        self.suit_embedding = nn.Embedding(5, suit_dim)    # 4 suits + unknown
+        self.stage_embedding = nn.Embedding(STAGE_VOCAB_SIZE, embedding_dim)
+
+        # Learned positional embeddings for 30 positions (29 cards + 1 stage)
+        self.pos_embedding = nn.Embedding(30, embedding_dim)
+
+        # Pre-norm transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embedding_dim,
+            nhead=4,
+            dim_feedforward=4 * embedding_dim,
+            dropout=0.0,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=2, enable_nested_tensor=False,
+        )
+
+        self.pool_norm = nn.LayerNorm(embedding_dim)
+
+        # MLP head: pooled embedding + deck_remaining scalar
+        self.mlp = nn.Sequential(
+            nn.Linear(embedding_dim + 1, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_actions),
+        )
+
+    def forward(self, state_tokens: torch.Tensor, stages: torch.Tensor) -> torch.Tensor:
+        card_tokens = state_tokens[:, :29]
+        deck_remaining = state_tokens[:, 29].float() / 27.0
+
+        # Factored card embeddings
+        known = card_tokens < 52
+        rank_ids = torch.where(known, card_tokens % 13, torch.full_like(card_tokens, 13))
+        suit_ids = torch.where(known, card_tokens // 13, torch.full_like(card_tokens, 4))
+        card_embeds = torch.cat([self.rank_embedding(rank_ids), self.suit_embedding(suit_ids)], dim=-1)
+
+        stage_embed = self.stage_embedding(stages).unsqueeze(1)  # (B, 1, emb)
+        tokens = torch.cat([card_embeds, stage_embed], dim=1)    # (B, 30, emb)
+
+        # Add positional embeddings
+        positions = torch.arange(30, device=tokens.device)
+        tokens = tokens + self.pos_embedding(positions)
+
+        # Transformer
+        tokens = self.transformer(tokens)
+
+        # Mean pool own 6 grid cards (0:6) + holding (6) = positions 0:7
+        pooled = tokens[:, :7].mean(dim=1)
+        pooled = self.pool_norm(pooled)
+
+        # Concat deck_remaining scalar, MLP head
+        features = torch.cat([pooled, deck_remaining.unsqueeze(1)], dim=1)
+        return self.mlp(features)
+
+
 class GolfDQNv2(nn.Module):
     """Expanded DQN with full table visibility (v2 observation)."""
 
