@@ -886,3 +886,219 @@ s1_entropy was consistently higher for v3 (2.2-2.4 vs ~2.3 for v2s), suggesting 
 This result, combined with 7A (factored embeddings alone) and 7B (spectral decoupling), further confirms that the col_matches plateau is not a representation or architecture problem. The bottleneck is upstream: the agent doesn't encounter enough column-matching experiences under decaying epsilon to learn the strategy, regardless of how well the network can represent rank relationships.
 
 
+## Experiment 9: Optuna exploration-focused search (2026-03-14)
+
+### Hypothesis
+
+Experiments 7-8 ruled out representation and architecture as the col_matches bottleneck. The remaining hypothesis: eps-greedy with decaying epsilon doesn't generate enough column-matching experiences before exploitation takes over. The agent learns value swapping first (simpler), locks in, and never discovers systematic column matching.
+
+### Setup
+
+Fixed small v3 (emb=64, hidden=128, ~96K params) and searched 9 exploration-related training parameters using Optuna multi-objective optimization (minimize solo_final@gen10 and solo_mid@gen5).
+
+**Fixed params:** model=v3, emb=64, hidden=[128], gamma=0.99, tau=0.0, mutation_rate=0.3, mutation_sigma=0.2, reward_shaping=hindsight
+
+**Search space:**
+
+| Param | Range |
+|-------|-------|
+| epsilon_start | [0.5, 1.0] |
+| epsilon_end | [0.01, 0.20] |
+| lr_low | [1e-5, 1e-3] log |
+| lr_high | [1e-3, 1e-2] log |
+| updates_per_episode | [2, 16] |
+| target_update_interval | [100, 1000] |
+| buffer_capacity | {50k, 100k, 200k} |
+| batch_size | {128, 256, 512} |
+| episodes_per_gen | {250, 500, 1000} |
+
+**Tournament config:** 10 gens, 6 agents, 20 eval games/matchup, max 3 adaptive rounds.
+
+### Results (12 completed trials)
+
+| Trial | solo_final | solo_mid | eps | lr_low | lr_high | ups | target | eps/gen | batch | buf |
+|-------|-----------|---------|-----|--------|---------|-----|--------|---------|-------|-----|
+| **0** | **12.75** | **12.54** | .80->.06 | 2.7e-4 | 1.2e-3 | 7 | 803 | 1000 | 512 | 50k |
+| 2 | 13.58 | 14.42 | .89->.19 | 2.5e-4 | 1.7e-3 | 10 | 334 | 1000 | 128 | 50k |
+| 7 | 13.59 | 15.93 | .68->.14 | 6.5e-4 | 4.8e-3 | 5 | 320 | 1000 | 128 | 50k |
+| 4 | 13.78 | 18.01 | .75->.06 | 2.7e-5 | 4.8e-3 | 11 | 506 | 1000 | 128 | 50k |
+| 5 | 14.07 | 18.16 | .98->.03 | 8.7e-5 | 1.4e-3 | 5 | 140 | 1000 | 256 | 200k |
+| 3 | 14.88 | 17.14 | .85->.18 | 1.2e-4 | 5.0e-3 | 4 | 844 | 500 | 512 | 50k |
+| 10 | 15.42 | 20.47 | .81->.08 | 2.7e-4 | 9.4e-3 | 3 | 314 | 500 | 512 | 200k |
+| 1 | 15.51 | 15.67 | .84->.11 | 1.0e-4 | 3.2e-3 | 12 | 108 | 500 | 512 | 50k |
+| 11 | 17.37 | 19.88 | .89->.02 | 4.1e-4 | 2.2e-3 | 11 | 610 | 250 | 128 | 100k |
+| 9 | 17.84 | 19.83 | .69->.09 | 7.6e-4 | 4.2e-3 | 6 | 935 | 250 | 128 | 100k |
+| 8 | 17.90 | 19.23 | .91->.03 | 1.4e-5 | 7.5e-3 | 7 | 525 | 500 | 128 | 200k |
+| 6 | 20.12 | 20.22 | .52->.17 | 7.6e-5 | 1.5e-3 | 2 | 888 | 250 | 512 | 200k |
+
+### Key findings
+
+**1. episodes_per_gen is the dominant factor.** All top-5 trials used eps/gen=1000 (the search ceiling). The 250 and 500 trials cluster at the bottom. More episodes per generation = more chances to discover column-matching transitions at the current epsilon level. The search space capped eps/gen at 1000, so we don't know if higher values would help further.
+
+**2. buffer_capacity=50k beats larger buffers.** Every top-4 trial used 50k. Larger buffers (100k, 200k) dilute recent column-match transitions with older data, slowing learning. Smaller buffers keep the training distribution closer to current policy behavior.
+
+**3. col_matches reached 0.34 but didn't sustain above 0.30.** Trial 0 peaked at col=0.34 in gen 8 but settled back to ~0.30 by gen 10. The solo score improvement (12.75 vs previous best 12.3) came from better training dynamics, not a breakthrough in column matching.
+
+**4. Best hyperparameter profile:**
+- epsilon: 0.80 -> 0.06 (high start, low floor)
+- lr: 2.7e-4 to 1.2e-3 (narrow, moderate range)
+- updates_per_episode: 5-7 (moderate)
+- target_update_interval: 300-800 (not too fast)
+- batch_size: 512 preferred for solo_final, 128 competitive for mid-training
+- buffer: 50k
+
+**5. What doesn't matter much:** epsilon_start is broadly good in [0.7, 0.9] -- all trials had high starts. Very low lr_low (< 1e-4) hurts convergence speed (trial 4: good final but terrible mid). Very fast target updates (108) hurt (trial 1).
+
+### Limitations
+
+- Only 12 trials completed in a 9D space -- sparse coverage
+- eps/gen=1000 was the ceiling and clearly optimal, so we can't distinguish "1000 is enough" from "more would be better"
+- All trials used the same small v3 architecture (96K params)
+- The col_matches plateau (~0.30) was not clearly broken -- needs further investigation
+
+Raw output: `data/optuna_v3_explore_v2_stdout.log`
+Optuna DB: `data/optuna_v3_explore_v2.db`
+
+### Round 2: narrowed search (2026-03-15)
+
+Narrowed bounds based on round 1 findings. Key changes:
+- eps/gen raised to {1000, 1500, 2000, 3000}
+- buffer narrowed to {20k, 30k, 50k}
+- batch_size: {512, 1024, 2048}
+- target_update: [400, 1000], epsilon_start: [0.7, 1.0], epsilon_end: [0.01, 0.10]
+- lr_low: [1e-4, 1e-3], lr_high: [1e-3, 5e-3]
+
+**Results (4 completed trials):**
+
+| Trial | solo_final | solo_mid | eps/gen | buf | batch | eps | lr_low | lr_high | ups | target |
+|-------|-----------|---------|---------|-----|-------|-----|--------|---------|-----|--------|
+| **1** | **12.55** | **12.58** | 1500 | 50k | 512 | .84->.06 | 1.0e-4 | 4.0e-3 | 7 | 821 |
+| 0 | 14.40 | 15.38 | 1000 | 20k | 512 | .81->.07 | 2.1e-4 | 4.6e-3 | 7 | 923 |
+| 2 | 16.28 | 16.26 | 1000 | 20k | 512 | .71->.07 | 1.7e-4 | 2.8e-3 | 7 | 858 |
+| 3 | 19.08 | 19.72 | 3000 | 30k | 2048 | .99->.05 | 5.8e-4 | 1.9e-3 | 5 | 603 |
+
+**New best: trial 1 at 12.55** (beats round 1's 12.75). The improvement came from eps/gen=1500 with buf=50k.
+
+### Key findings from round 2
+
+**1. eps/gen=1500 > 1000, but 3000 is catastrophic.** The ratio of eps/gen to buffer size matters critically. Trial 1 (1500/50k = 3% fill per gen) worked well. Trial 3 (3000/30k = 100% fill per gen) was the worst -- buffer completely overwritten each gen, destroying continuity. Sweet spot: eps/gen should be ~3% of buffer.
+
+**2. buf=20k consistently underperforms.** Trials 0 and 2 both used buf=20k with 1000 eps/gen (5% fill rate) and scored 14.4 and 16.3. Even with the same eps/gen, 20k is too small -- too little history for stable Q-learning.
+
+**3. batch=2048 hurt.** Trial 3 with batch=2048 and buf=30k samples 7% of the buffer per batch. Combined with high eps/gen, this caused severe overfitting to whatever happened to be in the buffer.
+
+**4. Convergence happens by gen 4-5.** Examining per-gen trajectories across both rounds: solo scores flatten by gen 4-5 and oscillate for the remaining gens. Gens 6-10 contribute noise, not learning. Future searches should use 6 gens to save ~40% runtime.
+
+**5. Stable hyperparameter core emerging:**
+- epsilon: ~0.8 -> ~0.06
+- updates_per_episode: 7
+- target_update_interval: ~800
+- lr_low: ~1-3e-4, lr_high: ~1-4e-3
+- buf=50k, batch=512
+
+Raw output: `data/optuna_v3_explore_r2_stdout.log`
+Optuna DB: `data/optuna_v3_explore_r2.db`
+
+### Round 4: informed ranges + hidden_dim search (2026-03-16)
+
+Tightened search space based on r2 findings. Key changes from r2:
+- **lr_high**: [2e-3, 5e-3] (cut the low end that never worked)
+- **buffer**: {50k, 75k, 100k} (raised floor -- 20k/30k consistently underperformed)
+- **batch**: {256, 512} (dropped 2048 which was catastrophic)
+- **eps/gen**: {1000, 1500, 2000} (dropped 3000 which was worst)
+- **hidden_dim**: {128, 256, 512} (was fixed at 128 -- now searched)
+- Tightened epsilon, lr_low, updates ranges around what worked
+
+Fast trials: 6 gens, 1 agent, 1 adaptive round, 100 solo eval games. ~5-7 min/trial.
+
+**Results (50 completed trials):**
+
+Top 10 by final score:
+
+| Trial | Final | Mid | Hidden | lr_high | buf | eps/gen | batch | updates | target |
+|-------|-------|-----|--------|---------|-----|---------|-------|---------|--------|
+| **27** | **12.05** | 16.20 | 256 | 2.4e-3 | 100k | 1500 | 512 | 8 | 843 |
+| 41 | 12.22 | 15.42 | 512 | 4.0e-3 | 50k | 1500 | 256 | 7 | 755 |
+| 33 | 12.48 | 12.70 | 512 | 3.5e-3 | 50k | 1500 | 256 | 9 | 867 |
+| **4** | 12.59 | 13.33 | 512 | 4.6e-3 | 50k | 1000 | 256 | 9 | 743 |
+| 19 | 12.62 | 13.79 | 512 | 3.9e-3 | 100k | 2000 | 512 | 7 | 974 |
+| 25 | 12.66 | 13.48 | 256 | 3.1e-3 | 50k | 2000 | 512 | 9 | 742 |
+| 29 | 12.80 | 14.56 | 512 | 2.0e-3 | 100k | 1000 | 512 | 7 | 615 |
+| 14 | 12.82 | 19.42 | 256 | 3.8e-3 | 100k | 2000 | 512 | 7 | 650 |
+| 36 | 12.93 | 14.20 | 128 | 2.4e-3 | 75k | 1500 | 512 | 9 | 760 |
+| 43 | 13.19 | 16.86 | 512 | 3.4e-3 | 100k | 1000 | 512 | 9 | 610 |
+
+**New best: trial 4 peaked at 11.98 at gen 5** (best v3 score ever, beats v2s record of 12.3). Trial 27 best at gen 6 (12.05).
+
+### Per-generation trajectories (top 5)
+
+| Trial | Gen 1 | Gen 2 | Gen 3 | Gen 4 | Gen 5 | Gen 6 | Best | @Gen |
+|-------|-------|-------|-------|-------|-------|-------|------|------|
+| 27 | 17.96 | 18.01 | 16.20 | 13.83 | 12.98 | **12.05** | 12.05 | 6 |
+| 41 | 19.14 | 18.78 | 15.42 | **12.57** | 13.24 | 12.22 | 12.22 | 6 |
+| 33 | 18.39 | 15.58 | **12.70** | 13.28 | 13.39 | 12.48 | 12.48 | 6 |
+| 4 | 20.98 | 15.42 | 13.33 | 12.99 | **11.98** | 12.59 | 11.98 | 5 |
+| 19 | 14.64 | 13.44 | 13.79 | 12.71 | 12.78 | **12.62** | 12.62 | 6 |
+
+All top trials still improving at gen 6 -- 6 generations is not enough for convergence. Trial 4 hit 11.98 at gen 5 then regressed to 12.59, suggesting training instability.
+
+### Regression analysis: training instability
+
+Many trials showed significant regression from peak score. Of 50 trials, ~1/3 lost 3+ points from their best generation.
+
+Worst regressions:
+
+| Trial | Best | Final | Regression |
+|-------|------|-------|------------|
+| 23 | 17.2 | 25.3 | +8.1 |
+| 46 | 14.3 | 21.1 | +6.9 |
+| 40 | 15.0 | 21.9 | +6.8 |
+| 24 | 15.7 | 22.4 | +6.7 |
+| 10 | 17.2 | 23.8 | +6.7 |
+
+**Correlation of hyperparameters with regression:**
+
+| Param | Correlation | Interpretation |
+|-------|-------------|----------------|
+| episodes_per_gen | -0.257 | More data per gen = more stable |
+| batch_size | -0.235 | Larger batches = lower gradient variance |
+| hidden_dim | -0.142 | Larger models slightly more stable |
+| epsilon_start | -0.143 | Higher initial exploration slightly helps |
+
+Comparing stable (regression < 1) vs unstable (regression > 3) trials:
+
+| Param | Stable mean | Unstable mean | Delta |
+|-------|-------------|---------------|-------|
+| episodes_per_gen | 1500 | 1000 | -54% |
+| batch_size | 512 | 256 | -52% |
+| hidden_dim | ~350 | ~270 | -22% |
+
+**The two dominant stability factors are episodes_per_gen and batch_size.** Fast-learning configs (eps/gen=1000, batch=256) can hit great peak scores (trial 4: 11.98) but are prone to catastrophic regression. Stable configs (eps/gen=1500, batch=512) converge more slowly but hold their gains (trial 27: monotonic descent to 12.05).
+
+### Key findings from round 4
+
+**1. hidden_dim matters.** 256 and 512 dominate the top 10 (9/10). Only one 128 trial cracked the top 10 (trial 36 at 12.93). The v3 architecture benefits from larger hidden dims despite having only 1 agent per trial.
+
+**2. eps/gen=1500 is the sweet spot for stability.** Top 3 finals all used 1500. It balances data volume (enough experiences per gen) with buffer freshness (3% fill at buf=50k, 1.5% at 100k).
+
+**3. lr_high range is broad.** 2.0e-3 to 4.6e-3 all work in the top 10. No need to narrow further.
+
+**4. buf=50k and 100k both work.** No clear winner -- probably depends on eps/gen ratio.
+
+**5. The stability-performance tradeoff.** Trial 4 (batch=256, eps/gen=1000) hit the highest peak but regressed. Trial 27 (batch=512, eps/gen=1500) had the best final score with monotonic improvement. For a longer run, trial 27's stable config is the better foundation.
+
+### Recommended config for extended training
+
+Based on trial 27 (best final, stable trajectory, still improving at gen 6):
+
+```
+model=v3, hidden=256, emb=64
+eps/gen=1500, buf=100k, batch=512
+eps=0.87->0.05, lr=8.3e-5 to 2.4e-3
+updates=8, target_update=843
+gamma=0.99, tau=0.0, reward_shaping=hindsight
+```
+
+Optuna DB: `data/optuna_v3_explore_r4.db`
+Trial data: `data/optuna_trials/v3-explore-r4/`
+
