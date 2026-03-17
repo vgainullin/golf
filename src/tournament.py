@@ -150,6 +150,7 @@ class TournamentConfig:
     matches_per_pair: int = 4       # games per matchup in round-robin
     match_holes: int = 9
     eval_games_per_matchup: int = 100  # per C(n,2) matchup; total per agent = (n-1) * this
+    solo_eval_games: int = 500         # solo eval games per agent
 
     # Reward shaping
     reward_shaping: str = "hindsight"  # "hindsight" or "none"
@@ -1348,23 +1349,28 @@ class TournamentTrainer:
             agent_scores[b_idx].append(totals[2])
 
         for i, (rec, _, _, _, _) in enumerate(self.population):
-            all_scores = torch.cat(agent_scores[i]) / holes
-            avg = all_scores.mean().item()
-            rec.hyperparams["avg_score"] = round(avg, 4)
-            rec.hyperparams["eval_games"] = len(all_scores)
-            rec.hyperparams["_game_scores"] = all_scores.tolist()
+            if agent_scores[i]:
+                all_scores = torch.cat(agent_scores[i]) / holes
+                avg = all_scores.mean().item()
+                rec.hyperparams["avg_score"] = round(avg, 4)
+                rec.hyperparams["eval_games"] = len(all_scores)
+                rec.hyperparams["_game_scores"] = all_scores.tolist()
 
         # Solo eval: [DQN, R, H, R] for absolute strength
-        print(f"  Solo eval [DQN, R, H, R], 500 games each")
+        solo_n = self.config.solo_eval_games
+        print(f"  Solo eval [DQN, R, H, R], {solo_n} games each")
         for i, (rec, model, _, _, _) in enumerate(self.population):
             model.eval()
             variant = rec.hyperparams.get("model_variant", "v1")
             obs_fn = get_obs_fn(variant)
             avgs, _, behavior = self._run_eval_config(
                 ["dqn", "random", "heuristic", "random"],
-                model=model, obs_fn=obs_fn, num_games=500, holes=holes,
+                model=model, obs_fn=obs_fn, num_games=solo_n, holes=holes,
             )
             rec.hyperparams["solo_score"] = round(avgs[0], 4)
+            # Use solo score as avg_score when no competitive matchups
+            if not matchups:
+                rec.hyperparams["avg_score"] = rec.hyperparams["solo_score"]
             for k, v in behavior[0].items():
                 rec.hyperparams[k] = v
 
@@ -1925,11 +1931,17 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--matches-per-pair", type=int, default=4)
     p.add_argument("--match-holes", type=int, default=9)
     p.add_argument("--eval-games-per-matchup", type=int, default=100)
+    p.add_argument("--solo-eval-games", type=int, default=500)
     p.add_argument("--buffer-capacity", type=int, default=100_000)
     p.add_argument("--tau", type=float, default=0.0)
     p.add_argument("--target-update-interval", type=int, default=500)
     p.add_argument("--epsilon-start", type=float, default=0.3)
     p.add_argument("--epsilon-end", type=float, default=0.05)
+    p.add_argument("--gamma", type=float, default=0.99)
+    p.add_argument("--lr-range", type=float, nargs=2, default=[1e-4, 3e-3],
+                   metavar=("LR_LOW", "LR_HIGH"))
+    p.add_argument("--embedding-dim", type=int, default=128)
+    p.add_argument("--hidden-dim-choices", type=int, nargs="+", default=[128, 256, 512, 1024])
     p.add_argument("--max-train-rounds", type=int, default=5)
     p.add_argument("--separation-p", type=float, default=0.05)
     p.add_argument("--adaptive-gen-limit", type=int, default=3)
@@ -1977,6 +1989,11 @@ def parse_args(argv=None) -> TournamentConfig:
         adaptive_gen_limit=args.adaptive_gen_limit,
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
+        gamma=args.gamma,
+        lr_range=tuple(args.lr_range),
+        embedding_dim=args.embedding_dim,
+        hidden_dim_choices=args.hidden_dim_choices,
+        solo_eval_games=args.solo_eval_games,
         reward_shaping=args.reward_shaping,
         sanity_check=args.sanity_check,
         spectral_decoupling=args.spectral_decoupling,
