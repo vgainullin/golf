@@ -9,6 +9,7 @@ dependencies = [
     "torch",
     "huggingface_hub",
     "wandb",
+    "optuna",
 ]
 
 [build-system]
