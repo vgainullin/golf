@@ -282,6 +282,8 @@ Evaluated each strategy in [STRATEGY, Random, Random, Random] config, 2000 games
 | Simple (take low + random place) | 22.4 | 0.22 | 0.31 | 0.00 | 1.8 |
 | Heuristic (column-aware) | 13.6 | 0.53 | 0.35 | 0.00 | 2.5 |
 | Improved (place at revealed too) | 8.1 | 0.70 | 0.34 | 0.33 | 2.4 |
+
+**Note:** The 8.1 score is measured in `[improved, R, R, R]` -- three random opponents. In the DQN solo eval config `[player, R, H, R]` (one heuristic opponent), the improved heuristic scores **10.52** (5000 games, confirmed). All DQN solo scores in this document use `[DQN, R, H, R]` and should be compared against 10.52, not 8.1.
 | simple_s0 + heur_s1 | 15.0 | 0.40 | 0.31 | 0.00 | 2.5 |
 | heur_s0 + simple_s1 | 22.2 | 0.27 | 0.37 | 0.00 | 1.8 |
 
@@ -472,9 +474,9 @@ Champion eval (2000 games, [DQN, R, H, R]):
 |-------|-------|-----|-----|-----|----------|
 | Heuristic | 13.9 | 0.55 | 0.00 | 0.00 | Column matching at unrevealed positions only |
 | Hindsight DQN | 12.3 | 0.30 | 0.28 | 0.06 | Value swapping at revealed + some column matching |
-| Improved heur | 8.1 | 0.70 | 0.33 | n/a | Both strategies combined |
+| Improved heur | 10.52 | 0.70 | 0.33 | n/a | Both strategies combined (vs [R,H,R]) |
 
-The DQN found a **complementary strategy** to the heuristic. The heuristic gets value from column matching (col=0.55) but never touches revealed cards. The DQN gets value from replacing revealed high cards with lower ones (rev=0.28) but doesn't systematically column match. Combining both strategies (as the improved heuristic does at 8.1) is the theoretical ceiling.
+The DQN found a **complementary strategy** to the heuristic. The heuristic gets value from column matching (col=0.55) but never touches revealed cards. The DQN gets value from replacing revealed high cards with lower ones (rev=0.28) but doesn't systematically column match. Combining both strategies (as the improved heuristic does) is the goal. The improved heuristic scores 10.52 in the same `[player, R, H, R]` eval config used for DQN (8.1 is its score vs three random opponents, a different and easier config).
 
 ---
 
@@ -1210,9 +1212,9 @@ The agent's strategy has evolved through four distinct phases:
 | Exp 6 DQN (20 gens) | 12.3 | 0.30 | 0.28 | 0.06 | Value swapping + some col matching |
 | Exp 10 DQN (100 gens) | 10.9 | 0.45 | 0.20 | 0.10 | Both strategies, increasingly targeted |
 | **Exp 10 DQN (150 gens)** | **9.67** | **0.63** | **0.18** | **0.15** | **Both strategies, col > heuristic** |
-| Improved heuristic | 8.1 | 0.70 | 0.33 | n/a | Both strategies combined (hardcoded) |
+| Improved heuristic | 10.52 | 0.70 | 0.33 | n/a | Both strategies combined (hardcoded, [R,H,R] config) |
 
-The agent has closed ~63% of the gap between the 20-gen DQN (12.3) and the improved heuristic ceiling (8.1). Its column matching now *exceeds* the base heuristic (0.63 vs 0.53) while also using revealed-card replacement (rev=0.18) that the heuristic never does. The remaining 1.6-point gap to the improved heuristic (8.1) likely comes from the improved heuristic's higher rev_replace (0.33 vs 0.18) and col (0.70 vs 0.63).
+The agent has **already beaten the improved heuristic** (9.67 vs 10.52 in the same `[player, R, H, R]` eval config). Note: the improved heuristic scores 8.1 when evaluated against three random opponents `[improved, R, R, R]` -- an easier table than the DQN's eval which includes one heuristic opponent. All scores in this table use the `[player, R, H, R]` config. The remaining behavioral gap is rev_replace (0.18 vs 0.33) and col (0.63 vs 0.70) -- the DQN is finding a path to the same behavioral profile through learning rather than hard-coded rules.
 
 ### The bitter lesson, revisited
 
@@ -1222,12 +1224,35 @@ Naive scaling (more generations with monotonic epsilon decay) doesn't work -- co
 
 Sutton's bitter lesson holds, but with a refinement: the general method (DQN + epsilon-greedy) does work, given correct training signals (Exp 5-6) and sufficient *structured* compute (cyclic annealing, not just more of the same). The 150-gen cyclic run uses ~20x the compute of the original 20-gen experiment, but the improvement is not 20x -- it's the cycling structure that unlocks it.
 
+### Extended training: cycles 5-7 (gens 151-300)
+
+Training continued beyond the 150-gen result with three more cycles:
+
+| Cycle | Gens | Eps restart | Best solo [R,H,R] | Best col |
+|-------|------|------------|-------------------|---------|
+| 5 | 151-200 | 0.252 | 9.349 | 0.73 |
+| 6 | 201-250 | 0.212 | **9.101** | 0.75 |
+| 7 | 251-300 | 0.185 | ongoing | 0.74+ |
+
+Each cycle continued to push col higher (0.73, 0.75) as the population consolidated column matching.
+
+**Beating the improved heuristic on its own benchmark (2026-03-18):**
+
+The original 8.1 improved heuristic score was measured in `[player, R, R, R]` (3 random opponents). Running the gen 272 champion (mid-cycle 7, still training) in the same config:
+
+| Agent | Score vs [R,R,R] |
+|-------|-----------------|
+| Improved heuristic (hardcoded) | 8.10 |
+| **DQN gen 272 champion** | **7.92** |
+
+The DQN beats the improved heuristic even in the config that was originally favorable to the heuristic. This is mid-cycle 7 -- training has not yet completed the exploitation phase (eps=0.13 at gen 272, still above the low of 0.051).
+
 ### Data preservation
 
 All artifacts saved in `data/exp9_v3_extended/`:
-- `metrics_log.jsonl` -- per-gen metrics (150 entries)
-- `config.json` -- hyperparameters + resume history
-- `resume_r1.log` through `resume_r5.log` -- full training logs per resume
+- `metrics_log.jsonl` -- per-gen metrics
+- `config.json` -- hyperparameters + resume history (7 cycles)
+- `resume_r1.log` through `resume_r7.log` -- full training logs per resume
 - Per-generation directories with agent checkpoints and summaries
 - `champion.pt`, `hall_of_fame.pt` -- best models
 - Total size: ~1.5 GB (dominated by per-gen checkpoints)
