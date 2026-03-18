@@ -57,6 +57,55 @@ def run_eval(s0_fn, s1_fn, num_games: int, holes: int, device: torch.device) -> 
     return [t.mean().item() / holes for t in totals]
 
 
+def run_mixed_eval(seat_fns: list, num_games: int, holes: int, device: torch.device) -> float:
+    """Run games with per-seat (s0_fn, s1_fn) tuples. Returns seat-0 avg score/hole.
+
+    Matches the DQN solo eval config: seat 0 = agent under test, others = opponents.
+    """
+    N = num_games
+    total = torch.zeros(N, dtype=torch.float32, device=device)
+
+    for hole in range(1, holes + 1):
+        state = reset_games(N, device)
+
+        for _ in range(30):
+            if state.done.all():
+                break
+
+            for pid in range(4):
+                active = ~state.done
+                back_to_trigger = state.last_turn & (state.end_game_player == pid)
+                state.done = state.done | (back_to_trigger & active)
+                active = ~state.done
+                if not active.any():
+                    break
+
+                s0_fn, s1_fn = seat_fns[pid]
+
+                state.current_stage.fill_(0)
+                actions_s0 = s0_fn(state, pid)
+                step_stage0(state, actions_s0, pid)
+                if state.done.all():
+                    break
+
+                state.current_stage.fill_(1)
+                actions_s1 = s1_fn(state, pid)
+                step_stage1(state, actions_s1, pid)
+
+                all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                newly_last = active & all_rev & (~state.last_turn)
+                state.last_turn = state.last_turn | newly_last
+                state.end_game_player = torch.where(
+                    newly_last,
+                    torch.full_like(state.end_game_player, pid),
+                    state.end_game_player,
+                )
+
+        total += compute_final_score(state.player_cards[:, 0, :], device)
+
+    return total.mean().item() / holes
+
+
 def print_result(name, scores):
     avg = sum(scores) / 4
     std = (sum((s - avg) ** 2 for s in scores) / 4) ** 0.5
@@ -95,6 +144,32 @@ def main():
     for i in range(1, len(names)):
         delta = results[names[i - 1]] - results[names[i]]
         print(f"  {names[i-1]:16s} -> {names[i]:16s}: {delta:+.2f} pts")
+
+    # --- Solo eval: [player, R, H, R] matching DQN tournament eval config ---
+    print(f"\n=== Solo eval [player, R, H, R] ({G} games, {H} holes) ===")
+    print(f"  Matches DQN tournament solo eval config exactly (seat 0 score only)")
+    print(f"{'':18s}  seat0")
+
+    rand = (random_stage0, random_stage1)
+    heur = (heuristic_stage0, heuristic_stage1)
+    solo_variants = [
+        ("random",   (random_stage0,    random_stage1)),
+        ("simple",   (simple_stage0,    simple_stage1)),
+        ("base",     (heuristic_stage0, heuristic_stage1)),
+        ("improved", (heuristic_stage0, improved_stage1)),
+    ]
+    solo_results = {}
+    for name, agent in solo_variants:
+        seat_fns = [agent, rand, heur, rand]
+        score = run_mixed_eval(seat_fns, G, H, device)
+        print(f"  {name:16s} {score:6.2f}")
+        solo_results[name] = score
+
+    print()
+    solo_names = list(solo_results.keys())
+    for i in range(1, len(solo_names)):
+        delta = solo_results[solo_names[i - 1]] - solo_results[solo_names[i]]
+        print(f"  {solo_names[i-1]:16s} -> {solo_names[i]:16s}: {delta:+.2f} pts")
 
     # --- Cutoff sweeps ---
     cutoffs = list(range(0, 12))
