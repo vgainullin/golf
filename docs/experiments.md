@@ -1232,27 +1232,41 @@ Training continued beyond the 150-gen result with three more cycles:
 |-------|------|------------|-------------------|---------|
 | 5 | 151-200 | 0.252 | 9.349 | 0.73 |
 | 6 | 201-250 | 0.212 | **9.101** | 0.75 |
-| 7 | 251-300 | 0.185 | ongoing | 0.74+ |
+| 7 | 251-300 | 0.185 | 9.15 | 0.73 |
 
-Each cycle continued to push col higher (0.73, 0.75) as the population consolidated column matching.
+**Diminishing returns:** Per-cycle solo improvement was -1.19 (cycle 4), -0.33 (cycle 5), -0.24 (cycle 6), +0.05 (cycle 7). Cyclic epsilon annealing has reached its ceiling for this configuration. Col_matches also plateaued at 0.70-0.75 after cycle 5.
+
+**Final all-cycle summary:**
+
+| Cycle | Gens | Best solo [R,H,R] | Col end | Improvement |
+|-------|------|-------------------|---------|-------------|
+| 1 | 1-20 | 11.98 | 0.32 | baseline |
+| 2 | 21-40 | 11.49 | 0.37 | -0.49 |
+| 3 | 57-100 | 10.86 | 0.46 | -0.63 |
+| 4 | 101-150 | **9.67** | 0.61 | **-1.19** |
+| 5 | 151-200 | 9.35 | 0.70 | -0.32 |
+| 6 | 201-250 | 9.10 | 0.73 | -0.25 |
+| 7 | 251-300 | 9.15 | 0.71 | +0.05 |
 
 **Beating the improved heuristic on its own benchmark (2026-03-18):**
 
-The original 8.1 improved heuristic score was measured in `[player, R, R, R]` (3 random opponents). Running the gen 272 champion (mid-cycle 7, still training) in the same config:
+The original 8.1 improved heuristic score was measured in `[player, R, R, R]` (3 random opponents). Running the gen 272 champion (mid-cycle 7) in the same config:
 
 | Agent | Score vs [R,R,R] |
 |-------|-----------------|
 | Improved heuristic (hardcoded) | 8.10 |
 | **DQN gen 272 champion** | **7.92** |
 
-The DQN beats the improved heuristic even in the config that was originally favorable to the heuristic. This is mid-cycle 7 -- training has not yet completed the exploitation phase (eps=0.13 at gen 272, still above the low of 0.051).
+The DQN beats the improved heuristic on both eval configs. The remaining behavioral gap is rev_replace (0.18-0.20 vs 0.33) -- the agent is column matching well but not yet replacing revealed cards as aggressively as the improved heuristic. Cyclic epsilon alone is not closing this gap; a targeted intervention is needed.
+
+**Visualization:** `scripts/plot_training_progress.py` generates a 3-panel plot (solo score, behavioral metrics, epsilon schedule) from `metrics_log.jsonl`. The plateau from cycle 5 onward is clearly visible.
 
 ### Data preservation
 
 All artifacts saved in `data/exp9_v3_extended/`:
 - `metrics_log.jsonl` -- per-gen metrics
 - `config.json` -- hyperparameters + resume history (7 cycles)
-- `resume_r1.log` through `resume_r7.log` -- full training logs per resume
+- `resume_r1.log` through `resume_r7.log` -- full training logs per resume (7 cycles, 300 gens total)
 - Per-generation directories with agent checkpoints and summaries
 - `champion.pt`, `hall_of_fame.pt` -- best models
 - Total size: ~1.5 GB (dominated by per-gen checkpoints)
