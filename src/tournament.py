@@ -137,6 +137,7 @@ class TournamentConfig:
     # Exploration
     epsilon_start: float = 0.3
     epsilon_end: float = 0.05
+    cycle_length: int = 0   # 0 = single linear decay; >0 = cyclic annealing (restart every N gens)
 
     # Replay buffer (per agent)
     buffer_capacity: int = 100_000
@@ -1114,7 +1115,12 @@ class TournamentTrainer:
     def _train_generation(self) -> None:
         """Train each agent in the population using vectorized episodes."""
         n_eps = self.config.episodes_per_gen
-        progress = (self.generation - 1) / max(1, self.config.generations - 1)
+        if self.config.cycle_length > 0:
+            # Cyclic annealing: epsilon decays from eps_start to eps_end over each cycle
+            cycle_gen = (self.generation - 1) % self.config.cycle_length
+            progress = cycle_gen / max(1, self.config.cycle_length - 1)
+        else:
+            progress = (self.generation - 1) / max(1, self.config.generations - 1)
         epsilon = self.config.epsilon_start + progress * (self.config.epsilon_end - self.config.epsilon_start)
         print(f"  epsilon={epsilon:.3f}")
 
@@ -1762,15 +1768,30 @@ class TournamentTrainer:
                 config={
                     "population_size": self.config.population_size,
                     "generations": self.config.generations,
+                    "cycle_length": self.config.cycle_length,
                     "episodes_per_gen": self.config.episodes_per_gen,
                     "eval_games_per_matchup": self.config.eval_games_per_matchup,
+                    "solo_eval_games": self.config.solo_eval_games,
                     "elitism_count": self.config.elitism_count,
                     "lr_range": self.config.lr_range,
                     "hidden_dim_choices": self.config.hidden_dim_choices,
+                    "embedding_dim": self.config.embedding_dim,
+                    "model_variant": self.config.model_variant,
                     "epsilon_start": self.config.epsilon_start,
                     "epsilon_end": self.config.epsilon_end,
+                    "batch_size": self.config.batch_size,
+                    "buffer_capacity": self.config.buffer_capacity,
+                    "gamma": self.config.gamma,
+                    "reward_shaping": self.config.reward_shaping,
                 },
             )
+            # Define metric summaries for proper wandb tracking
+            wandb.define_metric("score/best_solo", summary="min")
+            wandb.define_metric("score/best_competitive", summary="min")
+            wandb.define_metric("behavior/col_matches", summary="max")
+            wandb.define_metric("behavior/rev_replace", summary="max")
+            wandb.define_metric("behavior/rev_col_match", summary="max")
+            wandb.define_metric("epsilon/value", summary="last")
 
         if self.config.sanity_check:
             from .diagnostics import collect_golf_transitions, run_all_checks
@@ -1788,7 +1809,17 @@ class TournamentTrainer:
             self.generation = gen
             gen_start = time.time()
 
-            print(f"=== Generation {gen}/{self.config.generations} ===")
+            if self.config.cycle_length > 0:
+                cycle_num = (gen - 1) // self.config.cycle_length + 1
+                cycle_gen = (gen - 1) % self.config.cycle_length + 1
+                total_cycles = (self.config.generations + self.config.cycle_length - 1) // self.config.cycle_length
+                if cycle_gen == 1 and gen > 1:
+                    print(f"\n{'='*60}")
+                    print(f"  Cycle {cycle_num}/{total_cycles} starting (gen {gen})")
+                    print(f"{'='*60}")
+                print(f"=== Generation {gen}/{self.config.generations} [cycle {cycle_num}/{total_cycles}, step {cycle_gen}/{self.config.cycle_length}] ===")
+            else:
+                print(f"=== Generation {gen}/{self.config.generations} ===")
 
             # Adaptive train+eval loop
             for round_num in range(self.config.max_train_rounds):
@@ -1844,20 +1875,44 @@ class TournamentTrainer:
             scores = [rec.hyperparams.get("avg_score", 999.0) for rec, *_ in sorted_pop]
             losses = [rec.hyperparams.get("loss", float("nan")) for rec, *_ in sorted_pop]
             best_hp = sorted_pop[0][0].hyperparams
+            if self.config.cycle_length > 0:
+                _cycle_gen = (gen - 1) % self.config.cycle_length
+                _eps_progress = _cycle_gen / max(1, self.config.cycle_length - 1)
+            else:
+                _eps_progress = (gen - 1) / max(1, self.config.generations - 1)
+            _epsilon_now = self.config.epsilon_start + _eps_progress * (self.config.epsilon_end - self.config.epsilon_start)
+
             metrics = {
                 "generation": gen,
+                "train/cycle": (gen - 1) // self.config.cycle_length + 1 if self.config.cycle_length > 0 else 1,
+                "train/cycle_gen": (gen - 1) % self.config.cycle_length + 1 if self.config.cycle_length > 0 else gen,
+                "train/mean_loss": float(np.nanmean(losses)),
+                "hof/score": self.hall_of_fame_score if self.hall_of_fame_score < float("inf") else None,
+                "hof/agent_id": self.hall_of_fame_agent_id,
+                # Panel 1: solo score + baselines (lower is better)
+                "score/best_solo": best_hp.get("solo_score"),
+                "score/best_competitive": summary["best_avg_score"],
+                "score/mean_competitive": float(np.mean(scores)),
+                "score/base_heuristic": 14.0,
+                "score/improved_heuristic_rrhr": 10.52,
+                "score/improved_heuristic_rrrr": 8.10,
+                # Panel 2: behavioral metrics + baselines
+                "behavior/col_matches": best_hp.get("col_matches"),
+                "behavior/rev_replace": best_hp.get("rev_replace"),
+                "behavior/rev_col_match": best_hp.get("rev_col_match"),
+                "behavior/take_rate": best_hp.get("take_rate"),
+                "behavior/s1_entropy": best_hp.get("s1_entropy"),
+                "behavior/heuristic_col": 0.53,
+                "behavior/improved_col": 0.70,
+                "behavior/improved_rev": 0.33,
+                # Panel 3: epsilon schedule
+                "epsilon/value": _epsilon_now,
+                "epsilon/cycle": (gen - 1) // self.config.cycle_length + 1 if self.config.cycle_length > 0 else 1,
+                # Legacy keys preserved for metrics_log.jsonl compatibility
                 "eval/best_score": summary["best_avg_score"],
                 "eval/mean_score": float(np.mean(scores)),
                 "eval/worst_score": float(np.max(scores)),
                 "eval/best_solo": best_hp.get("solo_score"),
-                "behavior/col_matches": best_hp.get("col_matches"),
-                "behavior/take_rate": best_hp.get("take_rate"),
-                "behavior/rev_replace": best_hp.get("rev_replace"),
-                "behavior/rev_col_match": best_hp.get("rev_col_match"),
-                "behavior/s1_entropy": best_hp.get("s1_entropy"),
-                "train/mean_loss": float(np.nanmean(losses)),
-                "hof/score": self.hall_of_fame_score if self.hall_of_fame_score < float("inf") else None,
-                "hof/agent_id": self.hall_of_fame_agent_id,
             }
             for rank, (loss, score) in enumerate(zip(losses, scores), 1):
                 metrics[f"train/rank_{rank}_loss"] = loss
@@ -1937,6 +1992,8 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--target-update-interval", type=int, default=500)
     p.add_argument("--epsilon-start", type=float, default=0.3)
     p.add_argument("--epsilon-end", type=float, default=0.05)
+    p.add_argument("--cycle-length", type=int, default=0,
+                   help="Cyclic epsilon annealing: restart every N gens (0=disabled, use linear)")
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--lr-range", type=float, nargs=2, default=[1e-4, 3e-3],
                    metavar=("LR_LOW", "LR_HIGH"))
@@ -1989,6 +2046,7 @@ def parse_args(argv=None) -> TournamentConfig:
         adaptive_gen_limit=args.adaptive_gen_limit,
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
+        cycle_length=args.cycle_length,
         gamma=args.gamma,
         lr_range=tuple(args.lr_range),
         embedding_dim=args.embedding_dim,
