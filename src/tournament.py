@@ -1792,6 +1792,72 @@ class TournamentTrainer:
             wandb.define_metric("behavior/rev_replace", summary="max")
             wandb.define_metric("behavior/rev_col_match", summary="max")
             wandb.define_metric("epsilon/value", summary="last")
+            # Programmatically configure workspace panels (3-panel training figure)
+            try:
+                import wandb_workspaces.workspaces as _ws
+                import wandb_workspaces.reports.v2 as _wr
+                _workspace = _ws.Workspace(
+                    name="Training Progress",
+                    entity=_wandb_run.entity,
+                    project=_wandb_run.project,
+                    sections=[
+                        _ws.Section(
+                            name="Score (lower is better)",
+                            panels=[
+                                _wr.LinePlot(
+                                    title="Solo Score vs Baselines",
+                                    x="generation",
+                                    y=[
+                                        "score/best_solo",
+                                        "score/best_competitive",
+                                        "score/base_heuristic",
+                                        "score/improved_heuristic_rrhr",
+                                        "score/improved_heuristic_rrrr",
+                                    ],
+                                    title_y="Score/hole (lower=better)",
+                                    smoothing_type="gaussian",
+                                    smoothing_factor=0.5,
+                                ),
+                            ],
+                            is_open=True,
+                        ),
+                        _ws.Section(
+                            name="Behavioral Metrics",
+                            panels=[
+                                _wr.LinePlot(
+                                    title="Column Matching & Revealed Replace",
+                                    x="generation",
+                                    y=[
+                                        "behavior/col_matches",
+                                        "behavior/rev_replace",
+                                        "behavior/rev_col_match",
+                                        "behavior/heuristic_col",
+                                        "behavior/improved_col",
+                                        "behavior/improved_rev",
+                                    ],
+                                    title_y="Rate",
+                                ),
+                            ],
+                            is_open=True,
+                        ),
+                        _ws.Section(
+                            name="Epsilon Schedule",
+                            panels=[
+                                _wr.LinePlot(
+                                    title="Epsilon (cyclic annealing)",
+                                    x="generation",
+                                    y=["epsilon/value"],
+                                    title_y="Epsilon",
+                                ),
+                            ],
+                            is_open=True,
+                        ),
+                    ],
+                )
+                _workspace.save()
+                print(f"  wandb workspace configured: {_wandb_run.get_url()}")
+            except Exception as _e:
+                print(f"  wandb workspace setup skipped: {_e}")
 
         if self.config.sanity_check:
             from .diagnostics import collect_golf_transitions, run_all_checks
