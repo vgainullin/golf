@@ -1271,3 +1271,67 @@ All artifacts saved in `data/exp9_v3_extended/`:
 - `champion.pt`, `hall_of_fame.pt` -- best models
 - Total size: ~1.5 GB (dominated by per-gen checkpoints)
 
+---
+
+## Experiment 11: Programmatic Cyclic Epsilon Annealing (350 gens, 7 cycles)
+
+**Status: in progress (cycle 6/7, ~gen 265/350 as of 2026-03-22)**
+
+### Motivation
+
+Exp 10 used ad-hoc cyclic epsilon annealing via manual resumes — each resume recomputed the linear schedule, accidentally creating warm restarts. Exp 11 makes this **programmatic**: a single launch with `--cycle-length 50 --generations 350` runs 7 complete cycles without intervention. The goal is to confirm the technique is robust and to push further with more uniform cycles.
+
+The same config as Exp 10 (Optuna r4 trial 27) is used throughout, with the only structural change being explicit cycle control.
+
+### Command
+
+```
+uv run python -u -m src.tournament \
+  --model-variant v3 --hidden-dim-choices 256 --embedding-dim 64 \
+  --population-size 8 --generations 350 --cycle-length 50 \
+  --episodes-per-gen 1500 --buffer-capacity 100000 --batch-size 512 \
+  --epsilon-start 0.868 --epsilon-end 0.051 \
+  --lr-range 8.3e-5 0.0024 --updates-per-episode 8 \
+  --target-update-interval 843 --gamma 0.99 --reward-shaping hindsight \
+  --eval-games-per-matchup 50 --solo-eval-games 200 --max-train-rounds 3 \
+  --wandb-project golf-dqn --wandb-run-name exp11-cyclic-7cycles \
+  --output-dir data/exp11_cyclic
+```
+
+### Key difference from Exp 10
+
+Exp 10: 7 manual resumes over ~2 weeks, each recomputing the epsilon schedule from scratch. The cycle boundaries were irregular (20, 20, 43, 50, 50, 50, 50 gens).
+
+Exp 11: Single launch, `--cycle-length 50` produces uniform 50-gen cycles. Epsilon resets to `eps_start` at the start of each cycle and decays to `eps_end` by cycle end. No manual intervention.
+
+### Preliminary results (cycles 1-5 complete, cycle 6 in progress)
+
+| Cycle | Gens | Best competitive | Best solo [R,H,R] | Col end | Rev end |
+|-------|------|-----------------|-------------------|---------|---------|
+| 1 | 1-50 | 10.38 | 9.36 | 0.80 | 0.19 |
+| 2 | 51-100 | 10.11 | 9.18 | 0.81 | 0.16 |
+| 3 | 101-150 | 9.99 | 9.00 | 0.79 | 0.18 |
+| 4 | 151-200 | 9.96 | 9.02 | 0.74 | 0.17 |
+| 5 | 201-250 | 10.12 | **8.82** | **0.84** | 0.16 |
+| 6 | 251-265 | 10.19 | 9.22 | 0.81 | 0.16 |
+
+Notable improvements over Exp 10 (which plateaued at col=0.73, best solo=9.10):
+- col reaching 0.84 by cycle 5 (vs Exp 10 plateau of 0.73)
+- Best solo 8.82 (vs Exp 10 best 9.10) -- new best in [R,H,R] config
+- Rev still stuck at 0.16-0.19 (same as Exp 10); confirmed persistent bottleneck
+
+### Observations
+
+Programmatic cycling works as well as manual resumes. The uniform 50-gen cycle length produces consistent per-cycle improvement without the irregular boundaries of Exp 10. Col continues to improve beyond Exp 10's plateau, suggesting Exp 10 simply didn't run long enough rather than hitting a hard ceiling.
+
+Rev_replace remains the primary bottleneck. Neither experiment is closing the gap to the improved heuristic's 0.33 through epsilon cycling alone. A targeted intervention (reward shaping for rev_replace, or auxiliary objectives) will be needed.
+
+### Data
+
+Artifacts saved in `data/exp11_cyclic/`:
+- `metrics_log.jsonl` -- per-gen metrics
+- `config.json` -- hyperparameters
+- Per-generation directories with agent checkpoints
+- `champion.pt`, `hall_of_fame.pt` -- best models
+- wandb run: `exp11-cyclic-7cycles`
+
