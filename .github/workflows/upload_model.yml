@@ -1,0 +1,63 @@
+name: Upload Champion to HF
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'GitHub release tag containing model + metrics'
+        required: true
+      hf_repo:
+        description: 'HF dataset repo (e.g. user/golf-champion)'
+        required: true
+      subfolder:
+        description: 'Subfolder in HF repo (leave empty for root)'
+        required: false
+        default: ''
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+    - name: Download release assets
+      run: |
+        gh release download "${{ inputs.tag }}" --repo "${{ github.repository }}" --dir artifacts
+        ls -lh artifacts/
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Upload to HF
+      run: |
+        pip install -q huggingface_hub
+        python3 << 'PYEOF'
+        import os
+        import glob
+        from huggingface_hub import HfApi
+
+        token = os.environ["HF_TOKEN"]
+        repo = "${{ inputs.hf_repo }}"
+        subfolder = "${{ inputs.subfolder }}"
+        api = HfApi(token=token)
+
+        api.create_repo(repo_id=repo, repo_type="dataset", exist_ok=True)
+
+        files = glob.glob("artifacts/*")
+        for f in files:
+            name = os.path.basename(f)
+            path_in_repo = f"{subfolder}/{name}" if subfolder else name
+            size_mb = os.path.getsize(f) / 1e6
+            print(f"Uploading {name} ({size_mb:.1f} MB) -> {repo}/{path_in_repo}")
+            api.upload_file(
+                path_or_fileobj=f,
+                path_in_repo=path_in_repo,
+                repo_id=repo,
+                repo_type="dataset",
+            )
+            print(f"Done: {path_in_repo}")
+        PYEOF
+
+    - name: Delete release after successful upload
+      run: gh release delete "${{ inputs.tag }}" --yes --cleanup-tag
+      env:
+        GH_TOKEN: ${{ github.token }}
