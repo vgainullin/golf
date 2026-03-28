@@ -41,22 +41,18 @@ python -m src.experiment_runner \
 
 ### 2. Evaluate Trained Agents
 
-Test all trained agents against baseline players:
+> **Note:** `src/evaluate_agents.py` is deprecated (old non-vectorized loop).
+> Use the vectorized evaluation scripts below instead.
 
 ```bash
-# Evaluate all experiments
-python -m src.evaluate_agents \
-  --experiments-dir tmp/experiments_quick \
-  --output-dir tmp/evaluations_quick \
-  --games 100 \
-  --holes 9 \
-  --device cuda
+# Evaluate Hall-of-Fame checkpoint [DQN, R, H, R]
+uv run python -m scripts.eval_hof --repo-id vgainullin/golf --games 1000 --holes 9
 
-# Evaluate a single checkpoint
-python -m src.evaluate_agents \
-  --checkpoint tmp/experiments_quick/exp_001_learning_rate=0.0001_hidden_dim=128_batch_size=1024/offline_dqn.pt \
-  --output-dir tmp/evaluations_single \
-  --games 100
+# Evaluate all tournament agents vs 3 random opponents (batched GPU)
+uv run python -m scripts.eval_vs_random --tournament-dir data/exp11_cyclic --games 200 --holes 9
+
+# Benchmark heuristic baselines
+uv run python -m scripts.eval_heuristics --games 5000 --holes 9
 ```
 
 ### 3. Analyze Results
@@ -189,14 +185,9 @@ python -m src.analyze_experiments \
 # Identify promising hyperparameter ranges
 
 # 3. Evaluate top performers
-python -m src.evaluate_agents \
-  --experiments-dir tmp/exp_run1 \
-  --output-dir tmp/eval_run1 \
-  --games 200 \
-  --holes 9
-
-# Review tmp/eval_run1/agent_comparison.csv
-# Identify best performing agents
+uv run python -m scripts.eval_vs_random \
+  --tournament-dir tmp/exp_run1 \
+  --games 200 --holes 9
 
 # 4. Refine hyperparameters around best performers
 # Edit a new config file with tighter ranges
@@ -279,5 +270,5 @@ After finding a good agent:
 
 - Training code: `src/dqn_offline.py`
 - Experiment runner: `src/experiment_runner.py`
-- Evaluation: `src/evaluate_agents.py`
+- Evaluation: `scripts/eval_hof.py`, `scripts/eval_vs_random.py`, `scripts/eval_heuristics.py`
 - Analysis: `src/analyze_experiments.py`

@@ -39,12 +39,13 @@ echo ""
 
 # Step 2: Evaluate agents
 echo "[2/3] Evaluating agents..."
-python -m src.evaluate_agents \
-  --experiments-dir "$EXPERIMENTS_DIR" \
-  --output-dir "$EVAL_DIR" \
+# NOTE: src.evaluate_agents is deprecated. Use the vectorized eval scripts:
+#   uv run python -m scripts.eval_vs_random --tournament-dir "$EXPERIMENTS_DIR" --games $EVAL_GAMES --holes $EVAL_HOLES
+#   uv run python -m scripts.eval_hof --games $EVAL_GAMES --holes $EVAL_HOLES
+uv run python -m scripts.eval_vs_random \
+  --tournament-dir "$EXPERIMENTS_DIR" \
   --games $EVAL_GAMES \
-  --holes $EVAL_HOLES \
-  --device $DEVICE
+  --holes $EVAL_HOLES
 
 echo ""
 echo "✓ Evaluation complete!"

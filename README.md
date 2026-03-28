@@ -98,44 +98,37 @@ python -m src.experiment_runner \
   --epochs 20
 ```
 
-### Evaluating DQN Agents
+### Evaluating Models
 
-Test trained agents against baseline players:
-
-```bash
-# Evaluate all experiments
-python -m src.evaluate_agents \
-  --experiments-dir tmp/experiments \
-  --output-dir tmp/evaluations \
-  --games 100
-
-# Evaluate single checkpoint
-python -m src.evaluate_agents \
-  --checkpoint tmp/experiments/exp_001_.../offline_dqn.pt \
-  --games 100
-```
-
-This generates:
-- `evaluation_report.txt` - Ranked models with performance, training metrics, and hyperparameters
-- `agent_comparison.csv` - Tabular comparison of all agents
-- Individual game results and summaries per experiment
-
-### Analyzing Results
-
-Generate training curves and hyperparameter analysis:
+**Evaluate a Hall-of-Fame checkpoint** (downloads from HuggingFace, runs [DQN, R, H, R]):
 
 ```bash
-python -m src.analyze_experiments \
-  --experiments-dir tmp/experiments \
-  --output-dir tmp/analysis
+uv run python -m scripts.eval_hof --repo-id vgainullin/golf --games 1000 --holes 9
 ```
 
-This generates:
-- `training_curves_all.png` - Loss curves for all experiments
-- `hyperparameter_analysis.csv` - Performance vs hyperparameters
-- Heatmaps showing parameter interactions
+**Evaluate tournament agents vs random opponents** (batched GPU inference):
 
-See `configs/README_TRAINING_PIPELINE.md` for detailed documentation.
+```bash
+uv run python -m scripts.eval_vs_random --tournament-dir data/exp11_cyclic --games 200 --holes 9
+```
+
+**Benchmark heuristic baselines** (random, simple, base, improved):
+
+```bash
+uv run python -m scripts.eval_heuristics --games 5000 --holes 9
+```
+
+**Plot tournament training progress:**
+
+```bash
+uv run python -m scripts.plot_training_progress \
+  --metrics data/exp9_v3_extended/metrics_log.jsonl \
+  --output training_progress.png
+```
+
+> **Note:** `src/evaluate_agents.py`, `src/evaluate_self_play.py`, and
+> `scripts/evaluate_offline_agent.py` are deprecated. They use the old
+> non-vectorized simulation loop. Use the scripts above instead.
 
 ## Game Parameters
 
