@@ -1,4 +1,9 @@
-"""Self-play evaluation with multiple DQN agents and player rotation."""
+"""DEPRECATED: Use scripts/eval_hof.py or scripts/eval_vs_random.py instead.
+
+This module uses the old non-vectorized simulation loop (src.simulation).
+The newer scripts use the vectorized engine (src.vectorized_golf) and support
+v3 models via the tournament infrastructure.
+"""
 
 from __future__ import annotations
 
