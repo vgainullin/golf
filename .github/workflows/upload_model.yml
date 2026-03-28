@@ -58,6 +58,6 @@ jobs:
         PYEOF
 
     - name: Delete release after successful upload
-      run: gh release delete "${{ inputs.tag }}" --yes --cleanup-tag
+      run: gh release delete "${{ inputs.tag }}" --repo "${{ github.repository }}" --yes --cleanup-tag
       env:
         GH_TOKEN: ${{ github.token }}
