@@ -1275,7 +1275,7 @@ All artifacts saved in `data/exp9_v3_extended/`:
 
 ## Experiment 11: Programmatic Cyclic Epsilon Annealing (350 gens, 7 cycles)
 
-**Status: in progress (cycle 6/7, ~gen 265/350 as of 2026-03-22)**
+**Status: complete (7 cycles, 343 gens reached as of 2026-03-28)**
 
 ### Motivation
 
@@ -1304,7 +1304,7 @@ Exp 10: 7 manual resumes over ~2 weeks, each recomputing the epsilon schedule fr
 
 Exp 11: Single launch, `--cycle-length 50` produces uniform 50-gen cycles. Epsilon resets to `eps_start` at the start of each cycle and decays to `eps_end` by cycle end. No manual intervention.
 
-### Preliminary results (cycles 1-5 complete, cycle 6 in progress)
+### Per-cycle results
 
 | Cycle | Gens | Best competitive | Best solo [R,H,R] | Col end | Rev end |
 |-------|------|-----------------|-------------------|---------|---------|
@@ -1313,18 +1313,36 @@ Exp 11: Single launch, `--cycle-length 50` produces uniform 50-gen cycles. Epsil
 | 3 | 101-150 | 9.99 | 9.00 | 0.79 | 0.18 |
 | 4 | 151-200 | 9.96 | 9.02 | 0.74 | 0.17 |
 | 5 | 201-250 | 10.12 | **8.82** | **0.84** | 0.16 |
-| 6 | 251-265 | 10.19 | 9.22 | 0.81 | 0.16 |
+| 6 | 251-300 | 10.19 | 8.88 | 0.85 | 0.15 |
+| 7 | 301-343 | 10.25 | 8.98 | 0.84 | 0.15 |
 
-Notable improvements over Exp 10 (which plateaued at col=0.73, best solo=9.10):
-- col reaching 0.84 by cycle 5 (vs Exp 10 plateau of 0.73)
-- Best solo 8.82 (vs Exp 10 best 9.10) -- new best in [R,H,R] config
-- Rev still stuck at 0.16-0.19 (same as Exp 10); confirmed persistent bottleneck
+Best solo score: 8.82 at gen 225 (cycle 5). Best col: 0.89 at gen 328 (cycle 7).
+
+### Final evaluation (2026-03-28, 5000 games x 9 holes)
+
+Rigorous comparison of Exp 11 champion (gen343), Exp 11 HoF (gen58), and Exp 10 champion (gen300) using `scripts/eval_compare.py`:
+
+| Agent | [R,H,R] | [R,R,R] | col | rev |
+|-------|---------|---------|-----|-----|
+| **Exp 11 champion (gen343)** | **9.61** | **8.02** | **0.82** | 0.14 |
+| Exp 11 HoF (gen58) | 9.63 | 8.16 | 0.74 | 0.19 |
+| Exp 10 champion (gen300) | 9.79 | 8.37 | 0.70 | 0.19 |
+| Improved heuristic | 10.52 | 8.10 | 0.70 | 0.33 |
+| Base heuristic | 14.00 | -- | 0.53 | 0.00 |
 
 ### Observations
 
-Programmatic cycling works as well as manual resumes. The uniform 50-gen cycle length produces consistent per-cycle improvement without the irregular boundaries of Exp 10. Col continues to improve beyond Exp 10's plateau, suggesting Exp 10 simply didn't run long enough rather than hitting a hard ceiling.
+**Exp 11 beats all baselines in both eval configs.** The champion edges out the improved heuristic in [R,R,R] (8.02 vs 8.10) and dominates in the harder [R,H,R] config (9.61 vs 10.52). Clear improvement over Exp 10: ~0.18 pts in solo, ~0.35 pts vs random, driven primarily by col_matches jumping from 0.70 to 0.82.
 
-Rev_replace remains the primary bottleneck. Neither experiment is closing the gap to the improved heuristic's 0.33 through epsilon cycling alone. A targeted intervention (reward shaping for rev_replace, or auxiliary objectives) will be needed.
+**Programmatic cycling works as well as manual resumes.** Uniform 50-gen cycles produce consistent improvement without Exp 10's irregular boundaries. Col continues to improve beyond Exp 10's 0.73 plateau, confirming Exp 10 didn't run long enough rather than hitting a hard ceiling.
+
+**Rev_replace is diverging from the heuristic.** Rev dropped from 0.19 (Exp 10) to 0.14 (Exp 11 champion) -- the agent is winning through column matching rather than revealed-card replacement. The gap to the heuristic's 0.33 is widening even as overall score improves. The agent has found an alternative strategy that doesn't rely on rev_replace.
+
+**HoF (gen58, early cycle 2) is surprisingly competitive** with the gen343 champion despite much lower col (0.74 vs 0.82). It compensates with higher rev (0.19 vs 0.14), suggesting the population explored diverse strategies before converging on the col-heavy approach.
+
+**Cyclic epsilon annealing is saturated.** Cycles 6-7 show no improvement over cycle 5 in solo score. Further gains will require a different intervention -- either targeted reward shaping for rev_replace, or a fundamentally different exploration strategy.
+
+**Open question: are we near the theoretical floor?** The HoF agent from early cycle 2 (gen58) matches the gen343 champion in score despite very different behavioral profiles (col 0.74/rev 0.19 vs col 0.82/rev 0.14). This suggests the agent may be near-optimal and the remaining variance is card luck, not decision quality. A possible test: build a perfect-information oracle (scripted solver that sees the full deck order and all hidden cards) and measure the gap between its score and the DQN's ~9.6. If the oracle only achieves ~9, the game is effectively solved. If it gets ~7, there's room to improve. Even a greedy oracle (locally optimal swaps with full visibility) would give a useful lower bound.
 
 ### Data
 
