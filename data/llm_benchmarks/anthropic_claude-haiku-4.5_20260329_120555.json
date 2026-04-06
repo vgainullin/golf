@@ -1,0 +1,63 @@
+{
+  "model": "anthropic/claude-haiku-4.5",
+  "backend": "openrouter",
+  "games": 1,
+  "holes": 9,
+  "seats": [
+    "llm",
+    "random",
+    "heuristic",
+    "random"
+  ],
+  "temperature": 0.0,
+  "elapsed_seconds": 547.7,
+  "api_calls": 126,
+  "input_tokens": 46764,
+  "output_tokens": 46620,
+  "invalid_actions": 0,
+  "scores": {
+    "llm": {
+      "avg_per_hole": 18.33,
+      "std": 0.0,
+      "median": 18.33
+    },
+    "random": {
+      "avg_per_hole": 25.0,
+      "std": 0.0,
+      "median": 25.0
+    },
+    "heuristic": {
+      "avg_per_hole": 11.67,
+      "std": 0.0,
+      "median": 11.67
+    }
+  },
+  "behavior": {
+    "llm": {
+      "take_rate": 0.397,
+      "rev_replace": 0.812,
+      "col_matches": 0.111
+    },
+    "random": {
+      "take_rate": 0.426,
+      "rev_replace": 0.455,
+      "col_matches": 0.222
+    },
+    "heuristic": {
+      "take_rate": 0.37,
+      "rev_replace": 0.0,
+      "col_matches": 0.556
+    }
+  },
+  "per_game_totals": {
+    "llm": [
+      165.0
+    ],
+    "random": [
+      225.0
+    ],
+    "heuristic": [
+      105.0
+    ]
+  }
+}

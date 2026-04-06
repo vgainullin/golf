@@ -1,0 +1,63 @@
+{
+  "model": "deepseek-r1-7b",
+  "backend": "lmstudio",
+  "games": 1,
+  "holes": 9,
+  "seats": [
+    "llm",
+    "random",
+    "heuristic",
+    "random"
+  ],
+  "temperature": 0.0,
+  "elapsed_seconds": 11257.2,
+  "api_calls": 124,
+  "input_tokens": 40445,
+  "output_tokens": 215710,
+  "invalid_actions": 19,
+  "scores": {
+    "llm": {
+      "avg_per_hole": 29.67,
+      "std": 0.0,
+      "median": 29.67
+    },
+    "random": {
+      "avg_per_hole": 32.78,
+      "std": 0.0,
+      "median": 32.78
+    },
+    "heuristic": {
+      "avg_per_hole": 15.22,
+      "std": 0.0,
+      "median": 15.22
+    }
+  },
+  "behavior": {
+    "llm": {
+      "take_rate": 0.597,
+      "rev_replace": 0.636,
+      "col_matches": 0.111
+    },
+    "random": {
+      "take_rate": 0.463,
+      "rev_replace": 0.516,
+      "col_matches": 0.0
+    },
+    "heuristic": {
+      "take_rate": 0.352,
+      "rev_replace": 0.0,
+      "col_matches": 0.778
+    }
+  },
+  "per_game_totals": {
+    "llm": [
+      267.0
+    ],
+    "random": [
+      295.0
+    ],
+    "heuristic": [
+      137.0
+    ]
+  }
+}
