@@ -1,43 +1,8 @@
 # Golf
 
-What is the optimal strategy for the card game [Golf](https://en.wikipedia.org/wiki/Golf_(card_game))? Does counting cards matter, or do simple heuristics get you most of the way there?
+A simulator and reinforcement-learning playground for the card game [Golf](https://en.wikipedia.org/wiki/Golf_(card_game)).
 
-This repo started as personal curiosity after a few rounds with friends. It turned into a fast vectorized simulator, a hand-coded heuristic baseline, and a deep RL setup that — eventually, after a lot of debugging — learned to beat the heuristic from scratch.
-
-## Headline result
-
-A vanilla DQN trained from scratch with no human knowledge of strategy plays Golf better than a strong hand-coded heuristic.
-
-| Player | `[player, R, H, R]` | `[player, R, R, R]` |
-|---|---:|---:|
-| Random | 32.2 | 30.8 |
-| Simple heuristic (greedy low cards) | — | 22.4 |
-| Hand-coded heuristic (column-aware) | 14.0 | 14.0 |
-| Improved heuristic (also replaces revealed cards) | 10.52 | 8.10 |
-| **DQN champion (Exp 11, gen 343)** | **9.61** | **8.02** |
-
-Lower is better. Eval config in column headers — `H` = hand-coded heuristic seat, `R` = random seat. 5000 games × 9 holes.
-
-![Exp 10 training progress](docs/figures/exp10_cyclic_epsilon.png)
-
-The figure shows Experiment 10 — the run where *cyclic epsilon annealing* (warm restarts on the exploration rate, discovered by accident) broke through what looked like a hard plateau and the agent crossed the improved-heuristic baseline around cycle 5. The follow-up Exp 11 (programmatic 7-cycle run, 343 generations) is the source of the table above.
-
-The full lab notebook of how we got here — including two MDP bugs whose fixes were the real unlock, a representation-monopolization analysis, and the cyclic-epsilon discovery — is in [`docs/experiments.md`](docs/experiments.md). The TL;DR is in [`FINDINGS.md`](FINDINGS.md).
-
-## LLM benchmark
-
-Can frontier LLMs play Golf cold? Early results from the harness in `src/llm_player.py`:
-
-| Model | Score (avg/hole) | vs hand-coded heuristic (~14) |
-|---|---:|---:|
-| Random baseline | 30.8 | -16.8 (worse) |
-| **Claude Haiku 4.5** (5 runs × 9 holes) | **15.97** | **-2.0** (slightly worse) |
-| DeepSeek-R1 7B (local) | 28.89 | -14.9 (random-tier) |
-| Gemma 2 9B (local) | 31.11 | -17.1 (random-tier) |
-| Hand-coded heuristic | 14.0 | — |
-| DQN champion | 9.61 (vs `[R,H,R]`) | -4.4 (better) |
-
-Haiku 4.5 plays decisively better than random but loses to the hand-coded heuristic in 4 of 5 runs. The smaller open models play at random level despite verbose `<think>` chains — reasoning didn't help. The harness is OpenAI-compatible and supports OpenRouter, Ollama, and LM Studio. Per-game results in [`data/llm_benchmarks.md`](data/llm_benchmarks.md).
+This README documents the components that work and how to use them. The lab notebook of experiments is in [`docs/experiments.md`](docs/experiments.md); a synthesis of what's been learned so far is in [`FINDINGS.md`](FINDINGS.md).
 
 ## Game rules
 
@@ -50,92 +15,163 @@ The hole ends when any player has all 6 cards revealed; everyone else gets one f
 
 **Scoring:** 2 = -2, 3-9 = face value, 10/J/Q = 10, K = 0, A = 1. Matching ranks in the same column zero each other out.
 
-## What's in the repo
-
-```
-src/
-  vectorized_golf.py   # Fast batched game engine (numpy)
-  tournament.py        # Population-based DQN training (the live pipeline)
-  reward_shaping.py    # Hindsight reward shaping (fixes the observability bias)
-  diagnostics.py       # MDP sanity checks for transitions, rewards, determinism
-  optuna_search.py     # Hyperparameter search over tournament configs
-  llm_player.py        # LLM player harness (OpenRouter / Ollama / LM Studio)
-  analyze_embeddings.py / analyze_experiments.py  # Post-hoc analysis tools
-
-scripts/
-  eval_hof.py             # Eval a HuggingFace-hosted checkpoint
-  eval_vs_random.py       # Eval tournament agents vs random opponents (GPU-batched)
-  eval_compare.py         # Head-to-head DQN checkpoint comparison
-  eval_heuristics.py      # Benchmark the hand-coded baselines
-  plot_training_progress.py  # Plot per-gen metrics from a tournament run
-
-docs/
-  experiments.md           # The lab notebook (Experiments 1-11)
-  beyond-heuristic-rl.md   # Pre-RL design notes on approaches considered
-  figures/                 # Training-progress plots
-
-data/
-  llm_benchmarks.md        # LLM benchmark writeup and per-game results
-
-deprecated/   # Superseded approaches kept for historical reference (don't expect to run)
-```
-
-## Quickstart
+## Install
 
 ```bash
 git clone https://github.com/vgainullin/golf.git
 cd golf
 uv sync
+uv run python -m pytest tests/
 ```
 
-**Benchmark the heuristic baselines:**
+---
 
-```bash
-uv run python -m scripts.eval_heuristics --games 5000 --holes 9
+## Components
+
+### Vectorized game simulator — `src/vectorized_golf.py`
+
+Fast batched Golf engine. Runs thousands of games in parallel on CPU or GPU via PyTorch tensors. The state is a single `VectorizedGolfState` dataclass containing the deck, discard pile, all four players' cards, and a `revealed` mask.
+
+```python
+import torch
+from src.vectorized_golf import (
+    reset_games, get_observation_v2,
+    step_stage0, step_stage1,
+    heuristic_stage0, heuristic_stage1,
+    compute_final_score,
+)
+
+device = torch.device("cpu")
+state = reset_games(N=1024, device=device)  # 1024 games in parallel
+
+for hole in range(9):
+    while not state.done.all():
+        for pid in range(4):
+            obs = get_observation_v2(state, pid)              # (N, ...) tensor
+            actions = heuristic_stage0(state, pid)            # or your policy
+            step_stage0(state, actions, pid)
+            actions = heuristic_stage1(state, pid)
+            step_stage1(state, actions, pid)
+
+scores = compute_final_score(state.player_cards, device)      # (N, 4) tensor
 ```
 
-**Evaluate the published champion checkpoint** (downloads from HuggingFace):
+Built-in policies: `random_stage{0,1}`, `simple_stage{0,1}` (greedy low cards), `heuristic_stage{0,1}` (column-aware), `improved_stage1` (also replaces revealed cards), `eps_greedy_batched` (for DQN policies).
+
+### DQN training — `src/tournament.py`
+
+Population-based DQN training. Each generation trains all agents in parallel via vectorized self-play, evaluates them in a round-robin tournament, then selects + mutates the survivors. Supports the `v3` self-attention model, hindsight reward shaping, cyclic epsilon annealing, and an Optuna-friendly config interface.
 
 ```bash
-uv run python -m scripts.eval_hof --repo-id vgainullin/golf --games 1000 --holes 9
-```
+# Quick smoke run (CPU, ~5 minutes)
+uv run python -m src.tournament \
+  --population-size 4 --generations 3 \
+  --episodes-per-gen 200 --buffer-capacity 20000 --batch-size 128 \
+  --output-dir data/smoke_run
 
-**Run an LLM as a player** (requires `OPENROUTER_API_KEY` for hosted models):
-
-```bash
-uv run python -m src.llm_player --model anthropic/claude-haiku-4.5 --games 5 --holes 9
-```
-
-**Train your own DQN** (long, GPU recommended):
-
-```bash
+# Full run matching the current best config (Exp 11, GPU recommended)
 uv run python -m src.tournament \
   --model-variant v3 --hidden-dim-choices 256 --embedding-dim 64 \
   --population-size 8 --generations 350 --cycle-length 50 \
   --episodes-per-gen 1500 --buffer-capacity 100000 --batch-size 512 \
   --epsilon-start 0.868 --epsilon-end 0.051 \
   --lr-range 8.3e-5 0.0024 --updates-per-episode 8 \
-  --target-update-interval 843 --gamma 0.99 --reward-shaping hindsight \
+  --target-update-interval 843 --gamma 0.99 \
+  --reward-shaping hindsight \
   --output-dir data/my_run
+
+uv run python -m src.tournament --help    # full flag reference
 ```
 
-This is the Experiment 11 config. With cyclic epsilon (`--cycle-length`), it reaches solo ~9.6 by generation 343.
+Outputs go to `--output-dir`: per-generation checkpoints, `metrics_log.jsonl`, `champion.pt`, `hall_of_fame.pt`, and an Optuna-readable summary.
 
-**Run the MDP diagnostics on your environment:**
+### Hyperparameter search — `src/optuna_search.py`
+
+Optuna multi-objective sweep over tournament configs. Used to derive the Exp 11 config; see `docs/experiments.md` Experiment 9 for the full search space and findings.
+
+### MDP diagnostics — `src/diagnostics.py`
+
+Four pre-training probes that catch general RL bugs in seconds:
+
+| Probe | Catches |
+|---|---|
+| `transition_fidelity` | Stale `next_obs` (the agent learns Q-values for states it never sees) |
+| `reward_action_distribution` | Systematic reward bias by action (e.g. observability gaps) |
+| `determinism` | Hidden state, RNG leaks, non-pure observations |
+| `observation_sanity` | NaN/Inf, shape mismatches |
 
 ```bash
-uv run python -m src.diagnostics
+uv run python -m src.diagnostics                # run all four
+uv run python -m src.diagnostics --check fidelity
 ```
 
-The diagnostics catch the same class of bug that took us five failed experiments to find by hand. See [`docs/experiments.md`](docs/experiments.md) (search for "MDP Diagnostics Toolkit").
+Both bugs from Experiments 5 and 6 (see lab notebook) would have been caught by these probes immediately. Reusable across any RL environment with minor adapter code.
 
-## What's still open
+### Evaluation scripts — `scripts/eval_*.py`
 
-The DQN can play Golf well but it can't *explain* what it's doing. Three threads are open and welcome contributions:
+| Script | Purpose | Example |
+|---|---|---|
+| `eval_heuristics.py` | Benchmark all hand-coded baselines (random / simple / base / improved) head-to-head | `uv run python -m scripts.eval_heuristics --games 5000 --holes 9` |
+| `eval_hof.py` | Download and evaluate a Hall-of-Fame checkpoint from HuggingFace | `uv run python -m scripts.eval_hof --repo-id vgainullin/golf --games 1000 --holes 9` |
+| `eval_vs_random.py` | Evaluate every checkpoint in a tournament directory vs random opponents (GPU-batched) | `uv run python -m scripts.eval_vs_random --tournament-dir data/my_run --games 200 --holes 9` |
+| `eval_compare.py` | Head-to-head between specific DQN checkpoints | `uv run python -m scripts.eval_compare --checkpoints a.pt b.pt --games 5000` |
+| `plot_training_progress.py` | 3-panel plot (solo score, behavioral metrics, epsilon schedule) from `metrics_log.jsonl` | `uv run python -m scripts.plot_training_progress --metrics data/my_run/metrics_log.jsonl --output progress.png` |
 
-1. **Strategy extraction.** Distill the champion's policy into human-readable rules — does it actually count cards? Does it have a different opening from the endgame? The behavioral metrics in the lab notebook hint at answers, but no one has read out the actual decision rules.
-2. **LLM benchmark expansion.** The current results cover Haiku, DeepSeek-R1 7B, and Gemma 2 9B. A broader leaderboard — Sonnet, Opus, GPT-5, Gemini, larger open models — would make this a much sharper artifact.
-3. **Playable web/mobile game.** The simulator is fast and self-contained. Wrapping it in a UI to play against the heuristic, the DQN, or an LLM would make this a useful airplane-mode time-killer.
+All evaluation reports four behavioral metrics alongside score: `col_matches` (avg column matches per hole), `take_rate` (fraction of stage-0 turns taking the discard), `rev_replace` (fraction of stage-1 placements at already-revealed positions), `s1_entropy` (Shannon entropy of stage-1 actions). These are how we tell *what* a model has learned, not just how well it scores.
+
+### LLM player harness — `src/llm_player.py`
+
+Plays Golf via any OpenAI-compatible API: OpenRouter (hosted), Ollama (local), LM Studio (local). The harness renders the game state as a text prompt, parses the model's response into an action, and validates against the legal action mask. Tracks token usage and invalid-action rate per run. Per-game results are saved to `data/llm_benchmarks/`.
+
+```bash
+# Hosted (requires OPENROUTER_API_KEY env var)
+uv run python -m src.llm_player --model anthropic/claude-haiku-4.5 --games 5 --holes 9
+
+# Local via LM Studio
+uv run python -m src.llm_player --backend lmstudio --model deepseek-r1-7b --games 1 --holes 9
+
+# Custom seat lineup
+uv run python -m src.llm_player --model anthropic/claude-haiku-4.5 \
+  --seats llm,heuristic,heuristic,random --games 5
+```
+
+Existing benchmark results in [`data/llm_benchmarks.md`](data/llm_benchmarks.md).
+
+## Repository layout
+
+```
+src/
+  vectorized_golf.py         # Batched simulator
+  tournament.py              # DQN training pipeline
+  reward_shaping.py          # Hindsight reward shaping
+  diagnostics.py             # MDP probes
+  optuna_search.py           # Hyperparameter sweep
+  llm_player.py              # LLM player harness
+  analyze_embeddings.py      # Embedding-similarity analysis
+  analyze_experiments.py     # Cross-experiment metrics
+  dqn_offline.py             # Model class definitions (GolfDQN v1/v2/v2s/v2sf/v3)
+  simulation.py              # Legacy non-vectorized simulator (still used by tests)
+  qtransformer.py            # Older transformer model (kept for legacy imports)
+  tensor_logger.py           # Tensor transition utilities
+  tensor_dataset.py          # Tensor transition dataset loader
+
+scripts/                     # Eval entry points
+tests/                       # Pytest suite (currently covers legacy simulation only)
+docs/
+  experiments.md             # Lab notebook (Experiments 1-11)
+  beyond-heuristic-rl.md     # Pre-RL design notes
+  figures/                   # Training-progress plots
+data/
+  llm_benchmarks.md          # LLM benchmark writeup + per-game results
+  *_behavioral_metrics.json  # Reference behavioral metrics for known models
+deploy/                      # Lambda Labs GPU orchestration for tournament training
+.github/workflows/           # CI: capacity check, tournament training, model upload
+deprecated/                  # Superseded approaches kept for historical reference
+```
+
+## Status
+
+Work in progress. The training and evaluation pipelines are stable; the original question — *what does optimal Golf play actually look like in human-readable terms?* — is still open. Open work items are tracked as GitHub issues.
 
 ## License
 
