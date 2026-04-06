@@ -1,195 +1,142 @@
-# Golf Card Game
+# Golf
 
-A Python implementation of the card game Golf, including a simulation/AI training component.
+What is the optimal strategy for the card game [Golf](https://en.wikipedia.org/wiki/Golf_(card_game))? Does counting cards matter, or do simple heuristics get you most of the way there?
 
-## Overview
+This repo started as personal curiosity after a few rounds with friends. It turned into a fast vectorized simulator, a hand-coded heuristic baseline, and a deep RL setup that — eventually, after a lot of debugging — learned to beat the heuristic from scratch.
 
-Golf is a card game where players try to achieve the lowest score possible by strategically swapping and replacing cards in their hand. This implementation includes both the game logic and an AI training system using Q-learning.
+## Headline result
 
-## Results
+A vanilla DQN trained from scratch with no human knowledge of strategy plays Golf better than a strong hand-coded heuristic.
 
-Tournament-trained DQN agents have surpassed the strongest hand-coded heuristic on this game. The figure below shows Exp 10 (Cyclic Epsilon Annealing), where warm restarts on the exploration rate broke through the col_matches plateau and the agent crossed the improved-heuristic baseline around cycle 5:
+| Player | `[player, R, H, R]` | `[player, R, R, R]` |
+|---|---:|---:|
+| Random | 32.2 | 30.8 |
+| Simple heuristic (greedy low cards) | — | 22.4 |
+| Hand-coded heuristic (column-aware) | 14.0 | 14.0 |
+| Improved heuristic (also replaces revealed cards) | 10.52 | 8.10 |
+| **DQN champion (Exp 11, gen 343)** | **9.61** | **8.02** |
+
+Lower is better. Eval config in column headers — `H` = hand-coded heuristic seat, `R` = random seat. 5000 games × 9 holes.
 
 ![Exp 10 training progress](docs/figures/exp10_cyclic_epsilon.png)
 
-The follow-up Exp 11 (programmatic 7-cycle run, 343 generations) reached the current best: **9.61** vs `[R,H,R]` and **8.02** vs three random opponents -- both better than the improved heuristic (10.52 / 8.10). Full writeups in [docs/experiments.md](docs/experiments.md).
+The figure shows Experiment 10 — the run where *cyclic epsilon annealing* (warm restarts on the exploration rate, discovered by accident) broke through what looked like a hard plateau and the agent crossed the improved-heuristic baseline around cycle 5. The follow-up Exp 11 (programmatic 7-cycle run, 343 generations) is the source of the table above.
 
-## Features
+The full lab notebook of how we got here — including two MDP bugs whose fixes were the real unlock, a representation-monopolization analysis, and the cyclic-epsilon discovery — is in [`docs/experiments.md`](docs/experiments.md). The TL;DR is in [`FINDINGS.md`](FINDINGS.md).
 
-- Complete Golf card game implementation
-- AI training simulation using Q-learning
-- Command-line interface
-- Multiple AI agents can play against each other
-- Configurable game parameters
+## LLM benchmark
 
-## Requirements
+Can frontier LLMs play Golf cold? Early results from the harness in `src/llm_player.py`:
 
-- Python 3.x
+| Model | Score (avg/hole) | vs hand-coded heuristic (~14) |
+|---|---:|---:|
+| Random baseline | 30.8 | -16.8 (worse) |
+| **Claude Haiku 4.5** (5 runs × 9 holes) | **15.97** | **-2.0** (slightly worse) |
+| DeepSeek-R1 7B (local) | 28.89 | -14.9 (random-tier) |
+| Gemma 2 9B (local) | 31.11 | -17.1 (random-tier) |
+| Hand-coded heuristic | 14.0 | — |
+| DQN champion | 9.61 (vs `[R,H,R]`) | -4.4 (better) |
 
-## Installation
+Haiku 4.5 plays decisively better than random but loses to the hand-coded heuristic in 4 of 5 runs. The smaller open models play at random level despite verbose `<think>` chains — reasoning didn't help. The harness is OpenAI-compatible and supports OpenRouter, Ollama, and LM Studio. Per-game results in [`data/llm_benchmarks.md`](data/llm_benchmarks.md).
 
-1. Clone the repository:
+## Game rules
+
+Four players. Each player has 6 cards in a 2×3 grid, all face-down except two flipped at deal. On your turn:
+
+1. **Draw:** take the top card from the discard pile, *or* draw blind from the deck.
+2. **Place or flip:** put the held card at any grid position (the replaced card goes to discard, face-up), *or* discard the held card and flip one of your face-down cards.
+
+The hole ends when any player has all 6 cards revealed; everyone else gets one final turn. After 9 holes, lowest cumulative score wins.
+
+**Scoring:** 2 = -2, 3-9 = face value, 10/J/Q = 10, K = 0, A = 1. Matching ranks in the same column zero each other out.
+
+## What's in the repo
+
+```
+src/
+  vectorized_golf.py   # Fast batched game engine (numpy)
+  tournament.py        # Population-based DQN training (the live pipeline)
+  reward_shaping.py    # Hindsight reward shaping (fixes the observability bias)
+  diagnostics.py       # MDP sanity checks for transitions, rewards, determinism
+  optuna_search.py     # Hyperparameter search over tournament configs
+  llm_player.py        # LLM player harness (OpenRouter / Ollama / LM Studio)
+  analyze_embeddings.py / analyze_experiments.py  # Post-hoc analysis tools
+
+scripts/
+  eval_hof.py             # Eval a HuggingFace-hosted checkpoint
+  eval_vs_random.py       # Eval tournament agents vs random opponents (GPU-batched)
+  eval_compare.py         # Head-to-head DQN checkpoint comparison
+  eval_heuristics.py      # Benchmark the hand-coded baselines
+  plot_training_progress.py  # Plot per-gen metrics from a tournament run
+
+docs/
+  experiments.md           # The lab notebook (Experiments 1-11)
+  beyond-heuristic-rl.md   # Pre-RL design notes on approaches considered
+  figures/                 # Training-progress plots
+
+data/
+  llm_benchmarks.md        # LLM benchmark writeup and per-game results
+
+deprecated/   # Superseded approaches kept for historical reference (don't expect to run)
+```
+
+## Quickstart
 
 ```bash
-git clone https://github.com/yourusername/golf.git
+git clone https://github.com/vgainullin/golf.git
 cd golf
+uv sync
 ```
 
-## Usage
-
-### Running the Simulation
-
-To start the AI training simulation: 
-
-```bash
-python simulation.py
-```
-
-### Collecting Tensor Transitions for Offline RL
-
-Enable the optional tensor logger to persist state/action/reward transitions that
-can be replayed when training offline agents:
-
-```bash
-python -m src.simulation --games 100 --holes 9 --log-tensors --tensor-log-dir data
-```
-
-Each worker writes four files per prefix (`.npz`, `.json`, `_metrics.json`,
-`_metrics_series.json`). The compressed archive stores:
-
-- `states`: one-hot tensors with shape `(ranks, positions, suits)`
-- `next_states`: successor tensors with identical shape
-- `actions`: canonical action ids (0: take face card, 1: draw deck, 2-15: place/discard variants)
-- `rewards`, `dones`: scalar outcomes per transition
-
-Any run that enables logging prints a short diagnostics block highlighting
-skewed action distributions or flat reward signals so you can catch degenerate
-datasets early.
-
-### Loading Tensor Datasets
-
-Use `TensorTransitionDataset` to load and prepare artifacts for learning:
-
-```python
-from src.tensor_dataset import TensorTransitionDataset
-
-dataset = TensorTransitionDataset("data/tensor_transitions")
-batch = dataset.as_qtransformer_arrays()
-
-# batch contains numpy arrays ready for torch/jax:
-#   player_cards, holding_cards, discard_top,
-#   next_player_cards, next_holding_cards, next_discard_top,
-#   actions, rewards, dones
-```
-
-The helper automatically converts the 3D one-hot tensors to the token format
-expected by `QTransformer` (six visible cards plus the current discard top,
-with 52 representing an unknown card). Each `TensorTransitionRecord` also
-exposes the original metadata and decoded `(action_num, action, position)`
-tuple via `record.action_tuple()` when you need human-readable actions.
-
-### Offline DQN Training
-
-Train DQN agents on collected transitions:
-
-```bash
-# Single training run
-python -m src.dqn_offline \
-  --archive-prefix tmp/tensor_logs_batch/tensor_transitions_combined \
-  --output-dir tmp/my_model \
-  --epochs 20
-
-# Hyperparameter sweep (train multiple agents)
-python -m src.experiment_runner \
-  --config configs/experiment_quick.json \
-  --output-dir tmp/experiments \
-  --epochs 20
-```
-
-### Evaluating Models
-
-**Evaluate a Hall-of-Fame checkpoint** (downloads from HuggingFace, runs [DQN, R, H, R]):
-
-```bash
-uv run python -m scripts.eval_hof --repo-id vgainullin/golf --games 1000 --holes 9
-```
-
-**Evaluate tournament agents vs random opponents** (batched GPU inference):
-
-```bash
-uv run python -m scripts.eval_vs_random --tournament-dir data/exp11_cyclic --games 200 --holes 9
-```
-
-**Benchmark heuristic baselines** (random, simple, base, improved):
+**Benchmark the heuristic baselines:**
 
 ```bash
 uv run python -m scripts.eval_heuristics --games 5000 --holes 9
 ```
 
-**Plot tournament training progress:**
+**Evaluate the published champion checkpoint** (downloads from HuggingFace):
 
 ```bash
-uv run python -m scripts.plot_training_progress \
-  --metrics data/exp9_v3_extended/metrics_log.jsonl \
-  --output training_progress.png
+uv run python -m scripts.eval_hof --repo-id vgainullin/golf --games 1000 --holes 9
 ```
 
-> **Note:** `src/evaluate_agents.py`, `src/evaluate_self_play.py`, and
-> `scripts/evaluate_offline_agent.py` are deprecated. They use the old
-> non-vectorized simulation loop. Use the scripts above instead.
+**Run an LLM as a player** (requires `OPENROUTER_API_KEY` for hosted models):
 
-## Game Parameters
-
-You can modify various game parameters in the simulation:
-- Number of players
-- Number of rounds ("holes")
-- Learning rate
-- Exploration rate (epsilon)
-
-## Game Rules
-
-### Setup
-- Each player is dealt 6 cards face down in a 2x3 grid
-- One card is placed face-up to start the discard pile
-- Remaining cards form the draw pile
-
-### Gameplay
-1. On their turn, a player can:
-   - Draw from the deck
-   - Take the top card from the discard pile
-2. After drawing, they must either:
-   - Replace one of their cards with the drawn card
-   - Discard the drawn card and flip one their cards
-3. The round ends when any of the players flipped of their cards
-4. At the end of 9 rounds, the player with the lowest score wins
-
-### Scoring
-- Number cards (3-10): Face value
-- Face cards (J, Q): 10 points
-- 2: -2 points
-- King: 0 points
-- Ace: 1 point
-- Matching cards in the same column: 0 points
-
-## Project Structure
-
-```
-golf/
-├── simulation.py      # Q-learning simulation
-├── game.py           # Core game logic
-├── player.py         # Player class definitions
-└── README.md
+```bash
+uv run python -m src.llm_player --model anthropic/claude-haiku-4.5 --games 5 --holes 9
 ```
 
-## AI Implementation
+**Train your own DQN** (long, GPU recommended):
 
-The project uses Q-learning, a reinforcement learning algorithm, to train AI agents. The agents learn optimal card selection and replacement strategies through repeated gameplay.
+```bash
+uv run python -m src.tournament \
+  --model-variant v3 --hidden-dim-choices 256 --embedding-dim 64 \
+  --population-size 8 --generations 350 --cycle-length 50 \
+  --episodes-per-gen 1500 --buffer-capacity 100000 --batch-size 512 \
+  --epsilon-start 0.868 --epsilon-end 0.051 \
+  --lr-range 8.3e-5 0.0024 --updates-per-episode 8 \
+  --target-update-interval 843 --gamma 0.99 --reward-shaping hindsight \
+  --output-dir data/my_run
+```
 
-### Key Components
-- State representation: Current hand configuration
-- Actions: Card selections and replacements
-- Rewards: Based on final score and game outcome
+This is the Experiment 11 config. With cyclic epsilon (`--cycle-length`), it reaches solo ~9.6 by generation 343.
 
-## Contributing
+**Run the MDP diagnostics on your environment:**
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+```bash
+uv run python -m src.diagnostics
+```
+
+The diagnostics catch the same class of bug that took us five failed experiments to find by hand. See [`docs/experiments.md`](docs/experiments.md) (search for "MDP Diagnostics Toolkit").
+
+## What's still open
+
+The DQN can play Golf well but it can't *explain* what it's doing. Three threads are open and welcome contributions:
+
+1. **Strategy extraction.** Distill the champion's policy into human-readable rules — does it actually count cards? Does it have a different opening from the endgame? The behavioral metrics in the lab notebook hint at answers, but no one has read out the actual decision rules.
+2. **LLM benchmark expansion.** The current results cover Haiku, DeepSeek-R1 7B, and Gemma 2 9B. A broader leaderboard — Sonnet, Opus, GPT-5, Gemini, larger open models — would make this a much sharper artifact.
+3. **Playable web/mobile game.** The simulator is fast and self-contained. Wrapping it in a UI to play against the heuristic, the DQN, or an LLM would make this a useful airplane-mode time-killer.
+
+## License
+
+[MIT](LICENSE).
