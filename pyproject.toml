@@ -12,6 +12,7 @@ dependencies = [
     "optuna",
     "matplotlib>=3.10.8",
     "wandb-workspaces>=0.3.7",
+    "openai>=1.0.0",
 ]
 
 [build-system]
