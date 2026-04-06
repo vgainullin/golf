@@ -1,7 +1,19 @@
 [project]
 name = "golf"
 version = "0.1.0"
+description = "Reinforcement learning experiments and a fast simulator for the 6-card Golf card game."
+readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Vlad Gainullin" }]
+keywords = ["reinforcement-learning", "card-game", "golf", "dqn", "self-play"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Games/Entertainment",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "numpy",
     "pandas",
@@ -15,9 +27,21 @@ dependencies = [
     "openai>=1.0.0",
 ]
 
+[project.urls]
+Repository = "https://github.com/vgainullin/golf"
+Issues = "https://github.com/vgainullin/golf/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
