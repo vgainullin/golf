@@ -6,6 +6,14 @@ A Python implementation of the card game Golf, including a simulation/AI trainin
 
 Golf is a card game where players try to achieve the lowest score possible by strategically swapping and replacing cards in their hand. This implementation includes both the game logic and an AI training system using Q-learning.
 
+## Results
+
+Tournament-trained DQN agents have surpassed the strongest hand-coded heuristic on this game. The figure below shows Exp 10 (Cyclic Epsilon Annealing), where warm restarts on the exploration rate broke through the col_matches plateau and the agent crossed the improved-heuristic baseline around cycle 5:
+
+![Exp 10 training progress](docs/figures/exp10_cyclic_epsilon.png)
+
+The follow-up Exp 11 (programmatic 7-cycle run, 343 generations) reached the current best: **9.61** vs `[R,H,R]` and **8.02** vs three random opponents -- both better than the improved heuristic (10.52 / 8.10). Full writeups in [docs/experiments.md](docs/experiments.md).
+
 ## Features
 
 - Complete Golf card game implementation

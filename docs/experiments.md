@@ -1106,6 +1106,10 @@ Trial data: `data/optuna_trials/v3-explore-r4/`
 
 ## Experiment 10: Extended v3 training with Cyclic Epsilon Annealing (2026-03-16)
 
+![Exp 10 training progress](figures/exp10_cyclic_epsilon.png)
+
+*Top: best solo [R,H,R] score per generation crossing the improved heuristic line (~10.52) around cycle 5. Middle: col_matches climbing from ~0.25 to ~0.73, rev_replace declining slightly. Bottom: epsilon schedule with 7 warm restarts (irregular early boundaries from manual resumes).*
+
 ### Setup
 
 Extended training run using trial 27's hyperparameters (best stable config from Exp 9 r4):
