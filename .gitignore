@@ -7,9 +7,17 @@ __pycache__/
 .DS_Store
 .env
 .venv
-data/tensor_transitions*.npz
-data/tensor_transitions*.json
-data/tensor_transitions*_metrics.json
-data/tensor_transitions*_metrics_series.json
-wandb/
+
+# Experiment outputs — keep these out of git, they're large and reproducible
+data/exp*/
 data/tournament*/
+data/optuna_*/
+data/tensor_transitions*
+wandb/
+*.pt
+*.pth
+*.ckpt
+
+# Allow the small tracked metric files committed to data/
+!data/dqn_behavioral_metrics.json
+!data/heuristic_behavioral_metrics.json
