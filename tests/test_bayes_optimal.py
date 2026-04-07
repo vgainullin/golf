@@ -41,7 +41,7 @@ def test_tracker_observes_revealed_cards_and_discard_top():
     discard_cards = state.discard_top.long()  # (2,)
 
     t = BayesBeliefTracker(N=2, device=DEVICE)
-    t.observe(state)
+    t.observe(state, my_player_id=0)
 
     for n in range(2):
         assert not t.unobserved[n, revealed_cards[n]]
@@ -55,17 +55,17 @@ def test_tracker_observes_revealed_cards_and_discard_top():
 def test_tracker_is_idempotent():
     state = reset_games(N=2, device=DEVICE)
     t = BayesBeliefTracker(N=2, device=DEVICE)
-    t.observe(state)
+    t.observe(state, my_player_id=0)
     snapshot = t.unobserved.clone()
-    t.observe(state)
-    t.observe(state)
+    t.observe(state, my_player_id=0)
+    t.observe(state, my_player_id=0)
     assert torch.equal(t.unobserved, snapshot)
 
 
 def test_tracker_reset_restores_full_belief():
     state = reset_games(N=2, device=DEVICE)
     t = BayesBeliefTracker(N=2, device=DEVICE)
-    t.observe(state)
+    t.observe(state, my_player_id=0)
     assert (t.total() < 52).any()
     t.reset()
     assert (t.total() == 52).all()
@@ -75,7 +75,7 @@ def test_multiset_sums_to_total():
     state = reset_games(N=4, device=DEVICE)
     state.player_revealed[:, :, :3] = True  # reveal 3 slots for everyone
     t = BayesBeliefTracker(N=4, device=DEVICE)
-    t.observe(state)
+    t.observe(state, my_player_id=0)
     multiset = t.multiset_by_rank()
     assert multiset.shape == (4, 13)
     assert torch.equal(multiset.sum(dim=1), t.total())
@@ -193,7 +193,7 @@ def test_expected_score_column_match_zeroes_column():
 def test_bayes_stage0_returns_valid_action():
     state = reset_games(N=4, device=DEVICE)
     t = BayesBeliefTracker(N=4, device=DEVICE)
-    t.observe(state)
+    t.observe(state, my_player_id=0)
     a = bayes_stage0(state, 0, t)
     assert a.shape == (4,)
     assert ((a == 0) | (a == 1)).all()
@@ -205,7 +205,7 @@ def test_bayes_stage1_returns_valid_action():
     state.current_stage.fill_(1)
     state.player_holding[:, 0] = state.discard_top
     t = BayesBeliefTracker(N=4, device=DEVICE)
-    t.observe(state)
+    t.observe(state, my_player_id=0)
     a = bayes_stage1(state, 0, t)
     assert a.shape == (4,)
     # action is 2-7 (place) or 9-14 (discard+flip)
