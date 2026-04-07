@@ -75,48 +75,43 @@ class BayesBeliefTracker:
         """Mark all 52 cards unobserved (call at the start of each hole)."""
         self.unobserved.fill_(True)
 
-    def observe(self, state: VectorizedGolfState) -> None:
-        """Remove from `unobserved` every card that is currently visible.
+    def observe(self, state: VectorizedGolfState, my_player_id: int) -> None:
+        """Remove from `unobserved` every card visible to player `my_player_id`.
 
-        Visible cards = revealed cards in any player's layout, the current
-        discard top, and any non-empty holding. Idempotent. Should be called
-        on every turn (not only on our own) so that we capture cards that
-        spent a brief moment on the discard pile.
+        Visible cards from this player's POV:
+          - face-up cards in any player's layout (including own),
+          - the current discard top,
+          - my own holding (if any). Other players' holdings are NOT visible
+            to me -- they're either unknown deck draws or cards already on the
+            discard pile.
+
+        Idempotent. Call after every step (own and opponents') so cards that
+        spend a brief moment on the discard pile are still captured.
         """
         N = self.N
         device = self.device
+        n_players = state.player_cards.shape[1]
 
-        # Revealed cards across all 4 players: collect (N, 24) card indices
-        # masked by revealed flag.
-        all_cards = state.player_cards.reshape(N, -1).long()  # (N, 24)
-        all_revealed = state.player_revealed.reshape(N, -1)  # (N, 24)
+        all_cards = state.player_cards.reshape(N, -1).long()  # (N, n_players*6)
+        all_revealed = state.player_revealed.reshape(N, -1)
 
-        # Build a (N, 52) boolean of "newly seen this call"
         seen = torch.zeros(N, NUM_CARDS, dtype=torch.bool, device=device)
+        row = torch.arange(N, device=device)
 
-        # Scatter revealed-card indices into seen mask. Use index_put with
-        # masked positions: we can't directly scatter where mask=False, so
-        # clamp invalid indices to a sink position (0) and rely on the mask.
-        # Easier: loop over the 24 slot positions (small constant).
         for slot in range(all_cards.shape[1]):
-            card_idx = all_cards[:, slot].clamp(0, NUM_CARDS - 1)  # (N,)
-            slot_revealed = all_revealed[:, slot]  # (N,)
-            # Set seen[n, card_idx[n]] = True where slot_revealed[n]
-            row = torch.arange(N, device=device)
+            card_idx = all_cards[:, slot].clamp(0, NUM_CARDS - 1)
+            slot_revealed = all_revealed[:, slot]
             seen[row, card_idx] |= slot_revealed
 
-        # Discard top: always visible (it's literally face-up).
+        # Discard top is face-up to everyone.
         discard_idx = state.discard_top.long().clamp(0, NUM_CARDS - 1)
-        row = torch.arange(N, device=device)
         seen[row, discard_idx] = True
 
-        # Any non-empty holding is also visible (the held card was just drawn
-        # or just taken from the discard pile).
-        for pid in range(4):
-            holding = state.player_holding[:, pid].long()  # (N,)
-            valid = holding >= 0
-            holding_clamped = holding.clamp(0, NUM_CARDS - 1)
-            seen[row, holding_clamped] |= valid
+        # Own holding only (we don't see opponents' held cards).
+        my_holding = state.player_holding[:, my_player_id].long()
+        my_valid = my_holding >= 0
+        my_holding_clamped = my_holding.clamp(0, NUM_CARDS - 1)
+        seen[row, my_holding_clamped] |= my_valid
 
         self.unobserved &= ~seen
 
@@ -401,10 +396,11 @@ SEAT_PRESETS = {
 
 
 def parse_eval_config(spec: str) -> List[str]:
-    """Parse 'R,H,R' into ['R', 'H', 'R'] (3 opponents). Seat 0 is always Bayes."""
+    """Parse 'R,H,R' into ['R', 'H', 'R']. Seat 0 is always Bayes; the parsed
+    list is the opponents (length n_players - 1)."""
     parts = [p.strip() for p in spec.split(",")]
-    if len(parts) != 3:
-        raise ValueError(f"--eval-config must be 3 comma-separated seats, got {spec!r}")
+    if not parts:
+        raise ValueError("--eval-config must contain at least one opponent")
     for p in parts:
         if p not in SEAT_PRESETS:
             raise ValueError(f"Unknown seat preset {p!r}; valid: {list(SEAT_PRESETS)}")
@@ -416,17 +412,28 @@ def run_bayes_eval(
     num_games: int,
     holes: int,
     device: torch.device,
+    n_players: int = 4,
 ) -> float:
-    """Run a [Bayes, opp1, opp2, opp3] eval and return seat-0 avg score / hole."""
+    """Run a [Bayes, opp1, opp2, ...] eval and return seat-0 avg score / hole.
+
+    n_players defaults to 4. The number of opponent_specs must equal
+    n_players - 1.
+    """
+    if len(opponent_specs) != n_players - 1:
+        raise ValueError(
+            f"opponent_specs length {len(opponent_specs)} != n_players - 1 = {n_players - 1}"
+        )
+
     N = num_games
+    BAYES_SEAT = 0
     tracker = BayesBeliefTracker(N, device)
 
     def bayes_s0(state, pid):
-        tracker.observe(state)
+        tracker.observe(state, my_player_id=pid)
         return bayes_stage0(state, pid, tracker)
 
     def bayes_s1(state, pid):
-        tracker.observe(state)
+        tracker.observe(state, my_player_id=pid)
         return bayes_stage1(state, pid, tracker)
 
     seat_fns: List[SeatFn] = [(bayes_s0, bayes_s1)]
@@ -436,17 +443,17 @@ def run_bayes_eval(
     total = torch.zeros(N, dtype=torch.float32, device=device)
 
     for hole in range(1, holes + 1):
-        state = reset_games(N, device)
+        state = reset_games(N, device, n_players=n_players)
         tracker.reset()
         # Observe the starting discard top so the very first decision is
         # informed.
-        tracker.observe(state)
+        tracker.observe(state, my_player_id=BAYES_SEAT)
 
-        for _ in range(30):
+        for _ in range(40):
             if state.done.all():
                 break
 
-            for pid in range(4):
+            for pid in range(n_players):
                 active = ~state.done
                 back_to_trigger = state.last_turn & (state.end_game_player == pid)
                 state.done = state.done | (back_to_trigger & active)
@@ -459,16 +466,16 @@ def run_bayes_eval(
                 state.current_stage.fill_(0)
                 actions_s0 = s0_fn(state, pid)
                 step_stage0(state, actions_s0, pid)
-                # Observe after stage 0 too -- a deck draw becomes a holding
-                # which is now visible.
-                tracker.observe(state)
+                # Observe after stage 0 too: opponent moves change discard top
+                # / reveal cards. Always observe from the BAYES seat's POV.
+                tracker.observe(state, my_player_id=BAYES_SEAT)
                 if state.done.all():
                     break
 
                 state.current_stage.fill_(1)
                 actions_s1 = s1_fn(state, pid)
                 step_stage1(state, actions_s1, pid)
-                tracker.observe(state)
+                tracker.observe(state, my_player_id=BAYES_SEAT)
 
                 all_rev = state.player_revealed[:, pid, :].all(dim=1)
                 newly_last = active & all_rev & (~state.last_turn)
@@ -508,10 +515,11 @@ def main():
 
     device = torch.device(args.device)
     opponents = parse_eval_config(args.eval_config)
+    n_players = 1 + len(opponents)
 
-    print(f"Bayes player: solo eval [B,{','.join(opponents)}], "
-          f"{args.games} games x {args.holes} holes")
-    score = run_bayes_eval(opponents, args.games, args.holes, device)
+    print(f"Bayes player: solo eval [B,{','.join(opponents)}] "
+          f"({n_players} players), {args.games} games x {args.holes} holes")
+    score = run_bayes_eval(opponents, args.games, args.holes, device, n_players=n_players)
     print(f"  bayes seat-0 avg score / hole: {score:.3f}")
 
 
