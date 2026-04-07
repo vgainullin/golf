@@ -379,6 +379,72 @@ def bayes_v2_stage0(
     )
 
 
+def bayes_v3_stage0(
+    state: VectorizedGolfState,
+    player_id: int,
+    tracker: BayesBeliefTracker,
+    draw_override_threshold: float = 0.50,
+) -> torch.Tensor:
+    """Stage 0 = improved heuristic with a belief-driven DRAW OVERRIDE.
+
+    NOT a strict superset of IH. Starts from IH's defaults but OVERRIDES
+    IH's "take low face card" with a draw when the posterior says the
+    deck is very likely to give a strictly better card:
+
+        if P(deck_draw_score < face_score | belief) > threshold
+        AND IH would have taken purely for being low (not for a deterministic
+            revealed-rank match)
+        then DRAW instead
+
+    The deterministic rank-match path (face_rank present in own face-up
+    layout) is NOT overridden -- a deterministic column match is almost
+    always better than the gamble of drawing.
+
+    Reasoning: in regimes where the deck is enriched in low-score cards
+    (e.g., the stacked-deck test, or simply late game when high cards have
+    been disproportionately observed), a low face card on the discard top
+    may still be worse than a typical draw. The IH cutoff doesn't see
+    this; the belief does.
+
+    With draw_override_threshold = 1.01 the override never fires and the
+    function reduces to `heuristic_stage0` exactly.
+    """
+    device = state.player_cards.device
+    rank_scores = RANK_SCORES.to(device)
+    N = state.player_cards.shape[0]
+
+    face_rank = (state.discard_top % NUM_RANKS).long()  # (N,)
+    face_score = rank_scores[face_rank]  # (N,)
+
+    # IH rule 1: low card.
+    take_low = face_score < RANK_CUTOFF
+
+    # IH rule 2: rank matches a revealed own card (deterministic match).
+    player_cards = state.player_cards[:, player_id, :]
+    player_revealed = state.player_revealed[:, player_id, :]
+    player_ranks = player_cards % NUM_RANKS
+    revealed_ranks = torch.where(
+        player_revealed, player_ranks, torch.full_like(player_ranks, -1)
+    )
+    rank_match_revealed = (revealed_ranks == face_rank.unsqueeze(1)).any(dim=1)
+
+    # P(deck draw is strictly better than face card | belief).
+    multiset = tracker.multiset_by_rank().float()  # (N, 13)
+    total = tracker.total().float().clamp(min=1)  # (N,)
+    lt_mask = rank_scores.unsqueeze(0) < face_score.unsqueeze(1)  # (N, 13)
+    p_draw_lt = (multiset * lt_mask.float()).sum(dim=1) / total  # (N,)
+
+    high_p_lt = p_draw_lt > draw_override_threshold
+
+    # Take if rank_match (deterministic), OR if take_low AND not overridden.
+    take_face = rank_match_revealed | (take_low & ~high_p_lt)
+    return torch.where(
+        take_face,
+        torch.zeros(N, dtype=torch.long, device=device),
+        torch.ones(N, dtype=torch.long, device=device),
+    )
+
+
 def bayes_stage1(
     state: VectorizedGolfState,
     player_id: int,
