@@ -1,0 +1,519 @@
+"""Belief-augmented heuristic Golf player.
+
+Takes the improved heuristic (`improved_stage1` + `heuristic_stage0`) and
+replaces its hard-coded constants with values derived from a posterior over
+unobserved cards. The belief is exact: under shuffle-once-and-deal, every
+unobserved card has the same uniform-over-unobserved-multiset posterior, so a
+single (N, 52) bool mask is sufficient.
+
+Two changes vs the improved heuristic:
+
+1. Stage 0: cutoff for "take face card" becomes E[score(unknown)] under the
+   current belief, instead of the constant RANK_CUTOFF=4. The rank-match rule
+   is preserved.
+
+2. Stage 1: trial layouts are scored with `expected_score`, which treats each
+   face-down slot as a draw from the belief multiset (rather than zero, as
+   `compute_score` does). The same big-improvement / small-ok / discard-flip
+   decision rules are used, but on a more accurate score signal.
+
+The belief tracker observes every visible card across all four players on
+every turn so that ephemeral discards (briefly on top, then taken by an
+opponent) are still recorded.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from typing import Callable, List, Tuple
+
+import torch
+
+from src.vectorized_golf import (
+    NUM_CARDS,
+    NUM_RANKS,
+    RANK_CUTOFF,
+    RANK_SCORES,
+    VectorizedGolfState,
+    compute_final_score,
+    compute_score,
+    heuristic_stage0,
+    heuristic_stage1,
+    improved_stage1,
+    random_stage0,
+    random_stage1,
+    reset_games,
+    step_stage0,
+    step_stage1,
+)
+
+
+# ---------------------------------------------------------------------------
+# Belief tracker
+# ---------------------------------------------------------------------------
+
+
+class BayesBeliefTracker:
+    """Tracks the set of still-unobserved cards per game in a batch.
+
+    The belief is a (N, 52) bool mask: True = the card has not yet been seen
+    by us. From this we derive a per-rank multiset and an expected score for
+    any unknown card.
+    """
+
+    def __init__(self, N: int, device: torch.device):
+        self.N = N
+        self.device = device
+        # All 52 cards start unobserved
+        self.unobserved = torch.ones(N, NUM_CARDS, dtype=torch.bool, device=device)
+        # Precompute rank-of-card lookup
+        self._card_ranks = (torch.arange(NUM_CARDS, device=device) % NUM_RANKS).long()
+        self._rank_scores = RANK_SCORES.to(device)
+
+    def reset(self) -> None:
+        """Mark all 52 cards unobserved (call at the start of each hole)."""
+        self.unobserved.fill_(True)
+
+    def observe(self, state: VectorizedGolfState) -> None:
+        """Remove from `unobserved` every card that is currently visible.
+
+        Visible cards = revealed cards in any player's layout, the current
+        discard top, and any non-empty holding. Idempotent. Should be called
+        on every turn (not only on our own) so that we capture cards that
+        spent a brief moment on the discard pile.
+        """
+        N = self.N
+        device = self.device
+
+        # Revealed cards across all 4 players: collect (N, 24) card indices
+        # masked by revealed flag.
+        all_cards = state.player_cards.reshape(N, -1).long()  # (N, 24)
+        all_revealed = state.player_revealed.reshape(N, -1)  # (N, 24)
+
+        # Build a (N, 52) boolean of "newly seen this call"
+        seen = torch.zeros(N, NUM_CARDS, dtype=torch.bool, device=device)
+
+        # Scatter revealed-card indices into seen mask. Use index_put with
+        # masked positions: we can't directly scatter where mask=False, so
+        # clamp invalid indices to a sink position (0) and rely on the mask.
+        # Easier: loop over the 24 slot positions (small constant).
+        for slot in range(all_cards.shape[1]):
+            card_idx = all_cards[:, slot].clamp(0, NUM_CARDS - 1)  # (N,)
+            slot_revealed = all_revealed[:, slot]  # (N,)
+            # Set seen[n, card_idx[n]] = True where slot_revealed[n]
+            row = torch.arange(N, device=device)
+            seen[row, card_idx] |= slot_revealed
+
+        # Discard top: always visible (it's literally face-up).
+        discard_idx = state.discard_top.long().clamp(0, NUM_CARDS - 1)
+        row = torch.arange(N, device=device)
+        seen[row, discard_idx] = True
+
+        # Any non-empty holding is also visible (the held card was just drawn
+        # or just taken from the discard pile).
+        for pid in range(4):
+            holding = state.player_holding[:, pid].long()  # (N,)
+            valid = holding >= 0
+            holding_clamped = holding.clamp(0, NUM_CARDS - 1)
+            seen[row, holding_clamped] |= valid
+
+        self.unobserved &= ~seen
+
+    # ----- derived quantities -----
+
+    def multiset_by_rank(self) -> torch.Tensor:
+        """(N, 13) int counts of unobserved cards per rank."""
+        # unobserved: (N, 52). Reshape via rank lookup: counts[n, r] = sum_{c: rank(c)=r} unobserved[n, c].
+        # Use a one-hot rank matrix (52, 13) and matmul.
+        if not hasattr(self, "_rank_one_hot"):
+            self._rank_one_hot = torch.nn.functional.one_hot(
+                self._card_ranks, num_classes=NUM_RANKS
+            ).float()  # (52, 13)
+        return (self.unobserved.float() @ self._rank_one_hot).to(torch.int64)
+
+    def total(self) -> torch.Tensor:
+        """(N,) int total unobserved cards per game."""
+        return self.unobserved.sum(dim=1)
+
+    def expected_unknown_score(self) -> torch.Tensor:
+        """(N,) E[rank score | uniform over unobserved cards]. Returns 0 where total=0."""
+        per_card_score = self._rank_scores[self._card_ranks]  # (52,)
+        score_sum = (self.unobserved.float() @ per_card_score)  # (N,)
+        total = self.total().clamp(min=1).float()
+        return score_sum / total
+
+
+# ---------------------------------------------------------------------------
+# Belief-aware scoring
+# ---------------------------------------------------------------------------
+
+
+def expected_score(
+    cards: torch.Tensor,
+    revealed: torch.Tensor,
+    multiset: torch.Tensor,
+    total: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    """Expected final score of a 6-card layout under the belief multiset.
+
+    For each of the 3 columns (slot c paired with slot c+3) we have:
+      - both revealed: deterministic (0 if column-match, else sum of rank scores).
+      - one revealed (rank r), one hidden ?:
+            E = P(?=r) * 0 + (1 - P(?=r)) * (score(r) + E[score(?) | ? != r])
+      - both hidden: E[s(a)+s(b)] - 2 * sum_r P(both=r) * score(r), with both
+        cards sampled WITHOUT replacement from the unobserved multiset.
+
+    The cross-column dependence (different columns share the same multiset)
+    is ignored, which is a small approximation when |multiset| >> 6.
+
+    Args:
+        cards: (N, 6) int card indices
+        revealed: (N, 6) bool
+        multiset: (N, 13) int counts per rank of unobserved cards
+        total: (N,) int total unobserved
+        device: torch device
+
+    Returns:
+        (N,) float32 expected final score
+    """
+    N = cards.shape[0]
+    rank_scores = RANK_SCORES.to(device)  # (13,)
+    ranks = (cards % NUM_RANKS).long()  # (N, 6), valid only where revealed
+
+    multiset_f = multiset.float()  # (N, 13)
+    total_f = total.float().clamp(min=1)  # (N,)
+    total_minus1 = (total.float() - 1).clamp(min=1)  # (N,)
+
+    # E[score(?)]                           = sum_r (n_r/N) * score(r)
+    e_unknown = (multiset_f * rank_scores.unsqueeze(0)).sum(dim=1) / total_f  # (N,)
+
+    # P(both unknowns share rank r) under sample-w/o-replacement:
+    #   n_r * (n_r - 1) / (N * (N - 1))
+    p_pair_per_rank = (multiset_f * (multiset_f - 1)) / (
+        (total_f * total_minus1).unsqueeze(1)
+    )
+    # P(both unknowns share rank r), shape (N, 13)
+    e_both_hidden_correction = (p_pair_per_rank * rank_scores.unsqueeze(0)).sum(dim=1)  # (N,)
+
+    # E[col | both hidden] = 2 * E[?] - 2 * correction
+    e_col_both_hidden = 2.0 * e_unknown - 2.0 * e_both_hidden_correction  # (N,)
+
+    out = torch.zeros(N, dtype=torch.float32, device=device)
+
+    for col in range(3):
+        a_idx = col
+        b_idx = col + 3
+        a_rev = revealed[:, a_idx]  # (N,)
+        b_rev = revealed[:, b_idx]
+        a_rank = ranks[:, a_idx]
+        b_rank = ranks[:, b_idx]
+
+        a_score = rank_scores[a_rank]
+        b_score = rank_scores[b_rank]
+
+        # ----- both revealed -----
+        both_rev = a_rev & b_rev
+        match = a_rank == b_rank
+        col_both_rev = torch.where(
+            match, torch.zeros_like(a_score), a_score + b_score
+        )
+
+        # ----- a revealed, b hidden -----
+        # P(? = a_rank) = n_{a_rank} / N
+        n_at_a_rank = multiset_f.gather(1, a_rank.clamp(min=0).unsqueeze(1)).squeeze(1)  # (N,)
+        p_match_a = n_at_a_rank / total_f  # (N,)
+        # E[score(?) | ? != a_rank] = (sum_r n_r*score(r) - n_{a_rank}*score(a_rank)) / (N - n_{a_rank})
+        denom_a = (total_f - n_at_a_rank).clamp(min=1)
+        sum_n_score = (multiset_f * rank_scores.unsqueeze(0)).sum(dim=1)  # (N,)
+        e_other_a = (sum_n_score - n_at_a_rank * a_score) / denom_a
+        col_a_rev_only = (1.0 - p_match_a) * (a_score + e_other_a)  # match=>0
+
+        # ----- b revealed, a hidden -----
+        n_at_b_rank = multiset_f.gather(1, b_rank.clamp(min=0).unsqueeze(1)).squeeze(1)
+        p_match_b = n_at_b_rank / total_f
+        denom_b = (total_f - n_at_b_rank).clamp(min=1)
+        e_other_b = (sum_n_score - n_at_b_rank * b_score) / denom_b
+        col_b_rev_only = (1.0 - p_match_b) * (b_score + e_other_b)
+
+        # ----- both hidden -----
+        # already computed above as e_col_both_hidden
+
+        a_only = a_rev & (~b_rev)
+        b_only = b_rev & (~a_rev)
+        none = (~a_rev) & (~b_rev)
+
+        col_score = torch.zeros_like(out)
+        col_score = torch.where(both_rev, col_both_rev, col_score)
+        col_score = torch.where(a_only, col_a_rev_only, col_score)
+        col_score = torch.where(b_only, col_b_rev_only, col_score)
+        col_score = torch.where(none, e_col_both_hidden, col_score)
+
+        out = out + col_score
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Belief-aware stage functions
+# ---------------------------------------------------------------------------
+
+
+def bayes_stage0(
+    state: VectorizedGolfState,
+    player_id: int,
+    tracker: BayesBeliefTracker,
+) -> torch.Tensor:
+    """Belief-aware stage 0.
+
+    Take face card if its rank score < E[score of an unknown card] OR if its
+    rank matches a revealed card in our layout. Otherwise draw from deck.
+
+    The "<" cutoff is the only difference from `heuristic_stage0`: a constant
+    4 is replaced by the belief-derived expected unknown score.
+    """
+    device = state.player_cards.device
+    rank_scores = RANK_SCORES.to(device)
+    N = state.player_cards.shape[0]
+
+    face_rank = (state.discard_top % NUM_RANKS).long()  # (N,)
+    face_score = rank_scores[face_rank]  # (N,)
+
+    e_unknown = tracker.expected_unknown_score()  # (N,)
+
+    take_low = face_score < e_unknown
+
+    player_cards = state.player_cards[:, player_id, :]
+    player_revealed = state.player_revealed[:, player_id, :]
+    player_ranks = player_cards % NUM_RANKS
+    revealed_ranks = torch.where(
+        player_revealed, player_ranks, torch.full_like(player_ranks, -1)
+    )
+    rank_match = (revealed_ranks == face_rank.unsqueeze(1)).any(dim=1)
+
+    take_face = take_low | rank_match
+    return torch.where(
+        take_face,
+        torch.zeros(N, dtype=torch.long, device=device),
+        torch.ones(N, dtype=torch.long, device=device),
+    )
+
+
+def bayes_stage1(
+    state: VectorizedGolfState,
+    player_id: int,
+    tracker: BayesBeliefTracker,
+) -> torch.Tensor:
+    """Belief-aware stage 1.
+
+    Same structure as `improved_stage1`, but trial layouts are scored with
+    `expected_score` (which treats face-down slots as belief-multiset draws)
+    rather than `compute_score` (which treats them as zero).
+
+    For each candidate placement position p, simulate placing the held card
+    at p (revealing slot p, removing the displaced card from the multiset)
+    and compute E[final score]. Pick the position that minimizes this.
+
+    Decision rules carry over:
+      1. If best E[final] <= current E[final] - cutoff: place at best_pos.
+      2. Elif best E[final] - current E[final] < cutoff and we have an
+         unrevealed slot: place at the first unrevealed slot for info gain.
+      3. Else: discard + flip the first unrevealed slot.
+    """
+    device = state.player_cards.device
+    N = state.player_cards.shape[0]
+
+    cards = state.player_cards[:, player_id, :].clone()  # (N, 6)
+    revealed = state.player_revealed[:, player_id, :].clone()  # (N, 6)
+    held = state.player_holding[:, player_id]  # (N,)
+    unrevealed = ~revealed
+
+    multiset = tracker.multiset_by_rank()  # (N, 13)
+    total = tracker.total()  # (N,)
+
+    # Current expected final score under current belief (no action taken).
+    current_e = expected_score(cards, revealed, multiset, total, device)  # (N,)
+
+    # For each candidate position, the held card is placed (becomes revealed).
+    # The displaced card at that position leaves the deck/our view; if the
+    # position was previously unrevealed, the displaced card is one we never
+    # saw, so the multiset effectively shrinks by one *random* card. We
+    # approximate this as removing one expected-rank card -- which we model by
+    # passing the same multiset (since removing one uniform sample doesn't
+    # change the per-rank proportions in expectation). For the small bias
+    # this introduces, we accept it as a baseline-quality approximation.
+    #
+    # If the position was already revealed, the displaced card is known and
+    # has been observed before; the multiset is unchanged.
+    #
+    # The held card itself is already in `unobserved=False` because the
+    # tracker observed it when we picked it up. So no further multiset
+    # update is needed for the held card.
+
+    best_score = torch.full((N,), 1e6, dtype=torch.float32, device=device)
+    best_pos = torch.zeros(N, dtype=torch.long, device=device)
+
+    for pos in range(6):
+        trial_cards = cards.clone()
+        trial_cards[:, pos] = held
+        trial_revealed = revealed.clone()
+        trial_revealed[:, pos] = True
+        score = expected_score(trial_cards, trial_revealed, multiset, total, device)
+        better = score < best_score
+        best_score = torch.where(better, score, best_score)
+        best_pos = torch.where(better, torch.full_like(best_pos, pos), best_pos)
+
+    # First unrevealed position (for fallback flip)
+    has_unrevealed = unrevealed.any(dim=1)
+    unrevealed_idx = torch.where(
+        unrevealed,
+        torch.arange(6, device=device).unsqueeze(0).expand(N, -1),
+        torch.full((N, 6), 99, dtype=torch.long, device=device),
+    )
+    first_unrevealed = unrevealed_idx.min(dim=1).values.clamp(0, 5)
+
+    big_improvement = best_score <= (current_e - RANK_CUTOFF)
+    small_ok = (best_score - current_e) < RANK_CUTOFF
+    place_unrevealed = (~big_improvement) & small_ok & has_unrevealed
+    discard_flip = (~big_improvement) & (~place_unrevealed) & has_unrevealed
+
+    action = 2 + best_pos
+    action = torch.where(place_unrevealed, 2 + first_unrevealed, action)
+    action = torch.where(discard_flip, 9 + first_unrevealed, action)
+
+    return action
+
+
+# ---------------------------------------------------------------------------
+# Eval loop
+# ---------------------------------------------------------------------------
+
+
+SeatFn = Tuple[Callable, Callable]
+
+
+SEAT_PRESETS = {
+    "R": (random_stage0, random_stage1),
+    "H": (heuristic_stage0, improved_stage1),  # "H" = improved heuristic
+    "h": (heuristic_stage0, heuristic_stage1),  # base heuristic
+}
+
+
+def parse_eval_config(spec: str) -> List[str]:
+    """Parse 'R,H,R' into ['R', 'H', 'R'] (3 opponents). Seat 0 is always Bayes."""
+    parts = [p.strip() for p in spec.split(",")]
+    if len(parts) != 3:
+        raise ValueError(f"--eval-config must be 3 comma-separated seats, got {spec!r}")
+    for p in parts:
+        if p not in SEAT_PRESETS:
+            raise ValueError(f"Unknown seat preset {p!r}; valid: {list(SEAT_PRESETS)}")
+    return parts
+
+
+def run_bayes_eval(
+    opponent_specs: List[str],
+    num_games: int,
+    holes: int,
+    device: torch.device,
+) -> float:
+    """Run a [Bayes, opp1, opp2, opp3] eval and return seat-0 avg score / hole."""
+    N = num_games
+    tracker = BayesBeliefTracker(N, device)
+
+    def bayes_s0(state, pid):
+        tracker.observe(state)
+        return bayes_stage0(state, pid, tracker)
+
+    def bayes_s1(state, pid):
+        tracker.observe(state)
+        return bayes_stage1(state, pid, tracker)
+
+    seat_fns: List[SeatFn] = [(bayes_s0, bayes_s1)]
+    for spec in opponent_specs:
+        seat_fns.append(SEAT_PRESETS[spec])
+
+    total = torch.zeros(N, dtype=torch.float32, device=device)
+
+    for hole in range(1, holes + 1):
+        state = reset_games(N, device)
+        tracker.reset()
+        # Observe the starting discard top so the very first decision is
+        # informed.
+        tracker.observe(state)
+
+        for _ in range(30):
+            if state.done.all():
+                break
+
+            for pid in range(4):
+                active = ~state.done
+                back_to_trigger = state.last_turn & (state.end_game_player == pid)
+                state.done = state.done | (back_to_trigger & active)
+                active = ~state.done
+                if not active.any():
+                    break
+
+                s0_fn, s1_fn = seat_fns[pid]
+
+                state.current_stage.fill_(0)
+                actions_s0 = s0_fn(state, pid)
+                step_stage0(state, actions_s0, pid)
+                # Observe after stage 0 too -- a deck draw becomes a holding
+                # which is now visible.
+                tracker.observe(state)
+                if state.done.all():
+                    break
+
+                state.current_stage.fill_(1)
+                actions_s1 = s1_fn(state, pid)
+                step_stage1(state, actions_s1, pid)
+                tracker.observe(state)
+
+                all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                newly_last = active & all_rev & (~state.last_turn)
+                state.last_turn = state.last_turn | newly_last
+                state.end_game_player = torch.where(
+                    newly_last,
+                    torch.full_like(state.end_game_player, pid),
+                    state.end_game_player,
+                )
+
+        total += compute_final_score(state.player_cards[:, 0, :], device)
+
+    return total.mean().item() / holes
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--games", type=int, default=5000)
+    p.add_argument("--holes", type=int, default=9)
+    p.add_argument(
+        "--eval-config",
+        type=str,
+        default="R,H,R",
+        help="3 opponent seats (comma-separated). R=random, H=improved heuristic, h=base heuristic.",
+    )
+    p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--seed", type=int, default=None)
+    args = p.parse_args()
+
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+
+    device = torch.device(args.device)
+    opponents = parse_eval_config(args.eval_config)
+
+    print(f"Bayes player: solo eval [B,{','.join(opponents)}], "
+          f"{args.games} games x {args.holes} holes")
+    score = run_bayes_eval(opponents, args.games, args.holes, device)
+    print(f"  bayes seat-0 avg score / hole: {score:.3f}")
+
+
+if __name__ == "__main__":
+    main()
