@@ -259,6 +259,7 @@ def bayes_stage0(
     state: VectorizedGolfState,
     player_id: int,
     tracker: BayesBeliefTracker,
+    use_belief: bool = True,
 ) -> torch.Tensor:
     """Belief-aware stage 0.
 
@@ -267,6 +268,11 @@ def bayes_stage0(
 
     The "<" cutoff is the only difference from `heuristic_stage0`: a constant
     4 is replaced by the belief-derived expected unknown score.
+
+    If use_belief=False, the cutoff falls back to the constant RANK_CUTOFF=4,
+    making this function equivalent to `heuristic_stage0`. This is the
+    "ablation" path: with belief disabled, the bayes player must produce
+    identical decisions to the improved heuristic.
     """
     device = state.player_cards.device
     rank_scores = RANK_SCORES.to(device)
@@ -275,7 +281,10 @@ def bayes_stage0(
     face_rank = (state.discard_top % NUM_RANKS).long()  # (N,)
     face_score = rank_scores[face_rank]  # (N,)
 
-    e_unknown = tracker.expected_unknown_score()  # (N,)
+    if use_belief:
+        e_unknown = tracker.expected_unknown_score()  # (N,)
+    else:
+        e_unknown = torch.full((N,), float(RANK_CUTOFF), device=device)
 
     take_low = face_score < e_unknown
 
@@ -299,6 +308,7 @@ def bayes_stage1(
     state: VectorizedGolfState,
     player_id: int,
     tracker: BayesBeliefTracker,
+    use_belief: bool = True,
 ) -> torch.Tensor:
     """Belief-aware stage 1.
 
@@ -327,8 +337,16 @@ def bayes_stage1(
     multiset = tracker.multiset_by_rank()  # (N, 13)
     total = tracker.total()  # (N,)
 
+    def score_fn(c, r):
+        if use_belief:
+            return expected_score(c, r, multiset, total, device)
+        else:
+            # Belief-disabled: use compute_score (face-down slots = 0).
+            # This makes bayes_stage1 byte-for-byte equivalent to improved_stage1.
+            return compute_score(c, r, device)
+
     # Current expected final score under current belief (no action taken).
-    current_e = expected_score(cards, revealed, multiset, total, device)  # (N,)
+    current_e = score_fn(cards, revealed)  # (N,)
 
     # For each candidate position, the held card is placed (becomes revealed).
     # The displaced card at that position leaves the deck/our view; if the
@@ -354,7 +372,7 @@ def bayes_stage1(
         trial_cards[:, pos] = held
         trial_revealed = revealed.clone()
         trial_revealed[:, pos] = True
-        score = expected_score(trial_cards, trial_revealed, multiset, total, device)
+        score = score_fn(trial_cards, trial_revealed)
         better = score < best_score
         best_score = torch.where(better, score, best_score)
         best_pos = torch.where(better, torch.full_like(best_pos, pos), best_pos)

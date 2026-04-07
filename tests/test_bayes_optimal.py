@@ -218,6 +218,92 @@ def test_bayes_stage1_returns_valid_action():
 # ---------------------------------------------------------------------------
 
 
+def test_bayes_no_belief_equals_improved_heuristic():
+    """Bayes(use_belief=False) must produce identical actions to the improved
+    heuristic. This is a regression test: any divergence means the wiring
+    around bayes_stage0/stage1 has drifted from the improved heuristic
+    semantics, even though the belief is supposed to be the only difference.
+    """
+    from src.bayes_optimal import bayes_stage0, bayes_stage1, BayesBeliefTracker
+    from src.vectorized_golf import (
+        heuristic_stage0,
+        improved_stage1,
+        random_stage0,
+        random_stage1,
+        compute_final_score,
+        step_stage0,
+        step_stage1,
+    )
+
+    torch.manual_seed(0)
+    N = 200
+    BAYES_SEAT = 0
+    n_players = 4
+    tracker = BayesBeliefTracker(N, DEVICE)
+
+    bayes_total = torch.zeros(N, dtype=torch.float32, device=DEVICE)
+    heur_total = torch.zeros(N, dtype=torch.float32, device=DEVICE)
+
+    for runner_kind in ("bayes_no_belief", "improved"):
+        torch.manual_seed(0)
+        tot = torch.zeros(N, dtype=torch.float32, device=DEVICE)
+        for hole in range(3):
+            state = reset_games(N, DEVICE, n_players=n_players)
+            tracker.reset()
+            tracker.observe(state, my_player_id=BAYES_SEAT)
+            for _ in range(40):
+                if state.done.all():
+                    break
+                for pid in range(n_players):
+                    active = ~state.done
+                    back_to_trigger = state.last_turn & (state.end_game_player == pid)
+                    state.done = state.done | (back_to_trigger & active)
+                    active = ~state.done
+                    if not active.any():
+                        break
+                    state.current_stage.fill_(0)
+                    if pid == 0:
+                        if runner_kind == "bayes_no_belief":
+                            a0 = bayes_stage0(state, pid, tracker, use_belief=False)
+                        else:
+                            a0 = heuristic_stage0(state, pid)
+                    else:
+                        a0 = random_stage0(state, pid)
+                    step_stage0(state, a0, pid)
+                    tracker.observe(state, my_player_id=BAYES_SEAT)
+                    if state.done.all():
+                        break
+                    state.current_stage.fill_(1)
+                    if pid == 0:
+                        if runner_kind == "bayes_no_belief":
+                            a1 = bayes_stage1(state, pid, tracker, use_belief=False)
+                        else:
+                            a1 = improved_stage1(state, pid)
+                    else:
+                        a1 = random_stage1(state, pid)
+                    step_stage1(state, a1, pid)
+                    tracker.observe(state, my_player_id=BAYES_SEAT)
+                    all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                    newly = active & all_rev & (~state.last_turn)
+                    state.last_turn = state.last_turn | newly
+                    state.end_game_player = torch.where(
+                        newly,
+                        torch.full_like(state.end_game_player, pid),
+                        state.end_game_player,
+                    )
+            tot += compute_final_score(state.player_cards[:, 0, :], DEVICE)
+        if runner_kind == "bayes_no_belief":
+            bayes_total = tot
+        else:
+            heur_total = tot
+
+    assert torch.equal(bayes_total, heur_total), (
+        f"bayes(no belief) != improved heuristic. "
+        f"bayes mean={bayes_total.mean().item():.6f}, "
+        f"heur mean={heur_total.mean().item():.6f}"
+    )
+
+
 def test_bayes_player_beats_random_opponents():
     torch.manual_seed(0)
     score = run_bayes_eval(
