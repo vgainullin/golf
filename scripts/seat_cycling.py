@@ -36,6 +36,7 @@ from src.bayes_optimal import (
     BayesBeliefTracker,
     bayes_stage0,
     bayes_stage1,
+    bayes_v2_stage0,
 )
 from src.vectorized_golf import (
     compute_final_score,
@@ -57,9 +58,20 @@ from src.vectorized_golf import (
 class SeatHandler:
     """Wraps a player at a fixed seat with its own state (e.g. belief tracker
     for Bayes). Exposes uniform stage0/stage1 callables and a per-hole reset.
+
+    Labels:
+      B  -- naive belief-augmented player (bayes_stage0 + bayes_stage1).
+            Known to be worse than IH; kept for ablation.
+      B2 -- IH + hidden-card column-match check on stage 0 (bayes_v2_stage0
+            with `improved_stage1`). Strict superset of IH.
+      I  -- improved heuristic (heuristic_stage0 + improved_stage1).
+      R  -- random.
     """
 
-    LABELS = ("B", "I", "R")
+    LABELS = ("B", "B2", "I", "R")
+
+    # Tunable per-handler config
+    b2_cutoff: float = float(4)
 
     def __init__(self, label: str, seat_idx: int, N: int, device: torch.device):
         if label not in self.LABELS:
@@ -69,7 +81,7 @@ class SeatHandler:
         self.N = N
         self.device = device
 
-        if label == "B":
+        if label in ("B", "B2"):
             self.tracker = BayesBeliefTracker(N, device)
         else:
             self.tracker = None
@@ -88,6 +100,12 @@ class SeatHandler:
         if self.label == "B":
             self.tracker.observe(state, my_player_id=self.seat)
             return bayes_stage0(state, self.seat, self.tracker)
+        elif self.label == "B2":
+            self.tracker.observe(state, my_player_id=self.seat)
+            return bayes_v2_stage0(
+                state, self.seat, self.tracker,
+                cutoff=SeatHandler.b2_cutoff,
+            )
         elif self.label == "I":
             return heuristic_stage0(state, self.seat)
         else:  # R
@@ -97,6 +115,9 @@ class SeatHandler:
         if self.label == "B":
             self.tracker.observe(state, my_player_id=self.seat)
             return bayes_stage1(state, self.seat, self.tracker)
+        elif self.label == "B2":
+            # B2 keeps IH's stage 1 -- only stage 0 is augmented.
+            return improved_stage1(state, self.seat)
         elif self.label == "I":
             return improved_stage1(state, self.seat)
         else:  # R
@@ -268,10 +289,17 @@ def main():
     p.add_argument("--holes", type=int, default=9)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--b2-cutoff",
+        type=float,
+        default=float(4),
+        help="cutoff for B2 belief-aware take rule (default 4 = IH cutoff).",
+    )
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
+    SeatHandler.b2_cutoff = args.b2_cutoff
 
     roster = [r.strip() for r in args.roster.split(",")]
     for label in roster:
