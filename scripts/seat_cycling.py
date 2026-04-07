@@ -134,6 +134,7 @@ def run_seating(
     num_games: int,
     holes: int,
     device: torch.device,
+    stack_low_cards: bool = False,
 ) -> List[float]:
     """Run num_games games with the given seating and return per-seat avg
     score / hole (length n_players).
@@ -145,7 +146,7 @@ def run_seating(
     totals = [torch.zeros(N, dtype=torch.float32, device=device) for _ in range(n_players)]
 
     for hole in range(1, holes + 1):
-        state = reset_games(N, device, n_players=n_players)
+        state = reset_games(N, device, n_players=n_players, stack_low_cards=stack_low_cards)
         for h in handlers:
             h.reset_for_hole(state)
 
@@ -217,6 +218,7 @@ def run_matchup(
     num_games_per_perm: int,
     holes: int,
     device: torch.device,
+    stack_low_cards: bool = False,
 ) -> Tuple[Dict[str, float], List[Tuple[Tuple[str, ...], List[float]]]]:
     """Run all distinct seat-permutations of the roster.
 
@@ -228,7 +230,10 @@ def run_matchup(
     per_perm: List[Tuple[Tuple[str, ...], List[float]]] = []
 
     for seating in perms:
-        seat_avgs = run_seating(seating, num_games_per_perm, holes, device)
+        seat_avgs = run_seating(
+            seating, num_games_per_perm, holes, device,
+            stack_low_cards=stack_low_cards,
+        )
         per_perm.append((seating, seat_avgs))
         for seat_idx, label in enumerate(seating):
             label_scores[label].append(seat_avgs[seat_idx])
@@ -295,6 +300,11 @@ def main():
         default=float(4),
         help="cutoff for B2 belief-aware take rule (default 4 = IH cutoff).",
     )
+    p.add_argument(
+        "--stack-low-cards",
+        action="store_true",
+        help="Stack the deck so all rank 2/K/A cards are at the bottom of the deck.",
+    )
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -306,7 +316,12 @@ def main():
         if label not in SeatHandler.LABELS:
             raise SystemExit(f"Unknown label {label!r}; valid: {SeatHandler.LABELS}")
 
-    label_means, per_perm = run_matchup(roster, args.games_per_perm, args.holes, device)
+    label_means, per_perm = run_matchup(
+        roster, args.games_per_perm, args.holes, device,
+        stack_low_cards=args.stack_low_cards,
+    )
+    if args.stack_low_cards:
+        print("(stacked deck: 2s, Ks, As at bottom)")
     print_report(roster, label_means, per_perm, args.games_per_perm, args.holes)
 
 

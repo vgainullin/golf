@@ -56,6 +56,7 @@ def reset_games(
     N: int,
     device: torch.device,
     n_players: int = 4,
+    stack_low_cards: bool = False,
 ) -> VectorizedGolfState:
     """Create N fresh games: shuffle decks, deal 6 cards per player, set face card.
 
@@ -66,6 +67,13 @@ def reset_games(
             face card is dealt next, so n_players * 6 + 1 cards are committed
             from the deck up front. n_players is capped only by the deck:
             n_players * 6 + 1 <= 52, so up to 8 players from a single deck.
+        stack_low_cards: if True, all low-score cards (rank 2, K, A; scores
+            -2, 0, 1; 12 cards total) are moved to the END of the deck. As a
+            result, the dealt cards and face card contain none of these
+            low-score ranks, and the low cards only appear via deck draws
+            after the high portion is exhausted. Used to construct rigged
+            test scenarios where the bayes posterior should give a strong
+            "low cards still in deck" signal late in the game.
     """
     if n_players * 6 + 1 > NUM_CARDS:
         raise ValueError(
@@ -75,6 +83,15 @@ def reset_games(
     # Generate shuffled decks: each row is a permutation of 0..51
     deck = torch.stack([torch.randperm(NUM_CARDS, device=device) for _ in range(N)])
     deck = deck.to(torch.int16)
+
+    if stack_low_cards:
+        # Move all rank-0 (2), rank-11 (K), rank-12 (A) cards to the end. Stable
+        # sort by is_low (False before True) preserves the random within-group
+        # order from randperm.
+        ranks = (deck.long() % NUM_RANKS)
+        is_low = (ranks == 0) | (ranks == 11) | (ranks == 12)
+        sorted_idx = is_low.long().argsort(dim=1, stable=True)
+        deck = deck.gather(1, sorted_idx)
 
     # Deal n_players * 6 cards: 6 per player.
     # Layout: player_cards[n, p, slot] where slot is 0..5 (row0: 0,1,2  row1: 3,4,5)
