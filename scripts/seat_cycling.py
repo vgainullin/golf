@@ -37,6 +37,7 @@ from src.bayes_optimal import (
     bayes_stage0,
     bayes_stage1,
     bayes_v2_stage0,
+    bayes_v3_stage0,
 )
 from src.vectorized_golf import (
     compute_final_score,
@@ -68,10 +69,11 @@ class SeatHandler:
       R  -- random.
     """
 
-    LABELS = ("B", "B2", "I", "R")
+    LABELS = ("B", "B2", "B3", "I", "R")
 
     # Tunable per-handler config
     b2_cutoff: float = float(4)
+    b3_draw_override_threshold: float = 0.50
 
     def __init__(self, label: str, seat_idx: int, N: int, device: torch.device):
         if label not in self.LABELS:
@@ -81,7 +83,7 @@ class SeatHandler:
         self.N = N
         self.device = device
 
-        if label in ("B", "B2"):
+        if label in ("B", "B2", "B3"):
             self.tracker = BayesBeliefTracker(N, device)
         else:
             self.tracker = None
@@ -106,6 +108,12 @@ class SeatHandler:
                 state, self.seat, self.tracker,
                 cutoff=SeatHandler.b2_cutoff,
             )
+        elif self.label == "B3":
+            self.tracker.observe(state, my_player_id=self.seat)
+            return bayes_v3_stage0(
+                state, self.seat, self.tracker,
+                draw_override_threshold=SeatHandler.b3_draw_override_threshold,
+            )
         elif self.label == "I":
             return heuristic_stage0(state, self.seat)
         else:  # R
@@ -115,8 +123,8 @@ class SeatHandler:
         if self.label == "B":
             self.tracker.observe(state, my_player_id=self.seat)
             return bayes_stage1(state, self.seat, self.tracker)
-        elif self.label == "B2":
-            # B2 keeps IH's stage 1 -- only stage 0 is augmented.
+        elif self.label in ("B2", "B3"):
+            # B2/B3 keep IH's stage 1 -- only stage 0 is augmented.
             return improved_stage1(state, self.seat)
         elif self.label == "I":
             return improved_stage1(state, self.seat)
@@ -301,6 +309,12 @@ def main():
         help="cutoff for B2 belief-aware take rule (default 4 = IH cutoff).",
     )
     p.add_argument(
+        "--b3-draw-threshold",
+        type=float,
+        default=0.50,
+        help="threshold for B3 draw-override (default 0.50). With 1.01 the override never fires.",
+    )
+    p.add_argument(
         "--stack-low-cards",
         action="store_true",
         help="Stack the deck so all rank 2/K/A cards are at the bottom of the deck.",
@@ -310,6 +324,7 @@ def main():
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
     SeatHandler.b2_cutoff = args.b2_cutoff
+    SeatHandler.b3_draw_override_threshold = args.b3_draw_threshold
 
     roster = [r.strip() for r in args.roster.split(",")]
     for label in roster:
