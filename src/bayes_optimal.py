@@ -304,6 +304,81 @@ def bayes_stage0(
     )
 
 
+def bayes_v2_stage0(
+    state: VectorizedGolfState,
+    player_id: int,
+    tracker: BayesBeliefTracker,
+    cutoff: float = float(RANK_CUTOFF),
+) -> torch.Tensor:
+    """Stage 0 = improved heuristic + a belief-aware take rule.
+
+    This is a strict superset of `heuristic_stage0`. It evaluates the
+    EXPECTED net cost of taking the face card, accounting for the
+    probability that placing it creates a column match:
+
+        expected_face_cost = face_score * (1 - 2 * p_per_card)
+        take_face if expected_face_cost < cutoff
+
+    where:
+      p_per_card = multiset[face_rank] / total (the per-slot posterior that
+                   any specific hidden own slot has the face card's rank).
+
+    Reasoning: if we take the face card and place it on slot A in a column
+    where slot B is hidden, the column matches iff slot B == face_rank.
+    P(match) = P(slot B = face_rank) = multiset[face_rank] / total.
+    Savings from a match: both slots score 0 instead of 2 * face_score
+    (the column was going to score face_score from our placement plus
+    face_score from the matched hidden card). So savings = 2 * face_score.
+    Expected net cost of taking = face_score - p * 2 * face_score
+                                = face_score * (1 - 2p).
+
+    Comparison threshold: the constant `cutoff` (default 4) is the same
+    threshold IH uses, calibrated against the EV of drawing (which includes
+    the optionality of flip+discarding a bad draw).
+
+    With p_per_card = 0 the rule reduces to IH's `face_score < cutoff`,
+    plus the IH revealed-rank-match clause. Strict superset of IH.
+    """
+    device = state.player_cards.device
+    rank_scores = RANK_SCORES.to(device)
+    N = state.player_cards.shape[0]
+
+    face_rank = (state.discard_top % NUM_RANKS).long()  # (N,)
+    face_score = rank_scores[face_rank]  # (N,)
+
+    # IH rule: rank matches a revealed own card. (Deterministic match opportunity.)
+    player_cards = state.player_cards[:, player_id, :]
+    player_revealed = state.player_revealed[:, player_id, :]
+    player_ranks = player_cards % NUM_RANKS
+    revealed_ranks = torch.where(
+        player_revealed, player_ranks, torch.full_like(player_ranks, -1)
+    )
+    rank_match_revealed = (revealed_ranks == face_rank.unsqueeze(1)).any(dim=1)
+
+    # Belief-aware EV check.
+    # p_per_card = multiset[face_rank] / total: marginal probability that any
+    # specific hidden slot has the face card's rank. Bounded by [0, 1].
+    multiset = tracker.multiset_by_rank().float()  # (N, 13)
+    total = tracker.total().float().clamp(min=1)  # (N,)
+    n_at_face = multiset.gather(1, face_rank.unsqueeze(1)).squeeze(1)  # (N,)
+    p_per_card = n_at_face / total  # (N,)
+
+    # Only meaningful if we have a hidden slot to place into. If all 6 slots
+    # are face-up there is no column-match-via-placement opportunity.
+    has_hidden = (~player_revealed).any(dim=1)
+    p_per_card = torch.where(has_hidden, p_per_card, torch.zeros_like(p_per_card))
+
+    expected_face_cost = face_score * (1.0 - 2.0 * p_per_card)
+    take_belief = expected_face_cost < cutoff
+
+    take_face = take_belief | rank_match_revealed
+    return torch.where(
+        take_face,
+        torch.zeros(N, dtype=torch.long, device=device),
+        torch.ones(N, dtype=torch.long, device=device),
+    )
+
+
 def bayes_stage1(
     state: VectorizedGolfState,
     player_id: int,
