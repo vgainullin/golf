@@ -40,7 +40,10 @@ from src.bayes_optimal import (
     bayes_v3_stage0,
 )
 from src.vectorized_golf import (
+    NUM_ACTIONS as VEC_NUM_ACTIONS,
     compute_final_score,
+    eps_greedy_batched,
+    get_valid_action_mask,
     heuristic_stage0,
     improved_stage1,
     random_stage0,
@@ -65,15 +68,22 @@ class SeatHandler:
             Known to be worse than IH; kept for ablation.
       B2 -- IH + hidden-card column-match check on stage 0 (bayes_v2_stage0
             with `improved_stage1`). Strict superset of IH.
+      B3 -- IH + belief-driven draw override on stage 0 (bayes_v3_stage0
+            with `improved_stage1`). Drops the strict-superset constraint.
       I  -- improved heuristic (heuristic_stage0 + improved_stage1).
+      D  -- DQN model loaded from checkpoint.
       R  -- random.
     """
 
-    LABELS = ("B", "B2", "B3", "I", "R")
+    LABELS = ("B", "B2", "B3", "D", "I", "R")
 
     # Tunable per-handler config
     b2_cutoff: float = float(4)
     b3_draw_override_threshold: float = 0.50
+    # Class-level DQN model loaded by CLI before run.
+    dqn_model = None
+    dqn_obs_fn = None
+    dqn_device = None
 
     def __init__(self, label: str, seat_idx: int, N: int, device: torch.device):
         if label not in self.LABELS:
@@ -116,18 +126,41 @@ class SeatHandler:
             )
         elif self.label == "I":
             return heuristic_stage0(state, self.seat)
+        elif self.label == "D":
+            return self._dqn_action(state, stage=0)
         else:  # R
             return random_stage0(state, self.seat)
+
+    def _dqn_action(self, state, stage: int) -> torch.Tensor:
+        """Run the DQN model to pick a stage-0 or stage-1 action for this seat."""
+        model = SeatHandler.dqn_model
+        obs_fn = SeatHandler.dqn_obs_fn
+        dev = SeatHandler.dqn_device
+        if model is None or obs_fn is None:
+            raise RuntimeError("D label used but no DQN model loaded; pass --dqn-checkpoint")
+        N = state.player_cards.shape[0]
+        obs = obs_fn(state, self.seat).to(dev)
+        sg = torch.full((N,), stage, dtype=torch.long, device=dev)
+        with torch.no_grad():
+            q = model(obs, sg)
+        if stage == 0:
+            mask = torch.zeros(N, VEC_NUM_ACTIONS, dtype=torch.bool, device=dev)
+            mask[:, 0] = True
+            mask[:, 1] = state.deck_ptr < 52
+        else:
+            mask = get_valid_action_mask(state, self.seat).to(dev)
+        return eps_greedy_batched(q, 0.0, mask).cpu()
 
     def stage1(self, state) -> torch.Tensor:
         if self.label == "B":
             self.tracker.observe(state, my_player_id=self.seat)
             return bayes_stage1(state, self.seat, self.tracker)
         elif self.label in ("B2", "B3"):
-            # B2/B3 keep IH's stage 1 -- only stage 0 is augmented.
             return improved_stage1(state, self.seat)
         elif self.label == "I":
             return improved_stage1(state, self.seat)
+        elif self.label == "D":
+            return self._dqn_action(state, stage=1)
         else:  # R
             return random_stage1(state, self.seat)
 
@@ -319,12 +352,38 @@ def main():
         action="store_true",
         help="Stack the deck so all rank 2/K/A cards are at the bottom of the deck.",
     )
+    p.add_argument(
+        "--dqn-checkpoint",
+        type=str,
+        default=None,
+        help="Path to DQN checkpoint to load (required if 'D' label appears in roster).",
+    )
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
     SeatHandler.b2_cutoff = args.b2_cutoff
     SeatHandler.b3_draw_override_threshold = args.b3_draw_threshold
+
+    # Load DQN if any 'D' in roster
+    if "D" in [r.strip() for r in args.roster.split(",")]:
+        if args.dqn_checkpoint is None:
+            raise SystemExit("--dqn-checkpoint required when D appears in roster")
+        from src.tournament import make_model, get_obs_fn
+        from src.dqn_offline import resolve_device
+        dqn_dev = resolve_device("cpu")  # cpu for fair comparison with other players
+        ckpt = torch.load(args.dqn_checkpoint, map_location="cpu", weights_only=True)
+        cfg = ckpt["config"]
+        variant = cfg.get("model_variant", "v1")
+        hidden_dim = cfg["hidden_dim"]
+        embedding_dim = cfg.get("embedding_dim", 128)
+        model = make_model(variant, embedding_dim, hidden_dim, dqn_dev)
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.eval()
+        SeatHandler.dqn_model = model
+        SeatHandler.dqn_obs_fn = get_obs_fn(variant)
+        SeatHandler.dqn_device = dqn_dev
+        print(f"Loaded DQN from {args.dqn_checkpoint} (variant={variant}, hidden={hidden_dim})")
 
     roster = [r.strip() for r in args.roster.split(",")]
     for label in roster:
