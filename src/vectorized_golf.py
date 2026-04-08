@@ -142,6 +142,63 @@ def card_rank(card_indices: torch.Tensor) -> torch.Tensor:
     return torch.where(card_indices >= 0, card_indices % NUM_RANKS, torch.tensor(-1, device=card_indices.device))
 
 
+def riffle_shuffle(deck: torch.Tensor, n_riffles: int) -> torch.Tensor:
+    """Apply n_riffles Gilbert-Shannon-Reeds riffle shuffles to a (N, 52) deck.
+
+    Per riffle: cut the deck around the middle (with small jitter), then
+    interleave by sampling from each half with probability proportional to
+    the remaining cards in that half. This is the standard mathematical
+    model of a casual physical riffle shuffle. Bayer-Diaconis (1992) showed
+    that 7 riffles are sufficient to randomize a 52-card deck.
+
+    Args:
+        deck: (N, D) int16 tensor.
+        n_riffles: number of riffle passes (>=0).
+
+    Returns:
+        new (N, D) int16 tensor with the shuffled deck.
+    """
+    if n_riffles <= 0:
+        return deck.clone()
+
+    N, D = deck.shape
+    device = deck.device
+    deck = deck.clone()
+
+    for _ in range(n_riffles):
+        # Cut around middle with small jitter (~ +/- D/16).
+        jitter_range = max(1, D // 16)
+        cut = torch.full((N,), D // 2, dtype=torch.long, device=device)
+        cut += torch.randint(-jitter_range, jitter_range + 1, (N,), device=device)
+        cut = cut.clamp(D // 4, 3 * D // 4)
+
+        new_deck = torch.zeros_like(deck)
+        left_ptr = torch.zeros(N, dtype=torch.long, device=device)
+        right_ptr = cut.clone()
+        rows = torch.arange(N, device=device)
+
+        for i in range(D):
+            left_remaining = (cut - left_ptr).clamp(min=0)
+            right_remaining = (D - right_ptr).clamp(min=0)
+            total_remaining = (left_remaining + right_remaining).clamp(min=1)
+            left_prob = left_remaining.float() / total_remaining.float()
+            rand = torch.rand(N, device=device)
+            take_left = (rand < left_prob) & (left_remaining > 0)
+            # If left exhausted, must take right; if right exhausted, must take left.
+            take_left = torch.where(left_remaining == 0, torch.zeros_like(take_left), take_left)
+            take_left = torch.where(right_remaining == 0, torch.ones_like(take_left), take_left)
+
+            idx = torch.where(take_left, left_ptr, right_ptr)
+            new_deck[:, i] = deck[rows, idx]
+
+            left_ptr = torch.where(take_left, left_ptr + 1, left_ptr)
+            right_ptr = torch.where(take_left, right_ptr, right_ptr + 1)
+
+        deck = new_deck
+
+    return deck
+
+
 def reshuffle_empty_decks(state: VectorizedGolfState) -> torch.Tensor:
     """For games whose deck is empty, reshuffle the buried discard pile into
     a fresh deck. Updates state.deck, state.deck_ptr, state.deck_size, and
