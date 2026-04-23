@@ -6,6 +6,8 @@ from src.bayes_optimal import (
     bayes_stage0,
     bayes_stage1,
     expected_score,
+    lookahead_stage0,
+    lookahead_stage1,
     run_bayes_eval,
 )
 from src.vectorized_golf import (
@@ -315,3 +317,157 @@ def test_bayes_player_beats_random_opponents():
     # Random baseline is ~31, improved heuristic ~10. Bayes player should
     # easily beat random; expect well under 15.
     assert score < 15.0, f"bayes seat 0 avg {score:.2f} should beat random easily"
+
+
+# ---------------------------------------------------------------------------
+# Lookahead player
+# ---------------------------------------------------------------------------
+
+
+def test_lookahead_stage1_returns_valid_action():
+    state = reset_games(N=4, device=DEVICE)
+    state.current_stage.fill_(1)
+    state.player_holding[:, 0] = state.discard_top
+    t = BayesBeliefTracker(N=4, device=DEVICE)
+    t.observe(state, my_player_id=0)
+    a = lookahead_stage1(state, 0, t)
+    assert a.shape == (4,)
+    valid = ((a >= 2) & (a <= 7)) | ((a >= 9) & (a <= 14))
+    assert valid.all()
+
+
+def test_lookahead_stage1_fully_revealed_picks_best_placement():
+    """When all slots are revealed, lookahead should place at the position
+    minimizing compute_final_score (no hidden-slot ambiguity)."""
+    N = 16
+    state = reset_games(N=N, device=DEVICE)
+    state.player_revealed[:] = True  # all revealed
+    state.current_stage.fill_(1)
+    state.player_holding[:, 0] = state.discard_top
+
+    t = BayesBeliefTracker(N=N, device=DEVICE)
+    t.observe(state, my_player_id=0)
+    action = lookahead_stage1(state, 0, t)
+
+    # Brute-force: try all 6 placements, pick the one with lowest final score.
+    cards = state.player_cards[:, 0, :].clone()
+    held = state.player_holding[:, 0]
+    best_pos_bf = torch.zeros(N, dtype=torch.long)
+    best_score_bf = torch.full((N,), 1e6)
+    for pos in range(6):
+        trial = cards.clone()
+        trial[:, pos] = held
+        sc = compute_final_score(trial, DEVICE)
+        better = sc < best_score_bf
+        best_score_bf = torch.where(better, sc, best_score_bf)
+        best_pos_bf = torch.where(better, torch.full_like(best_pos_bf, pos), best_pos_bf)
+
+    expected_action = 2 + best_pos_bf
+    assert torch.equal(action, expected_action), (
+        f"lookahead != brute-force on fully-revealed layout.\n"
+        f"  lookahead: {action.tolist()}\n  expected:  {expected_action.tolist()}"
+    )
+
+
+def test_lookahead_stage1_discards_bad_held_card():
+    """When the held card is worse than every slot, lookahead should
+    discard+flip rather than place."""
+    N = 4
+    state = reset_games(N=N, device=DEVICE)
+    state.current_stage.fill_(1)
+    # Give player 0 all Kings (rank 11, score 0) in revealed slots 0-4,
+    # slot 5 unrevealed. Held card = rank 8 (score 10, a bad card).
+    for s in range(5):
+        state.player_cards[:, 0, s] = 11  # K suit 0
+        state.player_revealed[:, 0, s] = True
+    state.player_revealed[:, 0, 5] = False
+    # Column pairs: (0,3), (1,4), (2,5). Slots 0-4 = K, slot 5 hidden.
+    # Cols 0 and 1 have K-K matches (score 0). Col 2 has K-revealed + hidden.
+    # Placing a 10-score card anywhere would break a column match or add 10.
+    state.player_holding[:, 0] = 8  # rank 8 = score 10
+
+    t = BayesBeliefTracker(N=N, device=DEVICE)
+    t.observe(state, my_player_id=0)
+    action = lookahead_stage1(state, 0, t)
+
+    # Should discard+flip slot 5 (the only unrevealed slot), action = 9+5 = 14.
+    assert (action == 14).all(), f"Expected discard+flip (14), got {action.tolist()}"
+
+
+def test_lookahead_stage0_returns_valid_action():
+    state = reset_games(N=4, device=DEVICE)
+    t = BayesBeliefTracker(N=4, device=DEVICE)
+    t.observe(state, my_player_id=0)
+    a = lookahead_stage0(state, 0, t)
+    assert a.shape == (4,)
+    assert ((a == 0) | (a == 1)).all()
+
+
+def test_lookahead_stage0_takes_column_match():
+    """When the face card creates a deterministic column match, take it."""
+    N = 4
+    state = reset_games(N=N, device=DEVICE)
+
+    # Reveal slot 0 as rank 11 (K, score 0). Set discard_top to another K.
+    state.player_cards[:, 0, 0] = 11  # K suit 0
+    state.player_revealed[:, 0, 0] = True
+    state.discard_top[:] = 11 + NUM_RANKS  # K suit 1
+
+    t = BayesBeliefTracker(N=N, device=DEVICE)
+    t.observe(state, my_player_id=0)
+    action = lookahead_stage0(state, 0, t)
+
+    # Taking the K and placing at slot 3 (column partner of slot 0) gives
+    # a column match worth 0. This should dominate drawing.
+    assert (action == 0).all(), f"Expected take (0) for column match, got {action.tolist()}"
+
+
+def test_lookahead_player_beats_random():
+    torch.manual_seed(42)
+    score = run_bayes_eval(
+        opponent_specs=["R", "R", "R"],
+        num_games=200,
+        holes=3,
+        device=DEVICE,
+        player="lookahead",
+    )
+    assert score < 15.0, f"lookahead avg {score:.2f} should beat random easily"
+
+
+def test_lookahead_does_not_peek_at_hidden_cards():
+    """Shuffling the true card values at hidden positions must NOT change
+    lookahead decisions. If it does, expected_score is leaking hidden info."""
+    torch.manual_seed(7)
+    N = 200
+    state = reset_games(N=N, device=DEVICE)
+    # Reveal a few slots so there's a mix of hidden and revealed.
+    state.player_revealed[:, 0, 0] = True
+    state.player_revealed[:, 0, 3] = True  # column 0 both revealed
+    state.player_revealed[:, 0, 1] = True  # column 1: slot 1 revealed, slot 4 hidden
+    # Slots 2, 4, 5 are hidden.
+
+    state.current_stage.fill_(1)
+    state.player_holding[:, 0] = state.discard_top
+
+    t = BayesBeliefTracker(N=N, device=DEVICE)
+    t.observe(state, my_player_id=0)
+    action_original = lookahead_stage1(state, 0, t).clone()
+
+    # Scramble the true card values at hidden positions.
+    hidden_mask = ~state.player_revealed[:, 0, :]  # (N, 6)
+    for n in range(N):
+        hidden_slots = hidden_mask[n].nonzero(as_tuple=True)[0]
+        if len(hidden_slots) > 1:
+            perm = torch.randperm(len(hidden_slots))
+            orig = state.player_cards[n, 0, hidden_slots].clone()
+            state.player_cards[n, 0, hidden_slots] = orig[perm]
+
+    # Re-run with scrambled hidden cards (same tracker state).
+    action_scrambled = lookahead_stage1(state, 0, t)
+
+    assert torch.equal(action_original, action_scrambled), (
+        f"Lookahead decisions changed after scrambling hidden cards!\n"
+        f"  original:  {action_original.tolist()}\n"
+        f"  scrambled: {action_scrambled.tolist()}\n"
+        f"  differ at: {(action_original != action_scrambled).nonzero(as_tuple=True)[0].tolist()}"
+    )

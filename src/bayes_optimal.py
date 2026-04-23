@@ -540,6 +540,160 @@ def bayes_stage1(
 
 
 # ---------------------------------------------------------------------------
+# 1-step lookahead (threshold-free)
+# ---------------------------------------------------------------------------
+
+
+def _best_placement_score(
+    cards: torch.Tensor,
+    revealed: torch.Tensor,
+    held: torch.Tensor,
+    multiset: torch.Tensor,
+    total: torch.Tensor,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Find the placement position minimizing expected final score.
+
+    Returns (best_score, best_pos) each (N,).
+    """
+    N = cards.shape[0]
+    best_score = torch.full((N,), 1e6, dtype=torch.float32, device=device)
+    best_pos = torch.zeros(N, dtype=torch.long, device=device)
+
+    for pos in range(6):
+        trial_cards = cards.clone()
+        trial_cards[:, pos] = held
+        trial_revealed = revealed.clone()
+        trial_revealed[:, pos] = True
+        score = expected_score(trial_cards, trial_revealed, multiset, total, device)
+        better = score < best_score
+        best_score = torch.where(better, score, best_score)
+        best_pos = torch.where(better, torch.full_like(best_pos, pos), best_pos)
+
+    return best_score, best_pos
+
+
+def lookahead_stage1(
+    state: VectorizedGolfState,
+    player_id: int,
+    tracker: BayesBeliefTracker,
+) -> torch.Tensor:
+    """Pick the stage-1 action minimizing expected final score.
+
+    Enumerates all 6 placement positions and compares against the
+    discard+flip alternative. No thresholds or cutoffs.
+
+    Discard+flip doesn't change E[final score] (by iterated expectations:
+    revealing a hidden card reduces variance but not the mean), so its
+    expected score equals the current layout's expected score. The player
+    should place when placement improves on that, otherwise discard+flip.
+    """
+    device = state.player_cards.device
+    N = state.player_cards.shape[0]
+
+    cards = state.player_cards[:, player_id, :].clone()
+    revealed = state.player_revealed[:, player_id, :].clone()
+    held = state.player_holding[:, player_id]
+
+    multiset = tracker.multiset_by_rank()
+    total = tracker.total()
+
+    current_e = expected_score(cards, revealed, multiset, total, device)
+    best_place_score, best_place_pos = _best_placement_score(
+        cards, revealed, held, multiset, total, device
+    )
+
+    has_unrevealed = (~revealed).any(dim=1)
+    unrevealed_idx = torch.where(
+        ~revealed,
+        torch.arange(6, device=device).unsqueeze(0).expand(N, -1),
+        torch.full((N, 6), 99, dtype=torch.long, device=device),
+    )
+    first_unrevealed = unrevealed_idx.min(dim=1).values.clamp(0, 5)
+
+    place_is_better = best_place_score < current_e
+
+    # Place at best pos if it improves score, otherwise discard+flip.
+    # If no unrevealed slots exist, must place regardless.
+    action = torch.where(
+        place_is_better | (~has_unrevealed),
+        2 + best_place_pos,
+        9 + first_unrevealed,
+    )
+    return action
+
+
+def lookahead_stage0(
+    state: VectorizedGolfState,
+    player_id: int,
+    tracker: BayesBeliefTracker,
+) -> torch.Tensor:
+    """Pick take (0) or draw (1) by comparing expected final scores.
+
+    Take branch: face card is known; simulate optimal placement.
+    Draw branch: average over all 13 possible ranks weighted by belief,
+    with multiset adjusted for the drawn card.
+    """
+    device = state.player_cards.device
+    N = state.player_cards.shape[0]
+    rank_scores_t = RANK_SCORES.to(device)
+
+    cards = state.player_cards[:, player_id, :].clone()
+    revealed = state.player_revealed[:, player_id, :].clone()
+
+    multiset = tracker.multiset_by_rank()  # (N, 13)
+    total = tracker.total()  # (N,)
+    total_f = total.float().clamp(min=1)
+
+    # Current expected score (baseline for discard+flip).
+    current_e = expected_score(cards, revealed, multiset, total, device)
+
+    # --- Take branch ---
+    face_card = state.discard_top.long()
+    best_take_score, _ = _best_placement_score(
+        cards, revealed, face_card, multiset, total, device
+    )
+    e_take = torch.min(best_take_score, current_e)
+
+    # --- Draw branch ---
+    # For each rank r, compute the best outcome (place or discard+flip)
+    # weighted by P(drawing rank r).
+    e_draw = torch.zeros(N, dtype=torch.float32, device=device)
+
+    for r in range(NUM_RANKS):
+        count_r = multiset[:, r].float()  # (N,)
+        p_r = count_r / total_f  # (N,)
+
+        # Skip rank entirely if no game has it in the unobserved set.
+        if (count_r == 0).all():
+            continue
+
+        # Adjusted multiset after drawing rank r.
+        draw_ms = multiset.clone()
+        draw_ms[:, r] = (draw_ms[:, r] - 1).clamp(min=0)
+        draw_total = (total - 1).clamp(min=1)
+
+        # Virtual card with rank r (suit 0 -> card index = r).
+        virtual_held = torch.full((N,), r, dtype=torch.long, device=device)
+
+        best_draw_score, _ = _best_placement_score(
+            cards, revealed, virtual_held, draw_ms, draw_total, device
+        )
+
+        # Discard+flip baseline with adjusted multiset.
+        current_e_r = expected_score(cards, revealed, draw_ms, draw_total, device)
+        e_draw_r = torch.min(best_draw_score, current_e_r)
+
+        e_draw = e_draw + p_r * e_draw_r
+
+    return torch.where(
+        e_take <= e_draw,
+        torch.zeros(N, dtype=torch.long, device=device),
+        torch.ones(N, dtype=torch.long, device=device),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Eval loop
 # ---------------------------------------------------------------------------
 
@@ -572,11 +726,13 @@ def run_bayes_eval(
     holes: int,
     device: torch.device,
     n_players: int = 4,
+    player: str = "bayes",
 ) -> float:
-    """Run a [Bayes, opp1, opp2, ...] eval and return seat-0 avg score / hole.
+    """Run a [Bayes/Lookahead, opp1, opp2, ...] eval and return seat-0 avg score / hole.
 
     n_players defaults to 4. The number of opponent_specs must equal
-    n_players - 1.
+    n_players - 1. player="bayes" uses the original bayes_stage0/1,
+    player="lookahead" uses the 1-step lookahead.
     """
     if len(opponent_specs) != n_players - 1:
         raise ValueError(
@@ -587,15 +743,22 @@ def run_bayes_eval(
     BAYES_SEAT = 0
     tracker = BayesBeliefTracker(N, device)
 
-    def bayes_s0(state, pid):
-        tracker.observe(state, my_player_id=pid)
-        return bayes_stage0(state, pid, tracker)
+    if player == "lookahead":
+        s0_fn_inner = lookahead_stage0
+        s1_fn_inner = lookahead_stage1
+    else:
+        s0_fn_inner = bayes_stage0
+        s1_fn_inner = bayes_stage1
 
-    def bayes_s1(state, pid):
+    def seat0_s0(state, pid):
         tracker.observe(state, my_player_id=pid)
-        return bayes_stage1(state, pid, tracker)
+        return s0_fn_inner(state, pid, tracker)
 
-    seat_fns: List[SeatFn] = [(bayes_s0, bayes_s1)]
+    def seat0_s1(state, pid):
+        tracker.observe(state, my_player_id=pid)
+        return s1_fn_inner(state, pid, tracker)
+
+    seat_fns: List[SeatFn] = [(seat0_s0, seat0_s1)]
     for spec in opponent_specs:
         seat_fns.append(SEAT_PRESETS[spec])
 
@@ -667,6 +830,13 @@ def main():
     )
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument(
+        "--player",
+        type=str,
+        default="bayes",
+        choices=["bayes", "lookahead"],
+        help="Player type: 'bayes' (belief-augmented heuristic) or 'lookahead' (1-step lookahead).",
+    )
     args = p.parse_args()
 
     if args.seed is not None:
@@ -675,11 +845,15 @@ def main():
     device = torch.device(args.device)
     opponents = parse_eval_config(args.eval_config)
     n_players = 1 + len(opponents)
+    label = "L" if args.player == "lookahead" else "B"
 
-    print(f"Bayes player: solo eval [B,{','.join(opponents)}] "
+    print(f"{args.player} player: solo eval [{label},{','.join(opponents)}] "
           f"({n_players} players), {args.games} games x {args.holes} holes")
-    score = run_bayes_eval(opponents, args.games, args.holes, device, n_players=n_players)
-    print(f"  bayes seat-0 avg score / hole: {score:.3f}")
+    score = run_bayes_eval(
+        opponents, args.games, args.holes, device,
+        n_players=n_players, player=args.player,
+    )
+    print(f"  {args.player} seat-0 avg score / hole: {score:.3f}")
 
 
 if __name__ == "__main__":

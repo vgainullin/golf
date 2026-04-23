@@ -38,6 +38,8 @@ from src.bayes_optimal import (
     bayes_stage1,
     bayes_v2_stage0,
     bayes_v3_stage0,
+    lookahead_stage0,
+    lookahead_stage1,
 )
 from src.vectorized_golf import (
     NUM_ACTIONS as VEC_NUM_ACTIONS,
@@ -45,6 +47,7 @@ from src.vectorized_golf import (
     eps_greedy_batched,
     get_valid_action_mask,
     heuristic_stage0,
+    heuristic_stage1,
     improved_stage1,
     random_stage0,
     random_stage1,
@@ -70,12 +73,16 @@ class SeatHandler:
             with `improved_stage1`). Strict superset of IH.
       B3 -- IH + belief-driven draw override on stage 0 (bayes_v3_stage0
             with `improved_stage1`). Drops the strict-superset constraint.
+      L  -- 1-step lookahead (lookahead_stage0 + lookahead_stage1).
+            Threshold-free; enumerates all actions and picks the one
+            minimizing expected final score under the belief.
       I  -- improved heuristic (heuristic_stage0 + improved_stage1).
+      H  -- base heuristic (heuristic_stage0 + heuristic_stage1).
       D  -- DQN model loaded from checkpoint.
       R  -- random.
     """
 
-    LABELS = ("B", "B2", "B3", "D", "I", "R")
+    LABELS = ("B", "B2", "B3", "L", "D", "I", "H", "R")
 
     # Tunable per-handler config
     b2_cutoff: float = float(4)
@@ -93,7 +100,7 @@ class SeatHandler:
         self.N = N
         self.device = device
 
-        if label in ("B", "B2", "B3"):
+        if label in ("B", "B2", "B3", "L"):
             self.tracker = BayesBeliefTracker(N, device)
         else:
             self.tracker = None
@@ -124,7 +131,10 @@ class SeatHandler:
                 state, self.seat, self.tracker,
                 draw_override_threshold=SeatHandler.b3_draw_override_threshold,
             )
-        elif self.label == "I":
+        elif self.label == "L":
+            self.tracker.observe(state, my_player_id=self.seat)
+            return lookahead_stage0(state, self.seat, self.tracker)
+        elif self.label in ("I", "H"):
             return heuristic_stage0(state, self.seat)
         elif self.label == "D":
             return self._dqn_action(state, stage=0)
@@ -157,8 +167,13 @@ class SeatHandler:
             return bayes_stage1(state, self.seat, self.tracker)
         elif self.label in ("B2", "B3"):
             return improved_stage1(state, self.seat)
+        elif self.label == "L":
+            self.tracker.observe(state, my_player_id=self.seat)
+            return lookahead_stage1(state, self.seat, self.tracker)
         elif self.label == "I":
             return improved_stage1(state, self.seat)
+        elif self.label == "H":
+            return heuristic_stage1(state, self.seat)
         elif self.label == "D":
             return self._dqn_action(state, stage=1)
         else:  # R
