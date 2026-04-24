@@ -115,9 +115,42 @@ Both bugs from Experiments 5 and 6 (see lab notebook) would have been caught by 
 | `eval_hof.py` | Download and evaluate a Hall-of-Fame checkpoint from HuggingFace | `uv run python -m scripts.eval_hof --repo-id vgainullin/golf --games 1000 --holes 9` |
 | `eval_vs_random.py` | Evaluate every checkpoint in a tournament directory vs random opponents (GPU-batched) | `uv run python -m scripts.eval_vs_random --tournament-dir data/my_run --games 200 --holes 9` |
 | `eval_compare.py` | Head-to-head between specific DQN checkpoints | `uv run python -m scripts.eval_compare --checkpoints a.pt b.pt --games 5000` |
+| `seat_cycling.py` | Seat-cycled head-to-head between any agents (L/D/I/H/R) | `uv run python -m scripts.seat_cycling --roster L,I,I,I --games-per-perm 1000` |
+| `agent_comparison.py` | Score/rank distributions and win rate plots | `uv run python -m scripts.agent_comparison --dqn-checkpoint model.pt` |
 | `plot_training_progress.py` | 3-panel plot (solo score, behavioral metrics, epsilon schedule) from `metrics_log.jsonl` | `uv run python -m scripts.plot_training_progress --metrics data/my_run/metrics_log.jsonl --output progress.png` |
 
 All evaluation reports four behavioral metrics alongside score: `col_matches` (avg column matches per hole), `take_rate` (fraction of stage-0 turns taking the discard), `rev_replace` (fraction of stage-1 placements at already-revealed positions), `s1_entropy` (Shannon entropy of stage-1 actions). These are how we tell *what* a model has learned, not just how well it scores.
+
+### Bayes optimal player — `src/bayes_optimal.py`
+
+Belief-augmented player that maintains an exact posterior over unobserved cards. The belief is a `(N, 52)` bool mask (sufficient under shuffle-once-and-deal), from which we derive per-rank multiset counts and column-match probabilities.
+
+The **1-step lookahead** (label `L`) enumerates all legal actions, scores each resulting layout with `expected_score` (which treats hidden slots as draws from the belief multiset with exact without-replacement column-match math), and picks the action minimizing expected final score. Zero tunable parameters.
+
+```bash
+# Solo eval
+uv run python -m src.bayes_optimal --player lookahead --games 5000 --holes 9 --eval-config R,H,R --seed 0
+
+# Seat-cycled comparison against DQN and heuristic
+uv run python -m scripts.seat_cycling --roster L,D,I,R \
+  --dqn-checkpoint data/exp11_cyclic/champion.pt \
+  --games-per-perm 1000 --holes 9 --seed 0
+
+# Score/rank distributions and win rate plots
+uv run python -m scripts.agent_comparison \
+  --dqn-checkpoint data/exp11_cyclic/champion.pt \
+  --games 1000 --holes 9 --seed 0
+```
+
+Seat-cycled results (24 permutations x 1000 games x 9 holes):
+
+| Agent | Avg score/hole | Win rate |
+|---|---|---|
+| Lookahead (L) | **9.03** | **45.0%** |
+| DQN champion (Exp 11) | 11.14 | 30.4% |
+| Improved heuristic | 11.90 | 29.8% |
+
+See `docs/experiments.md` Experiments 12 and 12b for the full development history.
 
 ### LLM player harness — `src/llm_player.py`
 
@@ -143,6 +176,7 @@ Existing benchmark results in [`data/llm_benchmarks.md`](data/llm_benchmarks.md)
 src/
   vectorized_golf.py         # Batched simulator
   tournament.py              # DQN training pipeline
+  bayes_optimal.py           # Belief tracker + 1-step lookahead player
   reward_shaping.py          # Hindsight reward shaping
   diagnostics.py             # MDP probes
   optuna_search.py           # Hyperparameter sweep
@@ -156,9 +190,9 @@ src/
   tensor_dataset.py          # Tensor transition dataset loader
 
 scripts/                     # Eval entry points
-tests/                       # Pytest suite (currently covers legacy simulation only)
+tests/                       # Pytest suite (belief tracker, bayes player, legacy simulation)
 docs/
-  experiments.md             # Lab notebook (Experiments 1-11)
+  experiments.md             # Lab notebook (Experiments 1-12b)
   beyond-heuristic-rl.md     # Pre-RL design notes
   figures/                   # Training-progress plots
 data/
