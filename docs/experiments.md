@@ -1357,3 +1357,156 @@ Artifacts saved in `data/exp11_cyclic/`:
 - `champion.pt`, `hall_of_fame.pt` -- best models
 - wandb run: `exp11-cyclic-7cycles`
 
+## Experiment 12: Belief-augmented Improved Heuristic (2026-04-07)
+
+### Motivation
+
+Exact Bayesian beliefs are tractable in Golf: under shuffle-once-and-deal, every unobserved card from a player's POV has the same uniform-over-unobserved-multiset posterior, so the belief is a single 52-bit "ever observed" mask. Issue #13 framed this as the central baseline. The simplest way to bolt the belief onto an existing strong player is to take the improved heuristic and replace its hard-coded constants with belief-derived versions.
+
+Two changes were tried:
+- **Stage 0 cutoff**: replace constant `4` with `E[score(unknown card)]` from the current belief (~5.46 with full deck).
+- **Stage 1 layout scoring**: replace `compute_score` (face-down slot = 0) with `expected_score` (face-down slot = belief-multiset draw, with exact sample-without-replacement column-match math).
+
+The new module is `src/bayes_optimal.py` with belief tracker, expected_score helper, both stage functions, an equivalence regression test, and a `use_belief` flag for ablation.
+
+### Methodology
+
+To compare players fairly we built two pieces of infrastructure:
+
+1. **Multi-player simulator support** (`src/vectorized_golf.py`). `reset_games` gains an `n_players` kwarg (default 4, max 8 from a single deck), and the state tracks a `discard_buried` mask and `deck_size` so we can reshuffle the discard pile back into the deck when it empties. Required for 5+ player games where 9-hole hands exhaust the deck.
+
+2. **Seat-cycling evaluation** (`scripts/seat_cycling.py`). Enumerates every distinct seat permutation of a roster and aggregates per-label scores. Without this, seat-0 first-mover advantage and follower-disadvantage contaminate single-config evaluations.
+
+### Final evaluation (1000 games per permutation x 9 holes)
+
+| Roster | n_players | Bayes avg | Improved avg | gap |
+|---|---|---|---|---|
+| 1B vs 3I | 4 | 12.244 | 11.693 | **+0.551** (Bayes worse) |
+| 1B vs 4I | 5 | 14.007 | 13.726 | **+0.281** (Bayes worse) |
+| 1B vs 5I | 6 | 16.559 | 16.110 | **+0.449** (Bayes worse) |
+
+| Solo vs all-random | n_players | Bayes | Improved |
+|---|---|---|---|
+| 1 player vs random fillers | 4 | 9.781 | 8.772 |
+| 1 player vs random fillers | 5 | 9.845 | 9.218 |
+| 1 player vs random fillers | 6 | 10.708 | 10.182 |
+
+### Ablation (4-player [B,R,R,R], 2000 games x 9 holes, single seed)
+
+`bayes_stage0` and `bayes_stage1` accept a `use_belief` flag. With `use_belief=False` they reproduce the improved heuristic byte-for-byte (asserted by `tests/test_bayes_optimal.py::test_bayes_no_belief_equals_improved_heuristic`). Toggling each independently:
+
+| s0 | s1 | seat-0 score |
+|---|---|---|
+| heuristic | improved (compute_score) | **8.183** |
+| bayes (E[unknown] cutoff) | improved | 8.603 (+0.42) |
+| heuristic | bayes (expected_score) | 8.729 (+0.55) |
+| bayes | bayes | 9.288 (+1.10) |
+
+Both belief modifications independently make the player worse, and the errors stack roughly additively.
+
+### Observations
+
+**The naive belief-augmentation is strictly worse than the improved heuristic** under apples-to-apples seat cycling, in every player count tested. The earlier informal "Bayes wins by 0.6" finding (single-seed, seat-0 only) was a seat artifact: with seat-cycling, the apparent advantage disappears and reverses.
+
+**The gap does not shrink with more players.** The 4p gap is +0.55, the 6p gap is +0.45. Hypothesis: more observability through more players would help if the belief inference were the bottleneck. It isn't.
+
+**The bug is conceptual, not arithmetic.** The belief tracker is correctly calibrated -- on 1.4M decisions, the posterior `P(deck draw score < face card score)` matches the empirical rate to within 0.002 in every probability bin. The implementations of `expected_unknown_score`, `expected_score`, and `multiset_by_rank` are right. What's wrong is *what we substituted them in for*.
+
+**Stage 0**: replacing `cutoff=4` with `E[unknown]=5.46` is the wrong substitution. The constant 4 in `heuristic_stage0` is not an EV estimate -- it is a behavior threshold encoding the **optionality value of drawing** (drawing lets you see-then-decide; the face card is committed). The right Bayesian generalization of a threshold comparison `face_score < 4` is a **tail probability** `P(deck_draw_score < face_score) > some threshold`, not a posterior mean. With `E[unknown]=5.46`, the player takes face cards 46% of the time (16+8 ranks qualify) vs the heuristic's 31% (only the 4 lowest ranks), and the data shows taking more is worse.
+
+**Stage 1**: `compute_score` (face-down slot = 0) and the constant `RANK_CUTOFF=4` for "big improvement" are tightly coupled. `expected_score` puts every face-down slot at ~5.46, so revealing any slot via place or flip looks like an automatic ~5.46 improvement. The `RANK_CUTOFF=4` "big improvement" trigger then fires on essentially every action, turning the player into "place anywhere that reveals a slot". The cutoff threshold doesn't transfer between scoring scales.
+
+The lesson: hand-tuned heuristic constants encode policy, not estimation. Replacing them with a "more correct" Bayesian expectation breaks the policy unless the threshold is recalibrated against the new scale.
+
+### Open questions (resolved in Exp 12b)
+
+1. **Tail-probability rule for stage 0.** A take-face decision rule based on `P(draw_score < face_score)` and the belief's column-match probability against hidden cards (`P(face rank matches one of own hidden slots)`) is the obvious next experiment. Both quantities are computable from the same multiset and neither resorts to point estimates.
+2. **Posterior-aware hidden column match.** The current `bayes_stage0` only checks rank-match against *revealed* own cards (same as IH). It does not consider P(face rank matches a hidden slot), which is exactly the channel a belief should exploit and the only place IH cannot reach by construction.
+
+### Data
+
+- `src/bayes_optimal.py` -- belief tracker, expected_score, bayes_stage0/1, use_belief ablation flag
+- `tests/test_bayes_optimal.py` -- 14 unit tests including the IH equivalence regression test
+- `scripts/seat_cycling.py` -- seat-cycled head-to-head with multi-player support
+- `scripts/log_stage0.py` -- per-decision posterior logger and calibration check
+- `scripts/analyze_bayes.py` -- belief snapshots and column-match opportunity counts
+- Reproduce: `uv run python -m scripts.seat_cycling --roster B,I,I,I --games-per-perm 1000 --holes 9 --seed 0`
+
+## Experiment 12b: 1-Step Lookahead Bayes Player (2026-04-23)
+
+### Motivation
+
+Exp 12 showed that injecting belief-derived expected values into the improved heuristic's hard-coded thresholds is fundamentally broken: `expected_score` puts hidden slots at ~5.46 instead of 0, and the `RANK_CUTOFF=4` threshold doesn't transfer between scoring scales. All three belief-augmented variants (B, B2, B3) scored worse than the plain improved heuristic.
+
+The core lesson: hand-tuned heuristic constants encode policy, not estimation. Replacing them with Bayesian expectations breaks the policy unless thresholds are recalibrated. Rather than recalibrating, the 1-step lookahead sidesteps thresholds entirely: enumerate all legal actions, score each resulting layout with `expected_score`, and pick the action minimizing expected final score. Zero tunable parameters.
+
+### Design
+
+**Stage 1 (placement/discard decision):** For each of the 6 placement positions, simulate placing the held card there and compute `expected_score` of the resulting layout. Compare the best placement against the current expected score (the discard+flip baseline). Place if placement improves expected score; otherwise discard+flip first unrevealed slot.
+
+Key insight: discard+flip doesn't change E[final score]. By the law of iterated expectations, revealing a hidden card reduces variance but not the mean. So the discard+flip expected score equals `current_e` exactly. This eliminates the need to enumerate hidden-card possibilities for flip actions.
+
+**Stage 0 (take/draw decision):** Two branches:
+- *Take face card:* face card is known; simulate optimal stage-1 placement to get `e_take`.
+- *Draw from deck:* for each of the 13 possible ranks weighted by belief probability, simulate optimal stage-1 placement with adjusted multiset (one fewer card of drawn rank). `e_draw = sum_r P(r) * min(best_placement_r, current_e_r)`.
+
+Pick whichever gives lower expected final score.
+
+**Cheating verification:** A scramble test confirms the lookahead does not peek at hidden card values. `expected_score` computes `ranks` for all 6 slots but only uses them in branches gated by the `revealed` mask. Shuffling true card values at unrevealed positions produces identical decisions across 200 games (`test_lookahead_does_not_peek_at_hidden_cards`).
+
+### Results
+
+**Solo eval (seat-0 only, 5000 games x 9 holes):**
+
+| Agent | [player,R,H,R] | [player,R,R,R] |
+|---|---|---|
+| Lookahead (L) | **6.88** | **6.45** |
+| DQN champion (Exp 11, gen343) | 9.59 | 8.05 |
+| Improved heuristic | 10.52 | 8.10 |
+| Base heuristic | 14.00 | -- |
+| Random | -- | 31.1 |
+
+**Seat-cycled: L vs D vs I vs R (24 seatings x 1000 games x 9 holes):**
+
+| Label | Avg score/hole |
+|---|---|
+| L | **9.03** |
+| D | 11.14 |
+| I | 11.90 |
+| R | 32.71 |
+
+**Seat-cycled: L vs D vs 2R (12 seatings x 500 games x 9 holes):**
+
+| Label | Avg score/hole |
+|---|---|
+| L | **8.42** |
+| D | 9.95 |
+| R | 32.29 |
+
+**Seat-cycled: L vs 3I (4 seatings x 1000 games x 9 holes):**
+
+| Label | Avg score/hole |
+|---|---|
+| L | **8.93** |
+| I | 12.04 |
+
+The lookahead beats the DQN champion by 2.7 points in solo [R,H,R], 1.5 points in seat-cycled L-vs-D-vs-2R, and 2.1 points in the 4-player L-vs-D-vs-I-vs-R matchup. It dominates in every single seating permutation.
+
+### Analysis
+
+The DQN champion trained for 343 generations with cyclic epsilon annealing and ~740K parameters. The lookahead has zero learned parameters -- it is pure search over the exact posterior with a 1-step horizon.
+
+The lookahead's advantage comes from two sources:
+1. **Stage 0:** It considers the full distribution of possible draws and their optimal placements, including column-match probabilities against hidden slots. The IH uses a single constant cutoff; the DQN learned a policy but can't explicitly compute the posterior.
+2. **Stage 1:** It compares every placement against the true expected score of not placing, rather than using a crude threshold. This is especially powerful when the held card is mediocre -- the IH and DQN both make binary "place or flip" decisions with limited nuance.
+
+The 1-step horizon is a limitation: the lookahead doesn't consider how today's action affects future turns (e.g., setting up a column match for later). Despite this, the information advantage from exact Bayesian beliefs overwhelms the DQN's implicit multi-step planning.
+
+### Data
+
+- `src/bayes_optimal.py` -- `lookahead_stage0`, `lookahead_stage1`, `_best_placement_score` helper
+- `tests/test_bayes_optimal.py` -- 21 tests including scramble-based cheating verification
+- `scripts/seat_cycling.py` -- label `"L"` for the lookahead player
+- Reproduce solo: `uv run python -m src.bayes_optimal --player lookahead --games 5000 --holes 9 --eval-config R,H,R --seed 0`
+- Reproduce seat-cycled: `uv run python -m scripts.seat_cycling --roster L,D,I,R --dqn-checkpoint data/exp11_cyclic/champion.pt --games-per-perm 1000 --holes 9 --seed 0`
+

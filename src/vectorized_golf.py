@@ -28,43 +28,95 @@ RANK_CUTOFF = 4
 @dataclass
 class VectorizedGolfState:
     """All game state as tensors, first dim = N (batch of games)."""
-    player_cards: torch.Tensor      # (N, 4, 6) int16 -- card indices
-    player_revealed: torch.Tensor   # (N, 4, 6) bool -- which slots face-up
-    player_holding: torch.Tensor    # (N, 4) int16 -- held card, -1 if none
-    deck: torch.Tensor              # (N, 52) int16 -- pre-shuffled full deck
+    player_cards: torch.Tensor      # (N, P, 6) int16 -- card indices, P = n_players
+    player_revealed: torch.Tensor   # (N, P, 6) bool -- which slots face-up
+    player_holding: torch.Tensor    # (N, P) int16 -- held card, -1 if none
+    deck: torch.Tensor              # (N, 52) int16 -- shuffled deck buffer (always 52 wide)
     deck_ptr: torch.Tensor          # (N,) int32 -- next card to draw
     discard_top: torch.Tensor       # (N,) int16 -- top of discard pile
-    current_player: torch.Tensor    # (N,) int8 -- whose turn (0-3)
+    current_player: torch.Tensor    # (N,) int8 -- whose turn (0..P-1)
     current_stage: torch.Tensor     # (N,) int8 -- 0 or 1
     last_turn: torch.Tensor         # (N,) bool -- end-game triggered
     end_game_player: torch.Tensor   # (N,) int8 -- who triggered (-1 if not)
     done: torch.Tensor              # (N,) bool -- game finished
-    scores: torch.Tensor            # (N, 4) float32 -- cumulative scores
+    scores: torch.Tensor            # (N, P) float32 -- cumulative scores
+    # Number of valid cards in `deck` (cards at indices [deck_ptr, deck_size) are
+    # drawable). After a discard-pile reshuffle this can be less than 52.
+    deck_size: torch.Tensor = None  # (N,) int32 -- valid deck length
+    # Cards in the discard pile UNDER the top (i.e., buried). When the deck
+    # empties, these get reshuffled into a new deck. None for legacy paths
+    # that never trigger reshuffle (4-player short games).
+    discard_buried: torch.Tensor = None  # (N, 52) bool
+    # Player count this state was created for. Stored as int (not tensor) so
+    # callers can branch on it cheaply.
+    n_players: int = 4
 
 
-def reset_games(N: int, device: torch.device) -> VectorizedGolfState:
-    """Create N fresh games: shuffle decks, deal 24 cards, set face card."""
+def reset_games(
+    N: int,
+    device: torch.device,
+    n_players: int = 4,
+    stack_low_cards: bool = False,
+) -> VectorizedGolfState:
+    """Create N fresh games: shuffle decks, deal 6 cards per player, set face card.
+
+    Args:
+        N: batch size.
+        device: torch device.
+        n_players: number of players (default 4). Each player gets 6 cards. The
+            face card is dealt next, so n_players * 6 + 1 cards are committed
+            from the deck up front. n_players is capped only by the deck:
+            n_players * 6 + 1 <= 52, so up to 8 players from a single deck.
+        stack_low_cards: if True, all low-score cards (rank 2, K, A; scores
+            -2, 0, 1; 12 cards total) are moved to the END of the deck. As a
+            result, the dealt cards and face card contain none of these
+            low-score ranks, and the low cards only appear via deck draws
+            after the high portion is exhausted. Used to construct rigged
+            test scenarios where the bayes posterior should give a strong
+            "low cards still in deck" signal late in the game.
+    """
+    if n_players * 6 + 1 > NUM_CARDS:
+        raise ValueError(
+            f"n_players={n_players} requires {n_players*6+1} cards but deck has {NUM_CARDS}"
+        )
+
     # Generate shuffled decks: each row is a permutation of 0..51
     deck = torch.stack([torch.randperm(NUM_CARDS, device=device) for _ in range(N)])
     deck = deck.to(torch.int16)
 
-    # Deal 24 cards: 6 per player x 4 players
-    # Player p gets cards at deck positions [p*6 .. p*6+5]
+    if stack_low_cards:
+        # Move all rank-0 (2), rank-11 (K), rank-12 (A) cards to the end. Stable
+        # sort by is_low (False before True) preserves the random within-group
+        # order from randperm.
+        ranks = (deck.long() % NUM_RANKS)
+        is_low = (ranks == 0) | (ranks == 11) | (ranks == 12)
+        sorted_idx = is_low.long().argsort(dim=1, stable=True)
+        deck = deck.gather(1, sorted_idx)
+
+    # Deal n_players * 6 cards: 6 per player.
     # Layout: player_cards[n, p, slot] where slot is 0..5 (row0: 0,1,2  row1: 3,4,5)
-    deal_cards = deck[:, :24].reshape(N, 4, 6)
+    n_dealt = n_players * 6
+    deal_cards = deck[:, :n_dealt].reshape(N, n_players, 6)
     player_cards = deal_cards.clone()
 
     # All cards start face-down
-    player_revealed = torch.zeros(N, 4, 6, dtype=torch.bool, device=device)
+    player_revealed = torch.zeros(N, n_players, 6, dtype=torch.bool, device=device)
 
     # No one is holding a card
-    player_holding = torch.full((N, 4), -1, dtype=torch.int16, device=device)
+    player_holding = torch.full((N, n_players), -1, dtype=torch.int16, device=device)
 
-    # Face card is the 25th card (index 24)
-    discard_top = deck[:, 24].clone()
+    # Face card is the next card after dealing
+    discard_top = deck[:, n_dealt].clone()
 
-    # Deck pointer starts at 25 (cards 0-23 dealt, 24 is face card)
-    deck_ptr = torch.full((N,), 25, dtype=torch.int32, device=device)
+    # Deck pointer starts after dealt cards + face card
+    deck_ptr = torch.full((N,), n_dealt + 1, dtype=torch.int32, device=device)
+
+    # Initial deck size = full deck (all 52 cards have a "location": dealt,
+    # face card, or remaining in deck buffer).
+    deck_size = torch.full((N,), NUM_CARDS, dtype=torch.int32, device=device)
+
+    # Empty buried-pile mask -- only the face card is on top, nothing buried yet.
+    discard_buried = torch.zeros(N, NUM_CARDS, dtype=torch.bool, device=device)
 
     return VectorizedGolfState(
         player_cards=player_cards,
@@ -78,13 +130,119 @@ def reset_games(N: int, device: torch.device) -> VectorizedGolfState:
         last_turn=torch.zeros(N, dtype=torch.bool, device=device),
         end_game_player=torch.full((N,), -1, dtype=torch.int8, device=device),
         done=torch.zeros(N, dtype=torch.bool, device=device),
-        scores=torch.zeros(N, 4, dtype=torch.float32, device=device),
+        scores=torch.zeros(N, n_players, dtype=torch.float32, device=device),
+        deck_size=deck_size,
+        discard_buried=discard_buried,
+        n_players=n_players,
     )
 
 
 def card_rank(card_indices: torch.Tensor) -> torch.Tensor:
     """Extract rank index (0-12) from card index (0-51). -1 for invalid."""
     return torch.where(card_indices >= 0, card_indices % NUM_RANKS, torch.tensor(-1, device=card_indices.device))
+
+
+def riffle_shuffle(deck: torch.Tensor, n_riffles: int) -> torch.Tensor:
+    """Apply n_riffles Gilbert-Shannon-Reeds riffle shuffles to a (N, 52) deck.
+
+    Per riffle: cut the deck around the middle (with small jitter), then
+    interleave by sampling from each half with probability proportional to
+    the remaining cards in that half. This is the standard mathematical
+    model of a casual physical riffle shuffle. Bayer-Diaconis (1992) showed
+    that 7 riffles are sufficient to randomize a 52-card deck.
+
+    Args:
+        deck: (N, D) int16 tensor.
+        n_riffles: number of riffle passes (>=0).
+
+    Returns:
+        new (N, D) int16 tensor with the shuffled deck.
+    """
+    if n_riffles <= 0:
+        return deck.clone()
+
+    N, D = deck.shape
+    device = deck.device
+    deck = deck.clone()
+
+    for _ in range(n_riffles):
+        # Cut around middle with small jitter (~ +/- D/16).
+        jitter_range = max(1, D // 16)
+        cut = torch.full((N,), D // 2, dtype=torch.long, device=device)
+        cut += torch.randint(-jitter_range, jitter_range + 1, (N,), device=device)
+        cut = cut.clamp(D // 4, 3 * D // 4)
+
+        new_deck = torch.zeros_like(deck)
+        left_ptr = torch.zeros(N, dtype=torch.long, device=device)
+        right_ptr = cut.clone()
+        rows = torch.arange(N, device=device)
+
+        for i in range(D):
+            left_remaining = (cut - left_ptr).clamp(min=0)
+            right_remaining = (D - right_ptr).clamp(min=0)
+            total_remaining = (left_remaining + right_remaining).clamp(min=1)
+            left_prob = left_remaining.float() / total_remaining.float()
+            rand = torch.rand(N, device=device)
+            take_left = (rand < left_prob) & (left_remaining > 0)
+            # If left exhausted, must take right; if right exhausted, must take left.
+            take_left = torch.where(left_remaining == 0, torch.zeros_like(take_left), take_left)
+            take_left = torch.where(right_remaining == 0, torch.ones_like(take_left), take_left)
+
+            idx = torch.where(take_left, left_ptr, right_ptr)
+            new_deck[:, i] = deck[rows, idx]
+
+            left_ptr = torch.where(take_left, left_ptr + 1, left_ptr)
+            right_ptr = torch.where(take_left, right_ptr, right_ptr + 1)
+
+        deck = new_deck
+
+    return deck
+
+
+def reshuffle_empty_decks(state: VectorizedGolfState) -> torch.Tensor:
+    """For games whose deck is empty, reshuffle the buried discard pile into
+    a fresh deck. Updates state.deck, state.deck_ptr, state.deck_size, and
+    state.discard_buried in place. Returns a (N,) bool mask of reshuffled games.
+
+    The current discard top stays as the top -- only buried cards (everything
+    under the top) get recycled.
+    """
+    if state.deck_size is None or state.discard_buried is None:
+        return torch.zeros(state.player_cards.shape[0], dtype=torch.bool,
+                           device=state.player_cards.device)
+
+    N = state.player_cards.shape[0]
+    device = state.player_cards.device
+
+    empty = state.deck_ptr >= state.deck_size
+    if not empty.any():
+        return empty
+
+    available = state.discard_buried  # (N, 52) bool
+
+    # Randomize order of available cards via key sort. Non-available cards get
+    # negative keys so they sort to the bottom; available cards land at the top.
+    keys = torch.rand(N, NUM_CARDS, device=device)
+    keys = torch.where(available, keys, torch.full_like(keys, -1.0))
+    sorted_idx = keys.argsort(dim=1, descending=True)  # (N, 52)
+    n_available = available.sum(dim=1).to(torch.int32)  # (N,)
+
+    new_deck = torch.where(
+        empty.unsqueeze(1),
+        sorted_idx.to(torch.int16),
+        state.deck,
+    )
+    state.deck = new_deck
+    state.deck_ptr = torch.where(empty, torch.zeros_like(state.deck_ptr), state.deck_ptr)
+    state.deck_size = torch.where(empty, n_available, state.deck_size)
+    # Cards moved from buried pile into the deck buffer
+    state.discard_buried = torch.where(
+        empty.unsqueeze(1),
+        torch.zeros_like(state.discard_buried),
+        state.discard_buried,
+    )
+
+    return empty
 
 
 def compute_score(cards: torch.Tensor, revealed: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -219,7 +377,10 @@ def get_observation_v2(state: VectorizedGolfState, player_id: int) -> torch.Tens
         parts.append(opp_obs_holding.unsqueeze(1))
 
     # Deck cards remaining
-    deck_remaining = (NUM_CARDS - state.deck_ptr.long()).clamp(min=0)
+    deck_size = state.deck_size if state.deck_size is not None else torch.full_like(
+        state.deck_ptr, NUM_CARDS
+    )
+    deck_remaining = (deck_size.long() - state.deck_ptr.long()).clamp(min=0)
     parts.append(deck_remaining.unsqueeze(1))
 
     return torch.cat(parts, dim=1)  # (N, 30)
@@ -248,6 +409,13 @@ def step_stage0(state: VectorizedGolfState, actions: torch.Tensor, player_id: in
 
     take_face = (actions == 0)  # take face card
     draw_deck = (actions == 1)  # draw from deck
+
+    # If any drawing game has an empty deck, reshuffle the discard pile.
+    # We only need to reshuffle for games that are about to draw AND are empty.
+    if state.deck_size is not None:
+        needs_reshuffle = draw_deck & (state.deck_ptr >= state.deck_size) & (~state.done)
+        if needs_reshuffle.any():
+            reshuffle_empty_decks(state)
 
     # Take face card: holding = discard_top
     # Draw from deck: holding = deck[deck_ptr], deck_ptr += 1
@@ -335,6 +503,19 @@ def step_stage1(state: VectorizedGolfState, actions: torch.Tensor, player_id: in
     revealed = revealed | (active.unsqueeze(1) & pos_one_hot)
     state.player_revealed[:, player_id, :] = revealed
 
+    # If the player drew from the deck (held_card != current discard_top),
+    # the current discard_top is about to be covered -- mark it as buried so
+    # the reshuffle can recover it later. If they took the face card,
+    # held_card == discard_top and the card is moving from the top into
+    # their slot (place) or staying on top (flip+discard back), neither of
+    # which buries the original top.
+    if state.discard_buried is not None:
+        old_top = state.discard_top.long().clamp(0, NUM_CARDS - 1)
+        drew_from_deck = (held_card != state.discard_top) & active
+        rows = torch.arange(N, device=device)
+        existing_buried = state.discard_buried[rows, old_top]
+        state.discard_buried[rows, old_top] = existing_buried | drew_from_deck
+
     # Update discard top: place discards existing card, flip discards held card
     state.discard_top = torch.where(
         active,
@@ -376,8 +557,16 @@ def get_valid_action_mask(state: VectorizedGolfState, player_id: int) -> torch.T
     is_stage0 = (stage == 0)
     is_stage1 = (stage == 1)
 
-    # Stage 0: action 0 (take face card) always valid, action 1 (draw) valid if deck not empty
-    deck_not_empty = state.deck_ptr < NUM_CARDS
+    # Stage 0: action 0 (take face card) always valid. Action 1 (draw) valid
+    # if the deck has cards. With deck reshuffling enabled (deck_size set),
+    # we treat draw as always valid -- reshuffle_empty_decks (called inside
+    # step_stage0) refills the deck from the discard pile if empty. The
+    # only way it would still be empty after reshuffle is if every card is
+    # face-up in someone's layout, which means the game is essentially over.
+    if state.deck_size is not None:
+        deck_not_empty = torch.ones(N, dtype=torch.bool, device=device)
+    else:
+        deck_not_empty = state.deck_ptr < NUM_CARDS
     mask[:, 0] = is_stage0  # take face card
     mask[:, 1] = is_stage0 & deck_not_empty  # draw from deck
 

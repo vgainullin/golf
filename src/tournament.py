@@ -1168,11 +1168,15 @@ class TournamentTrainer:
         obs_fn,
         num_games: int,
         holes: int,
+        stack_low_cards: bool = False,
     ) -> Tuple[Dict[int, float], Dict[int, torch.Tensor], Dict[int, Dict[str, float]]]:
         """Run num_games games with specified seat roles and return avg score per hole per seat.
 
         seat_roles: list of 4 strings, each "dqn", "heuristic", or "random".
         model/obs_fn: used for "dqn" seats (ignored if no dqn seats).
+        stack_low_cards: if True, the deck is stacked so all 2/K/A cards are at
+            the bottom (positions 40-51) before dealing. Used for experiments
+            that probe how an agent handles a non-uniform deck distribution.
         Returns: (avg_scores, raw_totals, behavioral_metrics).
         """
         N = num_games
@@ -1188,7 +1192,7 @@ class TournamentTrainer:
         col_match_sum = {i: torch.zeros(N, device=self.device) for i in range(4)}
 
         for hole in range(1, holes + 1):
-            state = reset_games(N, self.device)
+            state = reset_games(N, self.device, stack_low_cards=stack_low_cards)
             max_rounds = 30
 
             for round_num in range(max_rounds):
