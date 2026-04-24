@@ -155,6 +155,8 @@ class TournamentConfig:
 
     # Reward shaping
     reward_shaping: str = "hindsight"  # "hindsight" or "none"
+    win_bonus: float = 0.0      # bonus added to terminal reward when learner wins the hole
+    loss_penalty: float = 0.0   # penalty added to terminal reward when learner loses
 
     # Spectral decoupling (7B)
     spectral_decoupling: bool = False
@@ -836,6 +838,20 @@ def train_episodes_vectorized(
         # Flush remaining pending stage-1 transition as terminal
         if pending_s1 is not None:
             p_obs, p_act, p_rew, p_active_np = pending_s1
+
+            # Win bonus: add reward for winning/losing the hole
+            if config.win_bonus != 0.0 or config.loss_penalty != 0.0:
+                all_scores = torch.stack(
+                    [compute_final_score(state.player_cards[:, pid, :], device) for pid in range(4)],
+                    dim=1,
+                )  # (N, 4)
+                learner_score = all_scores[:, LEARNER_SEAT]
+                min_score = all_scores.min(dim=1).values
+                won = (learner_score == min_score).float()
+                lost = (learner_score > min_score).float()
+                bonus = (won * config.win_bonus + lost * config.loss_penalty).cpu().numpy()
+                p_rew = p_rew + bonus
+
             n_p = int(p_active_np.sum())
             if n_p > 0:
                 buffer.push_batch(
@@ -1983,6 +1999,7 @@ class TournamentTrainer:
                 "eval/mean_score": float(np.mean(scores)),
                 "eval/worst_score": float(np.max(scores)),
                 "eval/best_solo": best_hp.get("solo_score"),
+                "eval/best_win_rate": sorted_pop[0][0].win_rate,
             }
             for rank, (loss, score) in enumerate(zip(losses, scores), 1):
                 metrics[f"train/rank_{rank}_loss"] = loss
@@ -2091,6 +2108,10 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--reward-shaping", type=str, default="hindsight",
                    choices=["hindsight", "none"],
                    help="Reward shaping for stage-1 training rewards")
+    p.add_argument("--win-bonus", type=float, default=0.0,
+                   help="Bonus added to terminal reward when learner wins the hole")
+    p.add_argument("--loss-penalty", type=float, default=0.0,
+                   help="Penalty added to terminal reward when learner loses the hole")
     p.add_argument("--sanity-check", action="store_true",
                    help="Run MDP diagnostics before training")
     p.add_argument("--wandb-project", type=str, default=None)
@@ -2123,6 +2144,8 @@ def parse_args(argv=None) -> TournamentConfig:
         hidden_dim_choices=args.hidden_dim_choices,
         solo_eval_games=args.solo_eval_games,
         reward_shaping=args.reward_shaping,
+        win_bonus=args.win_bonus,
+        loss_penalty=args.loss_penalty,
         sanity_check=args.sanity_check,
         spectral_decoupling=args.spectral_decoupling,
         lambda_sd=args.lambda_sd,
