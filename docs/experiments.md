@@ -1510,3 +1510,115 @@ The 1-step horizon is a limitation: the lookahead doesn't consider how today's a
 - Reproduce solo: `uv run python -m src.bayes_optimal --player lookahead --games 5000 --holes 9 --eval-config R,H,R --seed 0`
 - Reproduce seat-cycled: `uv run python -m scripts.seat_cycling --roster L,D,I,R --dqn-checkpoint data/exp11_cyclic/champion.pt --games-per-perm 1000 --holes 9 --seed 0`
 
+## Experiment 14: Win-Bonus Training Run and DQN Champion Benchmark (2026-04-26)
+
+### Motivation
+
+Exp 11 saturated at cycle 5 with no further improvement in cycles 6-7. Two interventions were bundled into Exp 14:
+
+1. **Win bonus / loss penalty** in the terminal reward (`--win-bonus` flag in `src/tournament.py`). Hypothesis: augmenting the hindsight score reward with a signal for winning the hole (lowest score) would drive the agent toward more decisive play.
+2. **Extended training** with the same cyclic epsilon config (350 gens, 7 cycles, same Optuna r4 hyperparameters as Exp 11).
+
+### Command
+
+```
+uv run python -u -m src.tournament \
+  --model-variant v3 --hidden-dim-choices 256 --embedding-dim 64 \
+  --population-size 8 --generations 350 --cycle-length 50 \
+  --episodes-per-gen 1500 --buffer-capacity 100000 --batch-size 512 \
+  --epsilon-start 0.868 --epsilon-end 0.051 \
+  --lr-range 8.3e-5 0.0024 --updates-per-episode 8 \
+  --target-update-interval 843 --gamma 0.99 --reward-shaping hindsight \
+  --eval-games-per-matchup 50 --solo-eval-games 200 --max-train-rounds 3 \
+  --wandb-project golf-dqn --wandb-run-name exp14-win-bonus \
+  --output-dir data/exp14_win_bonus
+```
+
+### Findings: win bonus was not exercised
+
+Post-hoc inspection revealed that `EvalResult.wins/losses/draws` fields are never incremented anywhere in `tournament.py` — `win_rate` always returns 0. This means `eval/best_win_rate=0` throughout and the win-bonus reward shaping may have defaulted to 0 (not logged in the run header). The win-bonus experiment effectively ran as a straight replication of Exp 11's config. This is a known bug; the fields need to be populated from the per-matchup score matrix.
+
+### Per-cycle results
+
+| Cycle | Gens | Best competitive (in-training) | Col end |
+|-------|------|-------------------------------|---------|
+| 1 | 1-50 | 11.28 | ~0.82 |
+| 2 | 51-100 | 9.36 | ~0.90 |
+| 3 | 101-150 | 9.45 | ~0.91 |
+| 4 | 151-200 | 9.18 | ~0.93 |
+| 5 | 201-250 | 9.44 | ~0.93 |
+| 6 | 251-300 | 9.28 | ~0.94 |
+| 7 | 301-350 | 9.21 | ~0.92 |
+
+Score plateau at ~9.2-9.5 from cycle 2 onward (same saturation pattern as Exp 11, but starting a cycle earlier). Col_matches reached 0.88-0.97 in late training, up from Exp 11's 0.82, with rev_replace holding at 0.14-0.16.
+
+**Note on in-training rankings**: The in-training competitive scores (50 games per matchup vs a mixed league) produced an incorrect ranking. `gen96_agent4` (hall-of-fame from cycle 2, best_ever=9.227) appeared marginally better than the final champion `gen350_agent4` (9.214) in the noisy in-training eval. Rigorous seat-cycling reversed this: gen350 beats gen96 by 0.22 strokes/hole (see below).
+
+### Seat-cycling benchmark results
+
+All seat-cycling evals use 12 distinct permutations × 2000 games × 9 holes for the 4-player D1,D2,R,R roster, eliminating seat bias.
+
+**Exp14 champion vs Exp11 champion (direct):**
+
+| Agent | Avg score/hole |
+|---|---|
+| **DQN Exp14 gen350** | **8.904** |
+| DQN Exp11 gen343 | 9.926 |
+| Random | 32.161 |
+
+Exp14 wins by **1.02 strokes/hole** in every permutation.
+
+**Exp14 gen350 vs Exp14 gen96 (internal):**
+
+| Agent | Avg score/hole |
+|---|---|
+| **DQN gen350** | **8.812** |
+| DQN gen96 | 9.029 |
+
+The final champion beats the hall-of-fame agent by 0.22 strokes/hole. In-training rankings were misleading — the 50-game noisy evals suggested gen96 was best, but rigorous evaluation reverses the order.
+
+### Full benchmark: Lookahead vs both DQNs (5-player, 120 perms × 1000 games × 9 holes)
+
+Roster `L, D1, D2, I, R` (5-player game). Chance baseline = 20%.
+
+| Agent | Avg score/hole | Win rate |
+|---|---|---|
+| Lookahead (L) | **10.10** | **34.1%** |
+| DQN Exp14 (D2) | 10.64 | 29.9% |
+| DQN Exp11 (D1) | 12.25 | 22.2% |
+| Improved Heuristic (I) | 13.43 | 20.6% |
+| Random (R) | 33.23 | 0.6% |
+
+Exp14 DQN is now solidly above the 20% chance baseline and above the improved heuristic in win rate. The gap to Lookahead narrowed from 2.11 strokes/hole (Exp11 vs L in the 4-player L,D,I,R eval from Exp 12b) to 0.54 strokes/hole here. The rank distribution of kept cards shows Exp14 closely matching Lookahead's low-card retention profile; Exp11 is noticeably weaker in shedding high cards.
+
+For the 4-player L,D,I,R roster (same as Exp 12b baseline, now with Exp14 DQN):
+
+| Agent | Avg score/hole | Win rate |
+|---|---|---|
+| Lookahead (L) | **9.113** | **48.3%** |
+| DQN Exp14 | 9.582 | 38.5% |
+| Improved Heuristic | 12.015 | 13.2% |
+| Random | 32.639 | 0.0% |
+
+The gap to Lookahead is 0.47 strokes/hole and 9.8 percentage points in win rate. In individual seat configurations, Exp14 DQN beats Lookahead outright (e.g. `D,R,L,I`: D=9.47/45%, L=9.40/49.9% — near dead heat; `R,I,D,L`: D=9.50/38.8%, L=9.99/30.1% — DQN wins both metrics). The aggregate gap is heavily seat-driven: Lookahead at seat 0 achieves 57-78% win rate vs the DQN's 45-68%.
+
+### Observations
+
+**Exp14 is the new DQN champion**, beating Exp11 by 1.02 strokes/hole under rigorous seat-cycled evaluation. The improvement is driven by higher col_matches (0.88-0.97 vs 0.82) with similar rev_replace (0.14-0.16).
+
+**In-training rankings are unreliable.** The 50-game competitive evals used during training misranked gen96 above gen350. For any future experiment, champion selection should always be validated with at least 1000-game seat-cycled eval before declaring a winner.
+
+**The DQN has substantially closed the gap to Lookahead.** Exp11 trailed by 2.1 strokes/hole in the 4-player L,D,I,R roster; Exp14 trails by 0.47. The rank distribution of kept cards shows Exp14 now matching Lookahead's strong preference for low cards, suggesting the DQN has learned a similar card-value hierarchy implicitly.
+
+**Cyclic epsilon still saturates at cycle 2.** The same pattern as Exp 11: cycle 1 sees rapid improvement from random-play baseline, cycle 2 brings the major jump, cycles 3-7 plateau. More cycles do not help. The next experiments should explore different interventions: reward shaping that rewards win rate directly (requires fixing the EvalResult bug first), or curriculum changes.
+
+### Data
+
+- `data/exp14_win_bonus/` — per-generation checkpoints, `champion.pt`, `hall_of_fame.pt`, `metrics_log.jsonl`
+- **Champion checkpoint**: `data/exp14_win_bonus/gen_350/gen350_agent4.pt`
+- wandb runs: `exp14-win-bonus`, `exp14-win-bonus-resumed`
+- Seat-cycling results: `data/seat_cycling_exp11_vs_exp14_gen350.txt`, `data/seat_cycling_exp14_gen96_vs_gen350.txt`, `data/seat_cycling_exp14_vs_lookahead.txt`
+- Figure: `data/figures/agent_comparison.png` (score distributions, kept-card rank distributions, win rates for L/Exp14/Exp11/I/R)
+- Reproduce champion benchmark: `uv run python -m scripts.seat_cycling --roster D1,D2,R,R --dqn1-checkpoint data/exp11_cyclic/champion.pt --dqn2-checkpoint data/exp14_win_bonus/gen_350/gen350_agent4.pt --games-per-perm 2000 --holes 9`
+- Reproduce full comparison: `uv run python -m scripts.agent_comparison --dqn1-checkpoint data/exp11_cyclic/champion.pt --dqn1-name "DQN Exp11" --dqn2-checkpoint data/exp14_win_bonus/gen_350/gen350_agent4.pt --dqn2-name "DQN Exp14" --games 1000 --holes 9`
+

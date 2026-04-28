@@ -115,8 +115,8 @@ Both bugs from Experiments 5 and 6 (see lab notebook) would have been caught by 
 | `eval_hof.py` | Download and evaluate a Hall-of-Fame checkpoint from HuggingFace | `uv run python -m scripts.eval_hof --repo-id vgainullin/golf --games 1000 --holes 9` |
 | `eval_vs_random.py` | Evaluate every checkpoint in a tournament directory vs random opponents (GPU-batched) | `uv run python -m scripts.eval_vs_random --tournament-dir data/my_run --games 200 --holes 9` |
 | `eval_compare.py` | Head-to-head between specific DQN checkpoints | `uv run python -m scripts.eval_compare --checkpoints a.pt b.pt --games 5000` |
-| `seat_cycling.py` | Seat-cycled head-to-head between any agents (L/D/I/H/R) | `uv run python -m scripts.seat_cycling --roster L,I,I,I --games-per-perm 1000` |
-| `agent_comparison.py` | Score/rank distributions and win rate plots | `uv run python -m scripts.agent_comparison --dqn-checkpoint model.pt` |
+| `seat_cycling.py` | Seat-cycled head-to-head between any agents (L/D/D1/D2/I/H/R); use D1+D2 for two-DQN matchups | `uv run python -m scripts.seat_cycling --roster D1,D2,R,R --dqn1-checkpoint a.pt --dqn2-checkpoint b.pt --games-per-perm 2000` |
+| `agent_comparison.py` | Score/rank distributions and win rate plots; supports one or two DQN checkpoints | `uv run python -m scripts.agent_comparison --dqn1-checkpoint a.pt --dqn1-name "Exp11" --dqn2-checkpoint b.pt --dqn2-name "Exp14"` |
 | `plot_training_progress.py` | 3-panel plot (solo score, behavioral metrics, epsilon schedule) from `metrics_log.jsonl` | `uv run python -m scripts.plot_training_progress --metrics data/my_run/metrics_log.jsonl --output progress.png` |
 
 All evaluation reports four behavioral metrics alongside score: `col_matches` (avg column matches per hole), `take_rate` (fraction of stage-0 turns taking the discard), `rev_replace` (fraction of stage-1 placements at already-revealed positions), `s1_entropy` (Shannon entropy of stage-1 actions). These are how we tell *what* a model has learned, not just how well it scores.
@@ -131,26 +131,30 @@ The **1-step lookahead** (label `L`) enumerates all legal actions, scores each r
 # Solo eval
 uv run python -m src.bayes_optimal --player lookahead --games 5000 --holes 9 --eval-config R,H,R --seed 0
 
-# Seat-cycled comparison against DQN and heuristic
+# Seat-cycled comparison against current DQN champion and heuristic
 uv run python -m scripts.seat_cycling --roster L,D,I,R \
-  --dqn-checkpoint data/exp11_cyclic/champion.pt \
-  --games-per-perm 1000 --holes 9 --seed 0
+  --dqn-checkpoint data/exp14_win_bonus/gen_350/gen350_agent4.pt \
+  --games-per-perm 1000 --holes 9
 
-# Score/rank distributions and win rate plots
+# Score/rank distributions and win rate plots (two DQNs side-by-side)
 uv run python -m scripts.agent_comparison \
-  --dqn-checkpoint data/exp11_cyclic/champion.pt \
-  --games 1000 --holes 9 --seed 0
+  --dqn1-checkpoint data/exp11_cyclic/champion.pt --dqn1-name "DQN Exp11" \
+  --dqn2-checkpoint data/exp14_win_bonus/gen_350/gen350_agent4.pt --dqn2-name "DQN Exp14" \
+  --games 1000 --holes 9
 ```
 
-Seat-cycled results (24 permutations x 1000 games x 9 holes):
+Seat-cycled results (24 permutations × 1000 games × 9 holes, 4-player L,D,I,R):
 
 | Agent | Avg score/hole | Win rate |
 |---|---|---|
-| Lookahead (L) | **9.03** | **45.0%** |
-| DQN champion (Exp 11) | 11.14 | 30.4% |
-| Improved heuristic | 11.90 | 29.8% |
+| Lookahead (L) | **9.11** | **48.3%** |
+| DQN champion (Exp 14) | 9.58 | 38.5% |
+| Improved heuristic | 12.02 | 13.2% |
+| Random | 32.64 | 0.0% |
 
-See `docs/experiments.md` Experiments 12 and 12b for the full development history.
+The Exp 14 DQN champion (`data/exp14_win_bonus/gen_350/gen350_agent4.pt`) beats the prior Exp 11 champion by **1.02 strokes/hole** under seat-rotation. The gap to Lookahead narrowed from 2.1 strokes (Exp 11) to 0.47 strokes (Exp 14); the DQN's kept-card rank distribution now closely matches Lookahead's.
+
+See `docs/experiments.md` Experiments 12, 12b, and 14 for the full development history.
 
 ### LLM player harness — `src/llm_player.py`
 
@@ -192,7 +196,7 @@ src/
 scripts/                     # Eval entry points
 tests/                       # Pytest suite (belief tracker, bayes player, legacy simulation)
 docs/
-  experiments.md             # Lab notebook (Experiments 1-12b)
+  experiments.md             # Lab notebook (Experiments 1-14)
   beyond-heuristic-rl.md     # Pre-RL design notes
   figures/                   # Training-progress plots
 data/

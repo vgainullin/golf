@@ -78,19 +78,20 @@ class SeatHandler:
             minimizing expected final score under the belief.
       I  -- improved heuristic (heuristic_stage0 + improved_stage1).
       H  -- base heuristic (heuristic_stage0 + heuristic_stage1).
-      D  -- DQN model loaded from checkpoint.
+      D  -- DQN model loaded from --dqn-checkpoint.
+      D1 -- DQN model loaded from --dqn1-checkpoint (for head-to-head DQN evals).
+      D2 -- DQN model loaded from --dqn2-checkpoint (for head-to-head DQN evals).
       R  -- random.
     """
 
-    LABELS = ("B", "B2", "B3", "L", "D", "I", "H", "R")
+    LABELS = ("B", "B2", "B3", "L", "D", "D1", "D2", "I", "H", "R")
 
     # Tunable per-handler config
     b2_cutoff: float = float(4)
     b3_draw_override_threshold: float = 0.50
-    # Class-level DQN model loaded by CLI before run.
-    dqn_model = None
-    dqn_obs_fn = None
-    dqn_device = None
+    # Class-level DQN registry: label -> (model, obs_fn, device).
+    # Populated by CLI for each DQN label used in the roster.
+    dqn_registry: Dict[str, tuple] = {}
 
     def __init__(self, label: str, seat_idx: int, N: int, device: torch.device):
         if label not in self.LABELS:
@@ -136,18 +137,17 @@ class SeatHandler:
             return lookahead_stage0(state, self.seat, self.tracker)
         elif self.label in ("I", "H"):
             return heuristic_stage0(state, self.seat)
-        elif self.label == "D":
+        elif self.label in ("D", "D1", "D2"):
             return self._dqn_action(state, stage=0)
         else:  # R
             return random_stage0(state, self.seat)
 
     def _dqn_action(self, state, stage: int) -> torch.Tensor:
         """Run the DQN model to pick a stage-0 or stage-1 action for this seat."""
-        model = SeatHandler.dqn_model
-        obs_fn = SeatHandler.dqn_obs_fn
-        dev = SeatHandler.dqn_device
-        if model is None or obs_fn is None:
-            raise RuntimeError("D label used but no DQN model loaded; pass --dqn-checkpoint")
+        entry = SeatHandler.dqn_registry.get(self.label)
+        if entry is None:
+            raise RuntimeError(f"{self.label} label used but no model loaded; pass the matching --dqn*-checkpoint arg")
+        model, obs_fn, dev = entry
         N = state.player_cards.shape[0]
         obs = obs_fn(state, self.seat).to(dev)
         sg = torch.full((N,), stage, dtype=torch.long, device=dev)
@@ -174,7 +174,7 @@ class SeatHandler:
             return improved_stage1(state, self.seat)
         elif self.label == "H":
             return heuristic_stage1(state, self.seat)
-        elif self.label == "D":
+        elif self.label in ("D", "D1", "D2"):
             return self._dqn_action(state, stage=1)
         else:  # R
             return random_stage1(state, self.seat)
@@ -199,7 +199,8 @@ def run_seating(
     N = num_games
     handlers = [SeatHandler(label, seat, N, device) for seat, label in enumerate(seating)]
 
-    totals = [torch.zeros(N, dtype=torch.float32, device=device) for _ in range(n_players)]
+    # game_totals[sid] accumulates raw score sums across holes (not divided by holes)
+    game_totals = torch.zeros(N, n_players, dtype=torch.float32, device=device)
 
     for hole in range(1, holes + 1):
         state = reset_games(N, device, n_players=n_players, stack_low_cards=stack_low_cards)
@@ -248,9 +249,16 @@ def run_seating(
                 )
 
         for sid in range(n_players):
-            totals[sid] += compute_final_score(state.player_cards[:, sid, :], device)
+            game_totals[:, sid] += compute_final_score(state.player_cards[:, sid, :], device)
 
-    return [t.mean().item() / holes for t in totals]
+    # Win rate: lowest total score wins. Ties share the win equally.
+    best = game_totals.min(dim=1, keepdim=True).values
+    tied_for_best = (game_totals == best).float()           # (N, n_players)
+    win_shares = tied_for_best / tied_for_best.sum(dim=1, keepdim=True)
+    win_rates = win_shares.mean(dim=0).tolist()             # per-seat win rate
+
+    avg_scores = (game_totals.mean(dim=0) / holes).tolist()
+    return avg_scores, win_rates
 
 
 # ---------------------------------------------------------------------------
@@ -275,27 +283,30 @@ def run_matchup(
     holes: int,
     device: torch.device,
     stack_low_cards: bool = False,
-) -> Tuple[Dict[str, float], List[Tuple[Tuple[str, ...], List[float]]]]:
+) -> Tuple[Dict[str, float], Dict[str, float], List[Tuple[Tuple[str, ...], List[float], List[float]]]]:
     """Run all distinct seat-permutations of the roster.
 
-    Returns (label_to_avg_score_per_hole, per_perm_table).
-    The per-perm table is a list of (seating_tuple, [per-seat scores]).
+    Returns (label_to_avg_score, label_to_win_rate, per_perm_table).
+    per_perm_table entries: (seating, per-seat avg scores, per-seat win rates).
     """
     perms = unique_permutations(roster)
     label_scores: Dict[str, List[float]] = defaultdict(list)
-    per_perm: List[Tuple[Tuple[str, ...], List[float]]] = []
+    label_wins: Dict[str, List[float]] = defaultdict(list)
+    per_perm = []
 
     for seating in perms:
-        seat_avgs = run_seating(
+        seat_avgs, seat_wins = run_seating(
             seating, num_games_per_perm, holes, device,
             stack_low_cards=stack_low_cards,
         )
-        per_perm.append((seating, seat_avgs))
+        per_perm.append((seating, seat_avgs, seat_wins))
         for seat_idx, label in enumerate(seating):
             label_scores[label].append(seat_avgs[seat_idx])
+            label_wins[label].append(seat_wins[seat_idx])
 
     label_means = {label: sum(v) / len(v) for label, v in label_scores.items()}
-    return label_means, per_perm
+    label_win_rates = {label: sum(v) / len(v) for label, v in label_wins.items()}
+    return label_means, label_win_rates, per_perm
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +317,8 @@ def run_matchup(
 def print_report(
     roster: List[str],
     label_means: Dict[str, float],
-    per_perm: List[Tuple[Tuple[str, ...], List[float]]],
+    label_win_rates: Dict[str, float],
+    per_perm: List[Tuple[Tuple[str, ...], List[float], List[float]]],
     num_games_per_perm: int,
     holes: int,
 ) -> None:
@@ -316,20 +328,18 @@ def print_report(
     print(f"  {len(per_perm)} distinct seatings x {num_games_per_perm} games "
           f"x {holes} holes = {total_games * holes} hole-instances per label-instance")
     print()
-    print(f"  Per-label avg score / hole (lower = better):")
-    # Sort labels by average score
+    print(f"  Per-label summary (sorted by avg score):")
+    print(f"    {'label':<6s}  {'avg score/hole':>14s}  {'win rate':>9s}")
     for label in sorted(label_means.keys(), key=lambda l: label_means[l]):
-        n_inst = sum(1 for s in roster if s == label)
-        n_obs = n_inst * len(per_perm)
-        print(f"    {label}: {label_means[label]:6.3f}  "
-              f"(averaged over {n_obs} per-perm role-instances)")
+        print(f"    {label:<6s}  {label_means[label]:14.3f}  {label_win_rates[label]:8.1%}")
     print()
 
-    print(f"  Per-seating breakdown:")
-    print(f"    {'seating':<20s}  " + "  ".join(f"seat{i}" for i in range(n_players)))
-    for seating, seat_avgs in per_perm:
-        seat_str = " ".join(f"{s:5.2f}" for s in seat_avgs)
-        print(f"    {','.join(seating):<20s}  {seat_str}")
+    print(f"  Per-seating breakdown (avg score / win rate):")
+    header = "  ".join(f"{f'seat{i}':>11s}" for i in range(n_players))
+    print(f"    {'seating':<20s}  {header}")
+    for seating, seat_avgs, seat_wins in per_perm:
+        cols = "  ".join(f"{a:5.2f}/{w:4.1%}" for a, w in zip(seat_avgs, seat_wins))
+        print(f"    {','.join(seating):<20s}  {cols}")
     print()
 
 
@@ -371,7 +381,19 @@ def main():
         "--dqn-checkpoint",
         type=str,
         default=None,
-        help="Path to DQN checkpoint to load (required if 'D' label appears in roster).",
+        help="Path to DQN checkpoint for label D.",
+    )
+    p.add_argument(
+        "--dqn1-checkpoint",
+        type=str,
+        default=None,
+        help="Path to DQN checkpoint for label D1 (head-to-head use).",
+    )
+    p.add_argument(
+        "--dqn2-checkpoint",
+        type=str,
+        default=None,
+        help="Path to DQN checkpoint for label D2 (head-to-head use).",
     )
     args = p.parse_args()
 
@@ -380,38 +402,40 @@ def main():
     SeatHandler.b2_cutoff = args.b2_cutoff
     SeatHandler.b3_draw_override_threshold = args.b3_draw_threshold
 
-    # Load DQN if any 'D' in roster
-    if "D" in [r.strip() for r in args.roster.split(",")]:
-        if args.dqn_checkpoint is None:
-            raise SystemExit("--dqn-checkpoint required when D appears in roster")
-        from src.tournament import make_model, get_obs_fn
-        from src.dqn_offline import resolve_device
-        dqn_dev = resolve_device("cpu")  # cpu for fair comparison with other players
-        ckpt = torch.load(args.dqn_checkpoint, map_location="cpu", weights_only=True)
+    from src.tournament import make_model, get_obs_fn
+
+    def _load_dqn(path: str, label: str) -> None:
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
         cfg = ckpt["config"]
         variant = cfg.get("model_variant", "v1")
         hidden_dim = cfg["hidden_dim"]
         embedding_dim = cfg.get("embedding_dim", 128)
-        model = make_model(variant, embedding_dim, hidden_dim, dqn_dev)
+        model = make_model(variant, embedding_dim, hidden_dim, torch.device("cpu"))
         model.load_state_dict(ckpt["model_state_dict"])
         model.eval()
-        SeatHandler.dqn_model = model
-        SeatHandler.dqn_obs_fn = get_obs_fn(variant)
-        SeatHandler.dqn_device = dqn_dev
-        print(f"Loaded DQN from {args.dqn_checkpoint} (variant={variant}, hidden={hidden_dim})")
+        SeatHandler.dqn_registry[label] = (model, get_obs_fn(variant), torch.device("cpu"))
+        print(f"Loaded {label} from {path} (variant={variant}, hidden={hidden_dim})")
 
-    roster = [r.strip() for r in args.roster.split(",")]
+    roster_labels = [r.strip() for r in args.roster.split(",")]
+    label_to_arg = {"D": args.dqn_checkpoint, "D1": args.dqn1_checkpoint, "D2": args.dqn2_checkpoint}
+    for label, ckpt_path in label_to_arg.items():
+        if label in roster_labels:
+            if ckpt_path is None:
+                raise SystemExit(f"--dqn{label.replace('D','').lower() or ''}-checkpoint required when {label} appears in roster")
+            _load_dqn(ckpt_path, label)
+
+    roster = roster_labels
     for label in roster:
         if label not in SeatHandler.LABELS:
             raise SystemExit(f"Unknown label {label!r}; valid: {SeatHandler.LABELS}")
 
-    label_means, per_perm = run_matchup(
+    label_means, label_win_rates, per_perm = run_matchup(
         roster, args.games_per_perm, args.holes, device,
         stack_low_cards=args.stack_low_cards,
     )
     if args.stack_low_cards:
         print("(stacked deck: 2s, Ks, As at bottom)")
-    print_report(roster, label_means, per_perm, args.games_per_perm, args.holes)
+    print_report(roster, label_means, label_win_rates, per_perm, args.games_per_perm, args.holes)
 
 
 if __name__ == "__main__":

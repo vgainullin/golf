@@ -1,0 +1,25 @@
+Loaded D1 from data/exp11_cyclic/champion.pt (variant=v3, hidden=256)
+Loaded D2 from data/exp14_win_bonus/gen_096/gen96_agent4.pt (variant=v3, hidden=256)
+=== Matchup: D1,D2,R,R (4 players) ===
+  12 distinct seatings x 2000 games x 9 holes = 216000 hole-instances per label-instance
+
+  Per-label avg score / hole (lower = better):
+    D2:  8.987  (averaged over 12 per-perm role-instances)
+    D1:  9.911  (averaged over 12 per-perm role-instances)
+    R: 32.222  (averaged over 24 per-perm role-instances)
+
+  Per-seating breakdown:
+    seating               seat0  seat1  seat2  seat3
+    D1,D2,R,R              8.70 10.06 32.71 31.23
+    D1,R,D2,R              9.16 32.46  9.64 32.59
+    D1,R,R,D2             10.01 32.80 31.43  9.23
+    D2,D1,R,R              7.71 11.14 32.70 31.21
+    D2,R,D1,R              8.14 32.62 10.27 32.41
+    D2,R,R,D1              8.70 32.85 31.44  9.78
+    R,D1,D2,R             31.35  8.87 10.14 32.68
+    R,D1,R,D2             32.64  9.41 32.41  9.73
+    R,D2,D1,R             31.41  7.91 11.11 32.84
+    R,D2,R,D1             32.54  8.22 32.52 10.46
+    R,R,D1,D2             32.67 31.46  8.91 10.26
+    R,R,D2,D1             32.90 31.46  8.09 11.12
+
