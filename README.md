@@ -154,6 +154,10 @@ Seat-cycled results (24 permutations × 1000 games × 9 holes, 4-player L,D,I,R)
 
 The Exp 14 DQN champion (`data/exp14_win_bonus/gen_350/gen350_agent4.pt`) beats the prior Exp 11 champion by **1.02 strokes/hole** under seat-rotation. The gap to Lookahead narrowed from 2.1 strokes (Exp 11) to 0.47 strokes (Exp 14); the DQN's kept-card rank distribution now closely matches Lookahead's.
 
+![Agent comparison: score distributions, kept-card rank distributions, win rates](data/figures/agent_comparison.png)
+
+![Seat-cycling breakdown: Exp14 DQN vs Lookahead (L,D,I,R roster)](data/figures/seat_cycling_exp14_vs_lookahead.png)
+
 See `docs/experiments.md` Experiments 12, 12b, and 14 for the full development history.
 
 ### LLM player harness — `src/llm_player.py`
