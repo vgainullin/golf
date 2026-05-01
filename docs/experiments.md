@@ -1622,3 +1622,90 @@ The gap to Lookahead is 0.47 strokes/hole and 9.8 percentage points in win rate.
 - Reproduce champion benchmark: `uv run python -m scripts.seat_cycling --roster D1,D2,R,R --dqn1-checkpoint data/exp11_cyclic/champion.pt --dqn2-checkpoint data/exp14_win_bonus/gen_350/gen350_agent4.pt --games-per-perm 2000 --holes 9`
 - Reproduce full comparison: `uv run python -m scripts.agent_comparison --dqn1-checkpoint data/exp11_cyclic/champion.pt --dqn1-name "DQN Exp11" --dqn2-checkpoint data/exp14_win_bonus/gen_350/gen350_agent4.pt --dqn2-name "DQN Exp14" --games 1000 --holes 9`
 
+---
+
+## Experiment 15: AlphaZero-style Distillation from Bayes Lookahead (2026-04-29)
+
+### Motivation
+
+The policy audit (see below) established that DQN and Lookahead disagree most at stage-1 placement decisions when the board is largely hidden (avg revealed fraction 0.391 at disagreement vs 0.769 at agreement). Lookahead outscores DQN by 1.18 strokes/hole on every hole containing at least one disagreement. The relationship is one-sided: DQN has no information advantage over Lookahead. The AlphaZero framing: treat Bayes Lookahead as the oracle search and distill its policy into the DQN network, without adding belief features as inputs.
+
+### Policy audit
+
+`scripts/policy_audit.py` runs N games twice with the same seed (once Lookahead-driven, once DQN-driven) and queries both agents at every player-0 decision, recording per-action expected scores (BL) and Q-values (DQN).
+
+Results for `gen350_agent4` (2000 games × 9 holes):
+
+| | Stage 0 (take/draw) | Stage 1 (placement) |
+|---|---|---|
+| Agreement rate | 92.3% | 49.5% |
+| Spearman ρ | 0.867 | 0.849 |
+
+Stage-0 disagreements (13,495 total): DQN prefers take 10,746 times vs Lookahead's 2,749 — DQN is more aggressive about taking discards. Stage-1 disagreements cluster at low-revealed boards (avg 0.391 vs 0.769 for agreements). On all holes containing ≥1 disagreement (100% of holes), Lookahead scores 8.549 vs DQN's 9.730 — a 1.18 gap. The DQN has no countervailing advantage.
+
+### Distillation
+
+`scripts/distill_from_bayes.py` implements AlphaZero-style distillation:
+
+1. **Expert data collection**: Run BL for N games, recording `(obs, stage, bl_per_action_scores, valid_mask)` at every player-0 decision. BL drives the trajectory; opponents use heuristic.
+2. **Pairwise ranking loss**: For each pair of valid actions (i, j) where BL strictly prefers i (lower expected score), penalise if DQN Q-value ordering disagrees. Loss = `mean(relu(margin - (Q[i] - Q[j])))`. Scale-free; no temperature tuning required.
+3. **Fine-tune from gen350_agent4**: 30 epochs, 2000 games × 9 holes = 1.44M decisions, lr=1e-4, margin=0.1.
+
+Distillation results:
+
+| Epoch | Val loss | Agreement |
+|---|---|---|
+| 1 | 0.0060 | 89.4% |
+| 6 | 0.0027 | 89.5% |
+| 30 | 0.0021 | 89.9% |
+
+Converged by epoch 6. Agreement rose from ~71% (92.3% stage-0 / 49.5% stage-1 combined) to ~90%. Saved to `data/exp14_win_bonus/distilled.pt`.
+
+**Seat-cycling: distilled vs gen350 (D1,D2,R,R, 12 perms × 2000 games):**
+
+| Agent | Avg score/hole | Win rate |
+|---|---|---|
+| gen350 (D1) | **8.731** | 56.4% |
+| distilled (D2) | 9.349 | 43.6% |
+
+The distilled model is 0.62 strokes/hole *worse* than its starting point. Root cause: the pairwise ranking loss changed Q-value orderings without preserving their scale. Q-values carry absolute magnitude information used in TD bootstrapping; disrupting orderings also shifts magnitudes, corrupting the learned value function.
+
+### RL resume from distilled checkpoint
+
+Following the AlphaZero approach (distillation provides initialisation, not the final policy), RL training was resumed from `distilled.pt` using the full Exp 14 config: v3, hidden=256, population=8, cyclic ε 0.868→0.051, 50 gens/cycle, hindsight reward, win bonus=0.3. Population bootstrapped via `data/exp15_distilled/gen_0/` with 8 agents initialised from the distilled weights and LRs sampled from the Exp 14 range.
+
+**Key observation**: Col_matches was 0.81–0.93 at ε=0.868 in generation 1 — the distilled column-matching behaviour survived re-exploration. In a cold-start run (Exp 14), col_matches was ~0.30–0.50 at the same stage. The distillation accelerated convergence of this behaviour by roughly one full cycle.
+
+**Per-cycle best solo scores (in-training, 500-game eval):**
+
+| Cycle | Gens | Best solo |
+|---|---|---|
+| 1 | 1–50 | **8.157** (gen 46) |
+| 2 | 51–100 | 8.328 (gen 81) |
+| 3 | 101–150 | 8.171 (gen 124) |
+| 4 | 151–200 | 8.344 (gen 159) |
+
+Cycle 1 best solo of 8.157 nearly equals Exp 14's all-time best (8.18) reached after 350 gens — a strong head start. However, cycles 2–4 show no consistent improvement: the model oscillates rather than compounding gains. Two contributing factors:
+
+1. **Hindsight reward saturation**: Hindsight shaping rewards column matches; since col_matches starts high from distillation, the reward signal driving improvement in Exp 14 is already weak from the first generation.
+2. **Belief bottleneck reasserts**: The distillation taught the DQN *what* BL does but not *why* — BL's stage-1 decisions depend on the posterior over hidden cards, which is not in the observation. Under RL the model cannot improve on hidden-card placement decisions beyond the distilled prior.
+
+### Plateau analysis and AlphaZero-consistent options
+
+Three principled paths forward:
+
+**A — Recurrent architecture (most AlphaZero-consistent):** Replace the feedforward v3 network with a Transformer-over-history that processes the sequence of per-turn observations. The network learns to maintain implicit belief state in its attention heads without any external tracker at inference time. Requires retraining from scratch; the distilled weights would not transfer.
+
+**B — Outcome-supervised distillation (longer horizon):** Instead of distilling from BL's 1-step expected-score targets, generate targets by running BL to hole completion and using the actual final-score delta as the supervision signal. The DQN learns from outcomes rather than belief-dependent intermediate scores, staying within the raw-observation constraint.
+
+**C — Belief features as input (pragmatic):** Add the belief posterior (unobserved card count by rank, ~13 floats) as extra observation tokens. At inference time the belief tracker runs as a lightweight companion module. Not strictly AlphaZero-consistent (the network is no longer a pure function of the raw game state), but directly addresses the root cause identified by the audit.
+
+### Data
+
+- `scripts/policy_audit.py` — decision-level DQN vs Lookahead comparison (agreement rate, Spearman ρ, counterfactual scores)
+- `scripts/distill_from_bayes.py` — expert data collection + pairwise ranking loss fine-tuning
+- `data/exp14_win_bonus/distilled.pt` — distilled checkpoint (gen350_agent4 fine-tuned on BL trajectories)
+- `data/exp15_distilled/` — RL training from distilled checkpoint, per-generation checkpoints, `metrics_log.jsonl`
+- `data/seat_cycling_gen350_vs_distilled.txt` — gen350 vs distilled seat-cycling result
+- `data/figures/policy_audit.png` — 6-panel policy audit figure
+

@@ -405,10 +405,10 @@ def main():
     from src.tournament import make_model, get_obs_fn
 
     def _load_dqn(path: str, label: str) -> None:
-        ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        cfg = ckpt["config"]
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        cfg = ckpt.get("config") or ckpt.get("hyperparams", {})
         variant = cfg.get("model_variant", "v1")
-        hidden_dim = cfg["hidden_dim"]
+        hidden_dim = cfg.get("hidden_dim", 256)
         embedding_dim = cfg.get("embedding_dim", 128)
         model = make_model(variant, embedding_dim, hidden_dim, torch.device("cpu"))
         model.load_state_dict(ckpt["model_state_dict"])
