@@ -1683,9 +1683,12 @@ Following the AlphaZero approach (distillation provides initialisation, not the 
 | 1 | 1–50 | **8.157** (gen 46) |
 | 2 | 51–100 | 8.328 (gen 81) |
 | 3 | 101–150 | 8.171 (gen 124) |
-| 4 | 151–200 | 8.344 (gen 159) |
+| 4 | 151–200 | 8.253 (gen 192) |
+| 5 | 201–250 | 8.390 (gen 227) |
+| 6 | 251–300 | 8.209 (gen 274) |
+| 7 | 301–350 | 8.320 (gen 341) |
 
-Cycle 1 best solo of 8.157 nearly equals Exp 14's all-time best (8.18) reached after 350 gens — a strong head start. However, cycles 2–4 show no consistent improvement: the model oscillates rather than compounding gains. Two contributing factors:
+Cycle 1 best solo of 8.157 nearly equals Exp 14's all-time best (8.18) reached after 350 gens — a strong head start. However, all 7 cycles show no consistent improvement: the model oscillates in the range 8.157–8.390 throughout. Two contributing factors:
 
 1. **Hindsight reward saturation**: Hindsight shaping rewards column matches; since col_matches starts high from distillation, the reward signal driving improvement in Exp 14 is already weak from the first generation.
 2. **Belief bottleneck reasserts**: The distillation taught the DQN *what* BL does but not *why* — BL's stage-1 decisions depend on the posterior over hidden cards, which is not in the observation. Under RL the model cannot improve on hidden-card placement decisions beyond the distilled prior.
@@ -1700,12 +1703,26 @@ Three principled paths forward:
 
 **C — Belief features as input (pragmatic):** Add the belief posterior (unobserved card count by rank, ~13 floats) as extra observation tokens. At inference time the belief tracker runs as a lightweight companion module. Not strictly AlphaZero-consistent (the network is no longer a pure function of the raw game state), but directly addresses the root cause identified by the audit.
 
+### Final benchmark: Exp15 champion vs Exp14 champion (12 perms × 2000 games × 9 holes)
+
+| Agent | Avg score/hole | Win rate |
+|---|---|---|
+| Exp14 gen350_agent4 (D1) | **8.907** | 52.2% |
+| Exp15 champion (D2) | 9.129 | 47.8% |
+
+Exp15 loses by 0.22 strokes/hole. The RL resume recovered from the distillation regression (0.62 behind → 0.22 behind) but never surpassed the Exp14 starting point. The distillation head start did not produce a higher ceiling: the same belief bottleneck reasserted itself, and the plateau across all 7 cycles confirms the feedforward v3 architecture without belief information cannot improve beyond ~8.15 solo regardless of initialisation.
+
+### Conclusion
+
+Distillation from Bayes Lookahead accelerates early learning (col_matches high from gen 1, near-champion solo score by gen 46) but does not raise the asymptotic ceiling. The ceiling is the belief bottleneck: without knowledge of the posterior over hidden cards, the DQN cannot improve stage-1 placement at low-revealed boards regardless of how it is initialised or how many cycles it trains.
+
 ### Data
 
 - `scripts/policy_audit.py` — decision-level DQN vs Lookahead comparison (agreement rate, Spearman ρ, counterfactual scores)
 - `scripts/distill_from_bayes.py` — expert data collection + pairwise ranking loss fine-tuning
 - `data/exp14_win_bonus/distilled.pt` — distilled checkpoint (gen350_agent4 fine-tuned on BL trajectories)
 - `data/exp15_distilled/` — RL training from distilled checkpoint, per-generation checkpoints, `metrics_log.jsonl`
-- `data/seat_cycling_gen350_vs_distilled.txt` — gen350 vs distilled seat-cycling result
+- `data/seat_cycling_gen350_vs_distilled.txt` — gen350 vs distilled (pure distillation result)
+- `data/seat_cycling_exp14_vs_exp15.txt` — Exp14 vs Exp15 final champion benchmark
 - `data/figures/policy_audit.png` — 6-panel policy audit figure
 
