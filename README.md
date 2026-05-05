@@ -2,7 +2,7 @@
 
 A simulator and reinforcement-learning playground for the card game [Golf](https://en.wikipedia.org/wiki/Golf_(card_game)).
 
-This README documents the components that work and how to use them. The lab notebook of experiments is in [`docs/experiments.md`](docs/experiments.md); a synthesis of what's been learned so far is in [`FINDINGS.md`](FINDINGS.md).
+This README documents the components that work and how to use them. The lab notebook of experiments is in [`docs/experiments.md`](docs/experiments.md).
 
 ## Game rules
 
@@ -69,7 +69,7 @@ uv run python -m src.tournament \
   --episodes-per-gen 200 --buffer-capacity 20000 --batch-size 128 \
   --output-dir data/smoke_run
 
-# Full run matching the current best config (Exp 11, GPU recommended)
+# Full run matching the current best config (Exp 14, GPU recommended)
 uv run python -m src.tournament \
   --model-variant v3 --hidden-dim-choices 256 --embedding-dim 64 \
   --population-size 8 --generations 350 --cycle-length 50 \
@@ -77,7 +77,7 @@ uv run python -m src.tournament \
   --epsilon-start 0.868 --epsilon-end 0.051 \
   --lr-range 8.3e-5 0.0024 --updates-per-episode 8 \
   --target-update-interval 843 --gamma 0.99 \
-  --reward-shaping hindsight \
+  --reward-shaping hindsight --win-bonus 0.3 \
   --output-dir data/my_run
 
 uv run python -m src.tournament --help    # full flag reference
@@ -118,6 +118,8 @@ Both bugs from Experiments 5 and 6 (see lab notebook) would have been caught by 
 | `seat_cycling.py` | Seat-cycled head-to-head between any agents (L/D/D1/D2/I/H/R); use D1+D2 for two-DQN matchups | `uv run python -m scripts.seat_cycling --roster D1,D2,R,R --dqn1-checkpoint a.pt --dqn2-checkpoint b.pt --games-per-perm 2000` |
 | `agent_comparison.py` | Score/rank distributions and win rate plots; supports one or two DQN checkpoints | `uv run python -m scripts.agent_comparison --dqn1-checkpoint a.pt --dqn1-name "Exp11" --dqn2-checkpoint b.pt --dqn2-name "Exp14"` |
 | `plot_training_progress.py` | 3-panel plot (solo score, behavioral metrics, epsilon schedule) from `metrics_log.jsonl` | `uv run python -m scripts.plot_training_progress --metrics data/my_run/metrics_log.jsonl --output progress.png` |
+| `policy_audit.py` | Decision-level DQN vs Bayes Lookahead comparison: agreement rate, Spearman ρ, counterfactual scores | `uv run python -m scripts.policy_audit --dqn-checkpoint a.pt --games 2000` |
+| `distill_from_bayes.py` | Fine-tune a DQN checkpoint to match Bayes Lookahead's action ordering via pairwise ranking loss | `uv run python -m scripts.distill_from_bayes --checkpoint a.pt --games 2000 --epochs 30 --output distilled.pt` |
 
 All evaluation reports four behavioral metrics alongside score: `col_matches` (avg column matches per hole), `take_rate` (fraction of stage-0 turns taking the discard), `rev_replace` (fraction of stage-1 placements at already-revealed positions), `s1_entropy` (Shannon entropy of stage-1 actions). These are how we tell *what* a model has learned, not just how well it scores.
 
@@ -158,7 +160,7 @@ The Exp 14 DQN champion (`data/exp14_win_bonus/gen_350/gen350_agent4.pt`) beats 
 
 ![Seat-cycling breakdown: Exp14 DQN vs Lookahead (L,D,I,R roster)](data/figures/seat_cycling_exp14_vs_lookahead.png)
 
-See `docs/experiments.md` Experiments 12, 12b, and 14 for the full development history.
+See `docs/experiments.md` Experiments 12, 12b, 14, and 15 for the full development history.
 
 ### LLM player harness — `src/llm_player.py`
 
@@ -200,7 +202,7 @@ src/
 scripts/                     # Eval entry points
 tests/                       # Pytest suite (belief tracker, bayes player, legacy simulation)
 docs/
-  experiments.md             # Lab notebook (Experiments 1-14)
+  experiments.md             # Lab notebook (Experiments 1-15)
   beyond-heuristic-rl.md     # Pre-RL design notes
   figures/                   # Training-progress plots
 data/
