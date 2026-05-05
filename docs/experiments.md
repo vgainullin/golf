@@ -1628,7 +1628,7 @@ The gap to Lookahead is 0.47 strokes/hole and 9.8 percentage points in win rate.
 
 ### Motivation
 
-The policy audit (see below) established that DQN and Lookahead disagree most at stage-1 placement decisions when the board is largely hidden (avg revealed fraction 0.391 at disagreement vs 0.769 at agreement). Lookahead outscores DQN by 1.18 strokes/hole on every hole containing at least one disagreement. The relationship is one-sided: DQN has no information advantage over Lookahead. The AlphaZero framing: treat Bayes Lookahead as the oracle search and distill its policy into the DQN network, without adding belief features as inputs.
+The policy audit (see below) established that DQN and Lookahead disagree most at stage-1 placement decisions when the board is largely hidden (avg revealed fraction 0.391 at disagreement vs 0.769 at agreement). Lookahead outscores DQN by 1.18 strokes/hole on every hole containing at least one disagreement. The relationship is one-sided: DQN has no information advantage over Lookahead. The AlphaZero framing: treat Bayes Lookahead as the search procedure (analogous to MCTS) and distill its policy into the DQN network, without adding belief features as inputs. Note: BL has no information advantage — it sees only what any player at the table sees (face-up cards, discard top, own held card). The gap is algorithmic: BL explicitly computes the exact belief posterior and does 1-step lookahead; the DQN must learn to use the same information implicitly.
 
 ### Policy audit
 
