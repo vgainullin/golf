@@ -1,8 +1,8 @@
 # Golf
 
-A simulator and reinforcement-learning playground for the card game [Golf](https://en.wikipedia.org/wiki/Golf_(card_game)).
+A simulator for the card game [Golf](https://en.wikipedia.org/wiki/Golf_(card_game)) and a testing platform for game-playing agents. Includes a vectorized engine, population-based DQN training, a belief-tracking Bayes lookahead player, hand-coded heuristics, and an LLM player harness, all evaluated against each other through a shared seat-cycling harness.
 
-This README documents the components that work and how to use them. The lab notebook of experiments is in [`docs/experiments.md`](docs/experiments.md).
+This README documents the components and how to use them.
 
 ## Game rules
 
@@ -69,7 +69,7 @@ uv run python -m src.tournament \
   --episodes-per-gen 200 --buffer-capacity 20000 --batch-size 128 \
   --output-dir data/smoke_run
 
-# Full run matching the current best config (Exp 14, GPU recommended)
+# Full run (GPU recommended)
 uv run python -m src.tournament \
   --model-variant v3 --hidden-dim-choices 256 --embedding-dim 64 \
   --population-size 8 --generations 350 --cycle-length 50 \
@@ -87,7 +87,7 @@ Outputs go to `--output-dir`: per-generation checkpoints, `metrics_log.jsonl`, `
 
 ### Hyperparameter search — `src/optuna_search.py`
 
-Optuna multi-objective sweep over tournament configs. Used to derive the Exp 11 config; see `docs/experiments.md` Experiment 9 for the full search space and findings.
+Optuna multi-objective sweep over tournament configs.
 
 ### MDP diagnostics — `src/diagnostics.py`
 
@@ -105,7 +105,7 @@ uv run python -m src.diagnostics                # run all four
 uv run python -m src.diagnostics --check fidelity
 ```
 
-Both bugs from Experiments 5 and 6 (see lab notebook) would have been caught by these probes immediately. Reusable across any RL environment with minor adapter code.
+Reusable across any RL environment with minor adapter code.
 
 ### Evaluation scripts — `scripts/eval_*.py`
 
@@ -150,17 +150,13 @@ Seat-cycled results (24 permutations × 1000 games × 9 holes, 4-player L,D,I,R)
 | Agent | Avg score/hole | Win rate |
 |---|---|---|
 | Lookahead (L) | **9.11** | **48.3%** |
-| DQN champion (Exp 14) | 9.58 | 38.5% |
+| DQN champion | 9.58 | 38.5% |
 | Improved heuristic | 12.02 | 13.2% |
 | Random | 32.64 | 0.0% |
 
-The Exp 14 DQN champion (`data/exp14_win_bonus/gen_350/gen350_agent4.pt`) beats the prior Exp 11 champion by **1.02 strokes/hole** under seat-rotation. The gap to Lookahead narrowed from 2.1 strokes (Exp 11) to 0.47 strokes (Exp 14); the DQN's kept-card rank distribution now closely matches Lookahead's.
-
 ![Agent comparison: score distributions, kept-card rank distributions, win rates](data/figures/agent_comparison.png)
 
-![Seat-cycling breakdown: Exp14 DQN vs Lookahead (L,D,I,R roster)](data/figures/seat_cycling_exp14_vs_lookahead.png)
-
-See `docs/experiments.md` Experiments 12, 12b, 14, and 15 for the full development history.
+![Seat-cycling breakdown: DQN vs Lookahead (L,D,I,R roster)](data/figures/seat_cycling_exp14_vs_lookahead.png)
 
 ### LLM player harness — `src/llm_player.py`
 
@@ -202,7 +198,6 @@ src/
 scripts/                     # Eval entry points
 tests/                       # Pytest suite (belief tracker, bayes player, legacy simulation)
 docs/
-  experiments.md             # Lab notebook (Experiments 1-15)
   beyond-heuristic-rl.md     # Pre-RL design notes
   figures/                   # Training-progress plots
 data/
@@ -215,7 +210,7 @@ deprecated/                  # Superseded approaches kept for historical referen
 
 ## Status
 
-Work in progress. The training and evaluation pipelines are stable; the original question — *what does optimal Golf play actually look like in human-readable terms?* — is still open. Open work items are tracked as GitHub issues.
+Work in progress. The training and evaluation pipelines are stable. Open work items are tracked as GitHub issues.
 
 ## License
 
