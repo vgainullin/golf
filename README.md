@@ -77,13 +77,14 @@ uv run python -m src.tournament \
   --epsilon-start 0.868 --epsilon-end 0.051 \
   --lr-range 8.3e-5 0.0024 --updates-per-episode 8 \
   --target-update-interval 843 --gamma 0.99 \
-  --reward-shaping hindsight --win-bonus 0.3 \
+  --reward-shaping hindsight --win-bonus 10 --loss-penalty -5 \
   --output-dir data/my_run
 
 uv run python -m src.tournament --help    # full flag reference
 ```
 
 Outputs go to `--output-dir`: per-generation checkpoints, `metrics_log.jsonl`, `champion.pt`, `hall_of_fame.pt`, and an Optuna-readable summary.
+Validated agent identities and checkpoint checksums are recorded in [`data/agent_manifest.json`](data/agent_manifest.json); mutable `champion.pt` aliases are not authoritative across resumed runs.
 
 ### Hyperparameter search — `src/optuna_search.py`
 
@@ -201,6 +202,7 @@ docs/
   beyond-heuristic-rl.md     # Pre-RL design notes
   figures/                   # Training-progress plots
 data/
+  agent_manifest.json              # Canonical evaluated agents + checkpoint checksum
   llm_benchmarks.md          # LLM benchmark writeup + per-game results
   *_behavioral_metrics.json  # Reference behavioral metrics for known models
 deploy/                      # Lambda Labs GPU orchestration for tournament training

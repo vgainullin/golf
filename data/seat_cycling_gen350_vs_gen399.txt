@@ -1,0 +1,26 @@
+Loaded D1 from data/exp14_win_bonus/gen_350/gen350_agent4.pt (variant=v3, hidden=256)
+Loaded D2 from data/exp14_win_bonus/gen_400/gen399_agent1.pt (variant=v3, hidden=256)
+=== Matchup: D1,D2,R,R (4 players) ===
+  12 distinct seatings x 2000 games x 9 holes = 216000 hole-instances per label-instance
+
+  Per-label summary (sorted by avg score):
+    label   avg score/hole   win rate
+    D1               8.731     55.8%
+    D2               9.286     44.2%
+    R               32.125      0.0%
+
+  Per-seating breakdown (avg score / win rate):
+    seating                     seat0        seat1        seat2        seat3
+    D1,D2,R,R              7.60/81.7%  10.52/18.3%  32.50/0.0%  31.32/0.0%
+    D1,R,D2,R              8.00/71.4%  32.43/0.0%   9.75/28.6%  32.45/0.0%
+    D1,R,R,D2              8.75/59.4%  32.58/0.0%  31.30/0.0%   9.48/40.7%
+    D2,D1,R,R              8.21/69.2%   9.81/30.8%  32.62/0.0%  31.21/0.0%
+    D2,R,D1,R              8.20/62.7%  32.41/0.0%   9.18/37.3%  32.39/0.0%
+    D2,R,R,D1              9.28/44.3%  32.59/0.0%  31.30/0.0%   8.81/55.7%
+    R,D1,D2,R             31.39/0.0%   7.82/80.3%  10.53/19.7%  32.56/0.0%
+    R,D1,R,D2             32.54/0.0%   8.10/69.4%  32.51/0.0%   9.77/30.6%
+    R,D2,D1,R             31.36/0.0%   8.35/67.6%   9.78/32.4%  32.59/0.0%
+    R,D2,R,D1             32.55/0.0%   8.34/61.8%  32.36/0.0%   9.20/38.2%
+    R,R,D1,D2             32.61/0.0%  31.22/0.0%   7.90/81.7%  10.66/18.3%
+    R,R,D2,D1             32.77/0.0%  31.45/0.0%   8.34/68.9%   9.84/31.1%
+

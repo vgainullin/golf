@@ -2,8 +2,8 @@
 
 AlphaZero-style: BL is the oracle (search), DQN is the network being trained.
 Collect BL's per-action expected scores on BL-driven trajectories, then
-fine-tune the DQN to match BL's action ordering using a pairwise margin
-ranking loss (scale-free, no temperature tuning needed).
+fine-tune the DQN to match BL's ordering with a pairwise margin loss and
+match its production action on equal-EV ties.
 
 After distillation, the checkpoint can be resumed with RL training via
 src/tournament.py --resume-from.
@@ -66,7 +66,7 @@ def collect_expert_data(
     obs_fn,
 ) -> Dict[str, np.ndarray]:
     """Run BL on N games x holes. At every player-0 decision record
-    (obs, stage, bl_scores, valid_mask).
+    (obs, stage, action, trajectory_id, bl_scores, valid_mask).
 
     BL drives player 0; opponents use heuristic_stage{0,1}.
     """
@@ -74,18 +74,24 @@ def collect_expert_data(
 
     obs_list: List[np.ndarray] = []
     stage_list: List[np.ndarray] = []
+    action_list: List[np.ndarray] = []
+    trajectory_list: List[np.ndarray] = []
     bl_scores_list: List[np.ndarray] = []
     valid_list: List[np.ndarray] = []
+    trajectory_ids = torch.arange(N, device=device)
 
     for hole in range(holes):
         state = reset_games(N, device=device)
         tracker.reset()
         tracker.observe(state, my_player_id=0)
 
-        for _ in range(40):
+        for _ in range(60):
             if state.done.all():
                 break
             for pid in range(4):
+                active = ~state.done
+                back_to_trigger = state.last_turn & (state.end_game_player == pid)
+                state.done = state.done | (back_to_trigger & active)
                 active = ~state.done
                 if not active.any():
                     break
@@ -95,13 +101,12 @@ def collect_expert_data(
                 if pid == 0:
                     obs = obs_fn(state, pid)  # (N, obs_dim)
                     s0_action, s0_scores = lookahead_stage0_scores(state, pid, tracker)
-                    # stage-0 valid: [take=col0, draw=col1]
-                    valid_s0 = torch.zeros(N, NUM_ACTIONS, dtype=torch.bool, device=device)
-                    valid_s0[:, 0] = True
-                    valid_s0[:, 1] = True
+                    valid_s0 = get_valid_action_mask(state, pid).to(device)
 
                     obs_list.append(obs[active].cpu().numpy())
                     stage_list.append(np.zeros(int(active.sum()), dtype=np.int64))
+                    action_list.append(s0_action[active].cpu().numpy())
+                    trajectory_list.append(trajectory_ids[active].cpu().numpy())
                     # Pad s0_scores (N,2) → (N, NUM_ACTIONS) with inf
                     bl_full = torch.full((N, NUM_ACTIONS), float("inf"), device=device)
                     bl_full[:, :2] = s0_scores
@@ -125,6 +130,8 @@ def collect_expert_data(
 
                     obs_list.append(obs[active].cpu().numpy())
                     stage_list.append(np.ones(int(active.sum()), dtype=np.int64))
+                    action_list.append(s1_action[active].cpu().numpy())
+                    trajectory_list.append(trajectory_ids[active].cpu().numpy())
                     bl_scores_list.append(s1_scores[active].cpu().numpy())
                     valid_list.append(valid_s1[active].cpu().numpy())
 
@@ -134,11 +141,25 @@ def collect_expert_data(
 
                 tracker.observe(state, my_player_id=0)
 
+                all_rev = state.player_revealed[:, pid, :].all(dim=1)
+                newly_last = active & all_rev & (~state.last_turn)
+                state.last_turn = state.last_turn | newly_last
+                state.end_game_player = torch.where(
+                    newly_last,
+                    torch.full_like(state.end_game_player, pid),
+                    state.end_game_player,
+                )
+
+        if not state.done.all():
+            raise RuntimeError("expert collection hit the 60-round safety limit")
+
         print(f"  hole {hole + 1}/{holes} done", flush=True)
 
     return {
         "obs": np.concatenate(obs_list, axis=0),
         "stages": np.concatenate(stage_list, axis=0),
+        "actions": np.concatenate(action_list, axis=0),
+        "trajectory_ids": np.concatenate(trajectory_list, axis=0),
         "bl_scores": np.concatenate(bl_scores_list, axis=0),
         "valid": np.concatenate(valid_list, axis=0),
     }
@@ -182,9 +203,45 @@ def pairwise_ranking_loss(
     return (loss_ij * pairs).sum() / n_pairs
 
 
+def expert_tie_break_loss(
+    q: Tensor,
+    bl: Tensor,
+    valid: Tensor,
+    expert_actions: Tensor,
+) -> Tensor:
+    """Teach the production action only where multiple actions share best EV."""
+    masked_bl = bl.masked_fill(~valid, float("inf"))
+    best_score = masked_bl.min(dim=1, keepdim=True).values
+    tied_best = valid & torch.isclose(masked_bl, best_score, rtol=1e-5, atol=1e-6)
+    tie_rows = tied_best.sum(dim=1) > 1
+    if not tie_rows.any():
+        return q.sum() * 0.0
+
+    tie_logits = q[tie_rows].masked_fill(~tied_best[tie_rows], -1e9)
+    return F.cross_entropy(tie_logits, expert_actions[tie_rows])
+
+
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
+
+def split_train_val_by_trajectory(
+    trajectory_ids: np.ndarray,
+    val_frac: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Split complete game trajectories so validation states are independent."""
+    unique_ids = np.unique(trajectory_ids)
+    if len(unique_ids) < 2:
+        raise ValueError("at least two expert trajectories are required")
+    shuffled = np.random.permutation(unique_ids)
+    n_val_trajectories = min(
+        len(unique_ids) - 1,
+        max(1, int(len(unique_ids) * val_frac)),
+    )
+    val_trajectories = shuffled[:n_val_trajectories]
+    val_mask = np.isin(trajectory_ids, val_trajectories)
+    return np.flatnonzero(~val_mask), np.flatnonzero(val_mask)
+
 
 def distill(
     model: nn.Module,
@@ -194,23 +251,25 @@ def distill(
     batch_size: int,
     lr: float,
     margin: float,
+    tie_break_weight: float = 1.0,
     val_frac: float = 0.1,
 ) -> None:
-    n = len(data["obs"])
-    n_val = max(1, int(n * val_frac))
-    idx = np.random.permutation(n)
-    val_idx = idx[:n_val]
-    train_idx = idx[n_val:]
+    train_idx, val_idx = split_train_val_by_trajectory(
+        data["trajectory_ids"],
+        val_frac,
+    )
+    n_val = len(val_idx)
 
     def to_tensors(subset_idx):
         return (
             torch.from_numpy(data["obs"][subset_idx]).long().to(device),
             torch.from_numpy(data["stages"][subset_idx]).long().to(device),
+            torch.from_numpy(data["actions"][subset_idx]).long().to(device),
             torch.from_numpy(data["bl_scores"][subset_idx]).float().to(device),
             torch.from_numpy(data["valid"][subset_idx]).bool().to(device),
         )
 
-    val_obs, val_stages, val_bl, val_valid = to_tensors(val_idx)
+    val_obs, val_stages, val_actions, val_bl, val_valid = to_tensors(val_idx)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -228,10 +287,16 @@ def distill(
 
         for b in range(n_batches):
             bi = train_idx[perm[b * batch_size:(b + 1) * batch_size]]
-            obs, stages, bl, valid = to_tensors(bi)
+            obs, stages, expert_actions, bl, valid = to_tensors(bi)
 
             q = model(obs, stages)
             loss = pairwise_ranking_loss(q, bl, valid, margin)
+            loss = loss + tie_break_weight * expert_tie_break_loss(
+                q,
+                bl,
+                valid,
+                expert_actions,
+            )
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -251,11 +316,7 @@ def distill(
             q_masked[~val_valid] = -1e9
             dqn_action = q_masked.argmax(dim=1)
 
-            bl_inf = val_bl.clone()
-            bl_inf[~val_valid] = float("inf")
-            bl_action = bl_inf.argmin(dim=1)
-
-            agree_rate = (dqn_action == bl_action).float().mean().item()
+            agree_rate = (dqn_action == val_actions).float().mean().item()
 
         elapsed = time.time() - t0
         print(f"  epoch {epoch:3d}/{epochs}  "
@@ -297,6 +358,8 @@ def main():
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--margin", type=float, default=0.1,
                    help="Pairwise ranking margin (Q-value units)")
+    p.add_argument("--tie-break-weight", type=float, default=1.0,
+                   help="Weight for production-policy action loss on equal-EV ties")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--output", type=str, required=True,
@@ -324,7 +387,8 @@ def main():
             epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr,
-            margin=args.margin)
+            margin=args.margin,
+            tie_break_weight=args.tie_break_weight)
 
     # Save: preserve original checkpoint structure so tournament.py can resume
     out_ckpt = {

@@ -1529,14 +1529,15 @@ uv run python -u -m src.tournament \
   --epsilon-start 0.868 --epsilon-end 0.051 \
   --lr-range 8.3e-5 0.0024 --updates-per-episode 8 \
   --target-update-interval 843 --gamma 0.99 --reward-shaping hindsight \
+  --win-bonus 10 --loss-penalty -5 \
   --eval-games-per-matchup 50 --solo-eval-games 200 --max-train-rounds 3 \
   --wandb-project golf-dqn --wandb-run-name exp14-win-bonus \
   --output-dir data/exp14_win_bonus
 ```
 
-### Findings: win bonus was not exercised
+### Findings: outcome shaping was exercised
 
-Post-hoc inspection revealed that `EvalResult.wins/losses/draws` fields are never incremented anywhere in `tournament.py` — `win_rate` always returns 0. This means `eval/best_win_rate=0` throughout and the win-bonus reward shaping may have defaulted to 0 (not logged in the run header). The win-bonus experiment effectively ran as a straight replication of Exp 11's config. This is a known bug; the fields need to be populated from the per-matchup score matrix.
+The original launch metadata records `--win-bonus 10 --loss-penalty -5`. Terminal training reward computes the learner's final score against the table minimum directly, so these values were applied throughout generations 1–350. `EvalResult.wins/losses/draws` were never populated, which made the logged `eval/best_win_rate` stay at zero, but that monitoring bug is independent of reward application.
 
 ### Per-cycle results
 
@@ -1610,11 +1611,11 @@ The gap to Lookahead is 0.47 strokes/hole and 9.8 percentage points in win rate.
 
 **The DQN has substantially closed the gap to Lookahead.** Exp11 trailed by 2.1 strokes/hole in the 4-player L,D,I,R roster; Exp14 trails by 0.47. The rank distribution of kept cards shows Exp14 now matching Lookahead's strong preference for low cards, suggesting the DQN has learned a similar card-value hierarchy implicitly.
 
-**Cyclic epsilon still saturates at cycle 2.** The same pattern as Exp 11: cycle 1 sees rapid improvement from random-play baseline, cycle 2 brings the major jump, cycles 3-7 plateau. More cycles do not help. The next experiments should explore different interventions: reward shaping that rewards win rate directly (requires fixing the EvalResult bug first), or curriculum changes.
+**Cyclic epsilon still saturates at cycle 2.** The same pattern as Exp 11: cycle 1 sees rapid improvement from random-play baseline, cycle 2 brings the major jump, cycles 3-7 plateau. More cycles do not help. The next experiments should isolate the effect of the actual `+10/-5` outcome reward with controlled seeds, fix win-rate monitoring, and explore curriculum changes.
 
 ### Data
 
-- `data/exp14_win_bonus/` — per-generation checkpoints, `champion.pt`, `hall_of_fame.pt`, `metrics_log.jsonl`
+- `data/exp14_win_bonus/` — per-generation checkpoints, local aliases, and training metrics
 - **Champion checkpoint**: `data/exp14_win_bonus/gen_350/gen350_agent4.pt`
 - wandb runs: `exp14-win-bonus`, `exp14-win-bonus-resumed`
 - Seat-cycling results: `data/seat_cycling_exp11_vs_exp14_gen350.txt`, `data/seat_cycling_exp14_gen96_vs_gen350.txt`, `data/seat_cycling_exp14_vs_lookahead.txt`
@@ -1622,9 +1623,23 @@ The gap to Lookahead is 0.47 strokes/hole and 9.8 percentage points in win rate.
 - Reproduce champion benchmark: `uv run python -m scripts.seat_cycling --roster D1,D2,R,R --dqn1-checkpoint data/exp11_cyclic/champion.pt --dqn2-checkpoint data/exp14_win_bonus/gen_350/gen350_agent4.pt --games-per-perm 2000 --holes 9`
 - Reproduce full comparison: `uv run python -m scripts.agent_comparison --dqn1-checkpoint data/exp11_cyclic/champion.pt --dqn1-name "DQN Exp11" --dqn2-checkpoint data/exp14_win_bonus/gen_350/gen350_agent4.pt --dqn2-name "DQN Exp14" --games 1000 --holes 9`
 
+### Continuation audit: generations 351–500
+
+The later `--resume` launch omitted both outcome-reward flags, so their CLI defaults silently changed the training objective from `+10/-5` to `0/0`. The old resume path restored population weights but not the tournament configuration. Every rigorously tested continuation checkpoint regressed against gen350:
+
+| Challenger | Gen350 score | Challenger score | Gen350 win rate |
+|---|---:|---:|---:|
+| gen399 | 8.731 | 9.286 | 55.8% |
+| gen415 | 8.539 | 9.353 | 58.9% |
+| gen500 | 8.800 | 9.288 | 54.8% |
+
+These generations are an accidental reward-ablation continuation, not evidence that additional training under the Exp14 objective fails. The root `champion.pt` and `hall_of_fame.pt` aliases were overwritten by gen500 and gen415 respectively; neither is canonical. Use `gen_350/gen350_agent4.pt`, whose identity and checksum are recorded in `data/agent_manifest.json`. New runs persist their full tournament config and restore training fields on resume. Resume now fails closed when that sidecar is absent unless `--allow-legacy-resume` is explicitly supplied after manual verification.
+
 ---
 
 ## Experiment 15: AlphaZero-style Distillation from Bayes Lookahead (2026-04-29)
+
+> **Status: invalid historical run; corrected rerun required.** The expert collector never updated `last_turn`, `end_game_player`, or `done`, so every nominal hole ran to the 40-round cap. The reported 1.44M decisions are exactly `2000 × 9 × 40 × 2`, dominated by post-terminal states. Its score helper also chose placements on score ties while the production Lookahead policy flips. The benchmark numbers below describe what the resulting model did, but agreement, degradation-cause, and ceiling conclusions are not valid evidence about correctly collected distillation.
 
 ### Motivation
 
@@ -1647,9 +1662,9 @@ Stage-0 disagreements (13,495 total): DQN prefers take 10,746 times vs Lookahead
 
 `scripts/distill_from_bayes.py` implements AlphaZero-style distillation:
 
-1. **Expert data collection**: Run BL for N games, recording `(obs, stage, bl_per_action_scores, valid_mask)` at every player-0 decision. BL drives the trajectory; opponents use heuristic.
-2. **Pairwise ranking loss**: For each pair of valid actions (i, j) where BL strictly prefers i (lower expected score), penalise if DQN Q-value ordering disagrees. Loss = `mean(relu(margin - (Q[i] - Q[j])))`. Scale-free; no temperature tuning required.
-3. **Fine-tune from gen350_agent4**: 30 epochs, 2000 games × 9 holes = 1.44M decisions, lr=1e-4, margin=0.1.
+1. **Expert data collection (historical implementation was broken)**: Run BL for N games, recording `(obs, stage, action, bl_per_action_scores, valid_mask)` at every active player-0 decision. BL drives the trajectory; opponents use heuristic.
+2. **Pairwise ranking + tie-break loss**: For each pair of valid actions (i, j) where BL strictly prefers i (lower expected score), penalise if DQN Q-value ordering disagrees. When multiple actions share the best expected score, cross-entropy trains the exact production action so flip-on-tie behavior is learnable.
+3. **Historical fine-tune from gen350_agent4**: 30 epochs, nominally 2000 games × 9 holes but actually 1.44M capped-loop decisions, lr=1e-4, margin=0.1.
 
 Distillation results:
 
@@ -1668,11 +1683,11 @@ Converged by epoch 6. Agreement rose from ~71% (92.3% stage-0 / 49.5% stage-1 co
 | gen350 (D1) | **8.731** | 56.4% |
 | distilled (D2) | 9.349 | 43.6% |
 
-The distilled model is 0.62 strokes/hole *worse* than its starting point. Root cause: the pairwise ranking loss changed Q-value orderings without preserving their scale. Q-values carry absolute magnitude information used in TD bootstrapping; disrupting orderings also shifts magnitudes, corrupting the learned value function.
+The distilled model is 0.62 strokes/hole *worse* than its starting point. The original write-up attributed this to pairwise ranking changing Q-value scale, but the invalid trajectory set and mismatched expert tie-break are sufficient confounders. The cause is undetermined until a corrected run preserves valid trajectories and the production action target.
 
 ### RL resume from distilled checkpoint
 
-Following the AlphaZero approach (distillation provides initialisation, not the final policy), RL training was resumed from `distilled.pt` using the full Exp 14 config: v3, hidden=256, population=8, cyclic ε 0.868→0.051, 50 gens/cycle, hindsight reward, win bonus=0.3. Population bootstrapped via `data/exp15_distilled/gen_0/` with 8 agents initialised from the distilled weights and LRs sampled from the Exp 14 range.
+Following the AlphaZero approach (distillation provides initialisation, not the final policy), RL training was resumed from `distilled.pt`. The run used v3, hidden=256, population=8, cyclic ε 0.868→0.051, 50 gens/cycle, and hindsight reward. Its exact outcome-reward configuration was not durably stored, so it must not be described as a full Exp14 reproduction. Population bootstrapped via `data/exp15_distilled/gen_0/` with 8 agents initialised from the distilled weights and LRs sampled from the Exp14 range.
 
 **Key observation**: Col_matches was 0.81–0.93 at ε=0.868 in generation 1 — the distilled column-matching behaviour survived re-exploration. In a cold-start run (Exp 14), col_matches was ~0.30–0.50 at the same stage. The distillation accelerated convergence of this behaviour by roughly one full cycle.
 
@@ -1688,7 +1703,7 @@ Following the AlphaZero approach (distillation provides initialisation, not the 
 | 6 | 251–300 | 8.209 (gen 274) |
 | 7 | 301–350 | 8.320 (gen 341) |
 
-Cycle 1 best solo of 8.157 nearly equals Exp 14's all-time best (8.18) reached after 350 gens — a strong head start. However, all 7 cycles show no consistent improvement: the model oscillates in the range 8.157–8.390 throughout. Two contributing factors:
+Cycle 1 best solo of 8.157 nearly equals Exp14's all-time best (8.18) reached after 350 gens. However, all 7 cycles show no consistent improvement: the model oscillates in the range 8.157–8.390 throughout. The original analysis proposed two explanations, neither established by this invalid run:
 
 1. **Hindsight reward saturation**: Hindsight shaping rewards column matches; since col_matches starts high from distillation, the reward signal driving improvement in Exp 14 is already weak from the first generation.
 2. **Belief bottleneck reasserts**: The distillation taught the DQN *what* BL does but not *why* — BL's stage-1 decisions depend on the posterior over hidden cards, which is not in the observation. Under RL the model cannot improve on hidden-card placement decisions beyond the distilled prior.
@@ -1710,19 +1725,18 @@ Three principled paths forward:
 | Exp14 gen350_agent4 (D1) | **8.907** | 52.2% |
 | Exp15 champion (D2) | 9.129 | 47.8% |
 
-Exp15 loses by 0.22 strokes/hole. The RL resume recovered from the distillation regression (0.62 behind → 0.22 behind) but never surpassed the Exp14 starting point. The distillation head start did not produce a higher ceiling: the same belief bottleneck reasserted itself, and the plateau across all 7 cycles confirms the feedforward v3 architecture without belief information cannot improve beyond ~8.15 solo regardless of initialisation.
+Exp15 loses by 0.22 strokes/hole. The RL resume recovered from the historical distillation regression (0.62 behind → 0.22 behind) but never surpassed the Exp14 starting point. Because the expert data was invalid and the resume objective is not fully recoverable, this does not establish an architectural ceiling or rule out corrected distillation.
 
 ### Conclusion
 
-Distillation from Bayes Lookahead accelerates early learning (col_matches high from gen 1, near-champion solo score by gen 46) but does not raise the asymptotic ceiling. The ceiling is the belief bottleneck: without knowledge of the posterior over hidden cards, the DQN cannot improve stage-1 placement at low-revealed boards regardless of how it is initialised or how many cycles it trains.
+The historical run produced high col_matches from generation 1 and near-champion solo scores by generation 46, but it cannot support a causal claim about distillation or an asymptotic ceiling. Correct expert termination, production-policy parity, trajectory-level validation, and preserved run configuration are prerequisites for a rerun.
 
 ### Data
 
 - `scripts/policy_audit.py` — decision-level DQN vs Lookahead comparison (agreement rate, Spearman ρ, counterfactual scores)
-- `scripts/distill_from_bayes.py` — expert data collection + pairwise ranking loss fine-tuning
+- `scripts/distill_from_bayes.py` — corrected expert termination/action collection + pairwise ranking loss fine-tuning
 - `data/exp14_win_bonus/distilled.pt` — distilled checkpoint (gen350_agent4 fine-tuned on BL trajectories)
 - `data/exp15_distilled/` — RL training from distilled checkpoint, per-generation checkpoints, `metrics_log.jsonl`
 - `data/seat_cycling_gen350_vs_distilled.txt` — gen350 vs distilled (pure distillation result)
 - `data/seat_cycling_exp14_vs_exp15.txt` — Exp14 vs Exp15 final champion benchmark
 - `data/figures/policy_audit.png` — 6-panel policy audit figure
-

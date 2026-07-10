@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "evaluated_at": "2026-07-09",
+  "evaluation": {
+    "roster": [
+      "L",
+      "D",
+      "I",
+      "R"
+    ],
+    "seat_permutations": 24,
+    "games_per_permutation": 1000,
+    "holes": 9,
+    "evidence": "data/seat_cycling_exp14_vs_lookahead.txt"
+  },
+  "overall_leader": {
+    "id": "bayes-lookahead-v1",
+    "kind": "search",
+    "implementation": "src/bayes_optimal.py",
+    "score_per_hole": 9.113,
+    "win_rate": 0.483
+  },
+  "best_learned": {
+    "id": "exp14-gen350-agent4",
+    "kind": "dqn",
+    "checkpoint": {
+      "path": "data/exp14_win_bonus/gen_350/gen350_agent4.pt",
+      "sha256": "abfe1553489ceb0853a4a6951b1a72caad3cd673c2d8ddf53be9924f86e95a81",
+      "git_tracked": false
+    },
+    "model_variant": "v3",
+    "hidden_dim": 256,
+    "training_reward": {
+      "reward_shaping": "hindsight",
+      "win_bonus": 10.0,
+      "loss_penalty": -5.0
+    },
+    "score_per_hole": 9.582,
+    "win_rate": 0.385
+  },
+  "superseded": [
+    {
+      "path": "data/exp14_win_bonus/champion.pt",
+      "agent_id": "gen500_agent2",
+      "reason": "The gens 351-500 continuation omitted win/loss reward flags and regressed.",
+      "evidence": "data/seat_cycling_gen350_vs_gen500.txt"
+    }
+  ]
+}

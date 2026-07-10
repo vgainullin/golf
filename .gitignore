@@ -18,6 +18,15 @@ wandb/
 *.pth
 *.ckpt
 
+# Transient local experiment artifacts. Curated top-level benchmark .txt and
+# LLM benchmark .json files remain trackable.
+data/**/*.log
+data/*.db
+data/model_*.json
+data/figures/belief/
+data/seat_cycling/
+data/llm_benchmarks/scratch/
+
 # Allow the small tracked metric files committed to data/
 !data/dqn_behavioral_metrics.json
 !data/heuristic_behavioral_metrics.json
