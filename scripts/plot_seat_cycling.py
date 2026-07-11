@@ -102,6 +102,7 @@ def seat_matrix(per_seat, labels, n_seats=4):
 # ---------------------------------------------------------------------------
 
 COLORS = {
+    "L2": "#1565C0",  # dark blue
     "L": "#2196F3",   # blue
     "D": "#FF5722",   # deep orange
     "I": "#4CAF50",   # green
@@ -114,6 +115,7 @@ COLORS = {
 }
 
 LABEL_NAMES = {
+    "L2": "Bounded lookahead",
     "L": "Lookahead",
     "D": "DQN (Exp14)",
     "D1": "DQN #1",
