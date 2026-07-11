@@ -1,0 +1,64 @@
+{
+  "seed": 0,
+  "games": 512,
+  "roster": [
+    "L2",
+    "R",
+    "R",
+    "R"
+  ],
+  "demonstration": {
+    "row": 0,
+    "round": 5,
+    "before_action": {
+      "cards": [
+        39,
+        1,
+        35,
+        15,
+        29,
+        "hidden"
+      ],
+      "revealed": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ],
+      "holding": 8,
+      "discard_top": 32,
+      "last_turn": false,
+      "deck_remaining": 16
+    },
+    "l_action": 14,
+    "l_action_name": "discard and flip slot 5",
+    "l2_action": 4,
+    "l2_action_name": "place slot 2",
+    "next_turn_state": {
+      "cards": [
+        39,
+        1,
+        8,
+        15,
+        29,
+        "hidden"
+      ],
+      "revealed": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ],
+      "holding": -1,
+      "discard_top": 49,
+      "last_turn": false,
+      "deck_remaining": 15
+    },
+    "final_score_after_l2_path": 10.0
+  },
+  "interpretation": "L would reveal the final hidden card and finish this player's hole. L2 places into a revealed slot instead; the next_turn_state shows that one hidden card remains and the player receives another turn."
+}

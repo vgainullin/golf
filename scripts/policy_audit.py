@@ -103,8 +103,10 @@ def lookahead_stage1_scores(
     valid = get_valid_action_mask(state, player_id).to(device)
     scores = torch.where(valid, scores, torch.full_like(scores, float("inf")))
 
-    # Best action = argmin score
-    action = scores.argmin(dim=1)
+    # Use the production policy's strict-improvement tie-break. A raw argmin
+    # prefers placement IDs over flip IDs when scores tie, which is not what
+    # lookahead_stage1 executes.
+    action = lookahead_stage1(state, player_id, tracker)
     return action, scores
 
 

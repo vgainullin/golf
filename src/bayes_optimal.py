@@ -694,6 +694,195 @@ def lookahead_stage0(
 
 
 # ---------------------------------------------------------------------------
+# Bounded 2-step lookahead
+# ---------------------------------------------------------------------------
+
+
+def bounded_lookahead_stage0(
+    state: VectorizedGolfState,
+    player_id: int,
+    tracker: BayesBeliefTracker,
+) -> torch.Tensor:
+    """Use the exact 1-step lookahead policy for stage 0.
+
+    The bounded extension only handles the horizon effect of ending a hole.
+    Take-vs-draw therefore delegates directly to ``lookahead_stage0``.
+    """
+    return lookahead_stage0(state, player_id, tracker)
+
+
+def bounded_lookahead_stage1(
+    state: VectorizedGolfState,
+    player_id: int,
+    tracker: BayesBeliefTracker,
+    enabled: bool = True,
+) -> torch.Tensor:
+    """Use one bounded return to decide whether to delay ending the hole.
+
+    The production 1-step policy is preserved except when it would reveal the
+    player's final hidden card before another player has triggered the last
+    round.  Finishing now means this player will not act again; placing the held
+    card into an already-revealed slot instead guarantees one more turn.  For
+    each legal delay placement, a rank-only surrogate enumerates all 13 possible
+    ranks for the next unknown held card, weights them by the current posterior,
+    and applies L's stage-1 score at that leaf.  It does not simulate intervening
+    opponents or the next stage-0 discard choice.  The policy delays only when
+    this bounded continuation has a strictly lower score than L's terminal
+    action.
+
+    This search targets a real horizon effect while leaving L's take/draw,
+    ordinary placement, and multi-hidden flip decisions untouched.  The same
+    exact rank branches are used for every delay candidate.
+
+    Setting ``enabled=False`` provides an exact L ablation.  Beliefs with fewer
+    than two cards and post-reshuffle rows also fall back to L.  The search is
+    deterministic and leaves both state and tracker untouched.
+    """
+    base_action = lookahead_stage1(state, player_id, tracker)
+    if not enabled:
+        return base_action
+
+    device = state.player_cards.device
+    cards = state.player_cards[:, player_id, :]
+    revealed = state.player_revealed[:, player_id, :]
+    hidden = ~revealed
+    hidden_count = hidden.sum(dim=1)
+    total = tracker.total()
+
+    hidden_pos = hidden.long().argmax(dim=1)
+    chose_place = (base_action >= 2) & (base_action < 8)
+    chose_flip = (base_action >= 9) & (base_action < 15)
+    chosen_pos = torch.where(chose_place, base_action - 2, base_action - 9)
+    finishes = (chose_place | chose_flip) & (chosen_pos == hidden_pos)
+    eligible = (
+        finishes
+        & (hidden_count == 1)
+        & (~state.last_turn)
+        & (~state.done)
+        & (total >= 2)
+    )
+    # The tracker is exact only for the original shuffle-once deck.  Require
+    # enough cards for every intervening opponent plus our modeled return draw,
+    # so this branch cannot cross a discard-pile reshuffle.
+    if state.deck_size is not None:
+        deck_remaining = state.deck_size - state.deck_ptr
+        eligible &= (state.deck_size == NUM_CARDS) & (
+            deck_remaining >= state.n_players
+        )
+    if not eligible.any():
+        return base_action
+
+    eligible_idx = eligible.nonzero(as_tuple=False).squeeze(1)
+    eligible_cards = cards[eligible_idx]
+    eligible_revealed = revealed[eligible_idx]
+    eligible_held = state.player_holding[eligible_idx, player_id]
+    eligible_multiset = tracker.multiset_by_rank()[eligible_idx]
+    eligible_total = total[eligible_idx]
+    eligible_base_action = base_action[eligible_idx]
+    eligible_hidden_pos = hidden_pos[eligible_idx]
+
+    M = eligible_idx.numel()
+    R = NUM_RANKS
+    next_rank = torch.arange(R, device=device).expand(M, -1).reshape(-1)
+    # Suit is immaterial to scoring, so rank indices 0..12 are valid virtual
+    # held-card identities for the leaf evaluation.
+    next_held = next_rank
+    rank_weights = eligible_multiset.float() / eligible_total[:, None].float()
+    rollout_multiset = (
+        eligible_multiset[:, None, :]
+        .expand(-1, R, -1)
+        .reshape(-1, NUM_RANKS)
+        .clone()
+    )
+    decrement = torch.ones(
+        (M * R, 1), dtype=rollout_multiset.dtype, device=device
+    )
+    rollout_multiset.scatter_add_(1, next_rank[:, None], -decrement)
+    rollout_multiset.clamp_(min=0)
+    rollout_total = (
+        eligible_total[:, None].expand(-1, R).reshape(-1) - 1
+    ).clamp(min=1)
+
+    # L's chosen action reveals the last card, so its one-step score is the
+    # terminal value for this player.  A flip has current expected value; a
+    # placement uses the known held card at the final hidden position.
+    current_terminal = expected_score(
+        eligible_cards,
+        eligible_revealed,
+        eligible_multiset,
+        eligible_total,
+        device,
+    )
+    finish_cards = eligible_cards.clone()
+    finish_cards.scatter_(
+        1, eligible_hidden_pos[:, None], eligible_held[:, None]
+    )
+    finish_revealed = eligible_revealed.clone()
+    finish_revealed.scatter_(1, eligible_hidden_pos[:, None], True)
+    place_terminal = expected_score(
+        finish_cards,
+        finish_revealed,
+        eligible_multiset,
+        eligible_total,
+        device,
+    )
+    terminal_value = torch.where(
+        (eligible_base_action >= 2) & (eligible_base_action < 8),
+        place_terminal,
+        current_terminal,
+    )
+
+    candidate_values = torch.full(
+        (M, 6), torch.inf, dtype=torch.float32, device=device
+    )
+    for pos in range(6):
+        # Delaying requires placing into a slot that was already revealed.
+        legal = eligible_revealed[:, pos]
+        if not legal.any():
+            continue
+
+        delay_cards = eligible_cards.clone()
+        delay_cards[:, pos] = eligible_held
+        leaf_cards = delay_cards[:, None, :].expand(-1, R, -1).reshape(-1, 6)
+        leaf_revealed = (
+            eligible_revealed[:, None, :].expand(-1, R, -1).reshape(-1, 6)
+        )
+
+        keep_score = expected_score(
+            leaf_cards,
+            leaf_revealed,
+            rollout_multiset,
+            rollout_total,
+            device,
+        )
+        place_score, _ = _best_placement_score(
+            leaf_cards,
+            leaf_revealed,
+            next_held,
+            rollout_multiset,
+            rollout_total,
+            device,
+        )
+        leaf_value = torch.minimum(keep_score, place_score).reshape(M, R)
+        mean_leaf = (leaf_value * rank_weights).sum(dim=1)
+        candidate_values[:, pos] = torch.where(
+            legal,
+            mean_leaf,
+            candidate_values[:, pos],
+        )
+
+    best_delay_pos = candidate_values.argmin(dim=1)
+    action = base_action.clone()
+    should_delay = candidate_values.min(dim=1).values < terminal_value
+    action[eligible_idx] = torch.where(
+        should_delay,
+        2 + best_delay_pos,
+        eligible_base_action,
+    )
+    return action
+
+
+# ---------------------------------------------------------------------------
 # Eval loop
 # ---------------------------------------------------------------------------
 
