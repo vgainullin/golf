@@ -1788,3 +1788,9 @@ uv run python -m scripts.seat_cycling \
 
 Evidence: `data/seat_cycling_l2_vs_l_seed0.txt`, `data/seat_cycling_l2_vs_l_seed3.txt`.
 Both reports record the exact command, seed, device, implementation revision, and full-precision summary metrics.
+
+Demonstration artifact:
+
+![L2 versus L seat-cycled comparison](../data/figures/seat_cycling_l2_vs_l.png)
+
+The figure is regenerated with `scripts/plot_seat_cycling.py` from the seed-0 evidence file.

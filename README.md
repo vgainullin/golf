@@ -157,6 +157,8 @@ Current-leader gate (mean of seeds 0 and 3; each seed is 12 permutations × 1000
 
 These values are roster-specific. The direct, seat-balanced result establishes L2 over L; the older L,D,I,R table below remains the learned-agent comparison.
 
+![L2 versus L seat-cycled comparison](data/figures/seat_cycling_l2_vs_l.png)
+
 Seat-cycled results (24 permutations × 1000 games × 9 holes, 4-player L,D,I,R):
 
 | Agent | Avg score/hole | Win rate |
