@@ -21,7 +21,11 @@
         "data/seat_cycling_l2_vs_l_seed0.txt",
         "data/seat_cycling_l2_vs_l_seed3.txt"
       ],
-      "demonstration_artifact": "data/figures/seat_cycling_l2_vs_l.png"
+      "demonstration_artifact": [
+        "data/figures/seat_cycling_l2_vs_l.png",
+        "data/demo_l2_timing.md",
+        "data/demo_l2_timing.json"
+      ]
     },
     "learned_agent_comparison": {
       "roster": [

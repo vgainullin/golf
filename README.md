@@ -159,6 +159,8 @@ These values are roster-specific. The direct, seat-balanced result establishes L
 
 ![L2 versus L seat-cycled comparison](data/figures/seat_cycling_l2_vs_l.png)
 
+Mechanism replay: [data/demo_l2_timing.md](data/demo_l2_timing.md)
+
 Seat-cycled results (24 permutations × 1000 games × 9 holes, 4-player L,D,I,R):
 
 | Agent | Avg score/hole | Win rate |
