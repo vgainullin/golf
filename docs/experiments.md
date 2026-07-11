@@ -1740,3 +1740,51 @@ The historical run produced high col_matches from generation 1 and near-champion
 - `data/seat_cycling_gen350_vs_distilled.txt` — gen350 vs distilled (pure distillation result)
 - `data/seat_cycling_exp14_vs_exp15.txt` — Exp14 vs Exp15 final champion benchmark
 - `data/figures/policy_audit.png` — 6-panel policy audit figure
+
+---
+
+## Experiment 16: Bounded End-of-Hole Lookahead (2026-07-09)
+
+### Opportunity
+
+The 1-step Lookahead player (`L`) minimizes the expected score of the layout immediately after each action. That is exact for terminal choices, but it misses a horizon effect: if L reveals its sixth card, it triggers the last round and will not act again. Replacing an already-revealed card instead keeps one card hidden and guarantees another own turn as long as no last round is already active.
+
+An initial attempt to improve L's arbitrary first-hidden flip tie-break failed. A sampled two-step policy over-selected flips that closed a partially revealed column and regressed against L. Simple deterministic flip priorities also failed the score gate. The useful decision class was final-card timing, not ordinary flip position.
+
+### L2 policy
+
+Bounded Lookahead (`L2`) leaves every L stage-0 decision and every ordinary stage-1 decision unchanged. It activates only when:
+
+1. exactly one own card is hidden;
+2. L's action would reveal that card and finish the layout;
+3. no last round is active; and
+4. the belief is still exact (no discard-pile reshuffle).
+
+For each of the five revealed-slot delay placements, L2 enumerates all 13 possible ranks of the next unknown held card. It removes that rank from the posterior, evaluates L's stage-1 score surrogate, weights by the posterior rank count, and compares the bounded continuation with L's terminal value. This is not a full two-ply simulation: intervening opponent actions and the next stage-0 discard choice are intentionally omitted. The policy is deterministic, parameter-free, and does not inspect hidden card identities.
+
+### Seat-cycled leader gate
+
+Roster `L2,L,R,R`, 12 distinct seatings × 1000 games × 9 holes per seed:
+
+| Seed | L2 score | L score | Score gain | L2 win | L win |
+|---:|---:|---:|---:|---:|---:|
+| 0 | **7.551444** | 7.753870 | **0.202426** | **52.387%** | 47.612% |
+| 3 | **7.575741** | 7.735695 | **0.159954** | **51.437%** | 48.562% |
+| Mean | **7.563593** | 7.744783 | **0.181190** | **51.912%** | 48.087% |
+
+L2 clears the predeclared gate of at least 0.10 score/hole improvement without lower win rate on both full-size seeds. It is the new overall leader under direct, seat-balanced evaluation.
+
+### Integrity and reproduction
+
+- Hidden-card scrambling leaves decisions unchanged.
+- The search does not mutate game state, belief state, or global RNG.
+- L2 falls back exactly to L when disabled, during an active last round, with multiple hidden cards, or after reshuffle.
+- The seat-cycling harness now raises if any game reaches its turn cap instead of silently scoring an unfinished hole.
+
+```bash
+uv run python -m scripts.seat_cycling \
+  --roster L2,L,R,R --games-per-perm 1000 --holes 9 --seed 0 --device cpu
+```
+
+Evidence: `data/seat_cycling_l2_vs_l_seed0.txt`, `data/seat_cycling_l2_vs_l_seed3.txt`.
+Both reports record the exact command, seed, device, implementation revision, and full-precision summary metrics.

@@ -1,24 +1,54 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "evaluated_at": "2026-07-09",
-  "evaluation": {
-    "roster": [
-      "L",
-      "D",
-      "I",
-      "R"
-    ],
-    "seat_permutations": 24,
-    "games_per_permutation": 1000,
-    "holes": 9,
-    "evidence": "data/seat_cycling_exp14_vs_lookahead.txt"
+  "evaluations": {
+    "leader_gate": {
+      "roster": [
+        "L2",
+        "L",
+        "R",
+        "R"
+      ],
+      "seeds": [
+        0,
+        3
+      ],
+      "seat_permutations_per_seed": 12,
+      "games_per_permutation": 1000,
+      "holes": 9,
+      "source_revision": "6cfa8f1",
+      "evidence": [
+        "data/seat_cycling_l2_vs_l_seed0.txt",
+        "data/seat_cycling_l2_vs_l_seed3.txt"
+      ]
+    },
+    "learned_agent_comparison": {
+      "roster": [
+        "L",
+        "D",
+        "I",
+        "R"
+      ],
+      "seat_permutations": 24,
+      "games_per_permutation": 1000,
+      "holes": 9,
+      "evidence": "data/seat_cycling_exp14_vs_lookahead.txt"
+    }
   },
   "overall_leader": {
-    "id": "bayes-lookahead-v1",
+    "id": "bayes-bounded-lookahead-v2",
+    "label": "L2",
     "kind": "search",
     "implementation": "src/bayes_optimal.py",
-    "score_per_hole": 9.113,
-    "win_rate": 0.483
+    "evaluation": "leader_gate",
+    "mean_score_per_hole": 7.5635925,
+    "mean_win_rate": 0.51912,
+    "direct_comparator": {
+      "id": "bayes-lookahead-v1",
+      "label": "L",
+      "mean_score_per_hole": 7.7447825,
+      "mean_win_rate": 0.48087
+    }
   },
   "best_learned": {
     "id": "exp14-gen350-agent4",
@@ -36,7 +66,8 @@
       "loss_penalty": -5.0
     },
     "score_per_hole": 9.582,
-    "win_rate": 0.385
+    "win_rate": 0.385,
+    "evaluation": "learned_agent_comparison"
   },
   "superseded": [
     {
