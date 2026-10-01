@@ -94,6 +94,24 @@ function normalizeSubmission(project: Project, s: Partial<RunSpec>): RunSpec {
   throw new HttpError(400, "submission.spec must be {kind: 'agent_code', agent_code} or {kind: 'checkpoint', checkpoint: {url}}");
 }
 
+/**
+ * Queue an unfunded baseline run: one of the project's existing players
+ * scored in the candidate seat, so the board has a reference on the same
+ * protocol. Its leaderboard row is marked as a baseline.
+ */
+export async function queueBaseline(env: Env, project: Project, label: string, name: string) {
+  const runId = newId("run");
+  const spec: RunSpec = { kind: "builtin", builtin: { label }, protocol: project.protocol, compute: "cpu" };
+  await env.DB.prepare(
+    `INSERT INTO runs (id, project_id, status, spec_source, spec_json, title, hypothesis)
+     VALUES (?, ?, 'planned', 'baseline', ?, ?, ?)`,
+  )
+    .bind(runId, project.id, JSON.stringify(spec), name, `Baseline: existing player ${label} in the candidate seat.`)
+    .run();
+  await logEvent(env, runId, "baseline", `queued baseline ${label}`);
+  return runId;
+}
+
 /** Take at most one step on a run. Returns true if the run moved. */
 export async function advance(env: Env, run: Run): Promise<boolean> {
   switch (run.status) {
@@ -228,9 +246,9 @@ export async function recordResult(env: Env, runId: string, result: RunResult): 
   if (ok) {
     await env.DB.prepare(
       `INSERT INTO leaderboard (project_id, protocol, name, metric_value, win_rate, source, run_id, simulated)
-       VALUES (?, ?, ?, ?, ?, 'run', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(run.project_id, protocol, run.title ?? run.id, result.metric!.value, result.win_rate ?? null, runId, result.simulated ? 1 : 0)
+      .bind(run.project_id, protocol, run.title ?? run.id, result.metric!.value, result.win_rate ?? null, run.spec_source === "baseline" ? "baseline" : "run", runId, result.simulated ? 1 : 0)
       .run();
   }
   await logEvent(env, runId, "result", ok ? `${result.metric!.name}=${result.metric!.value}` : `error: ${result.error}`);

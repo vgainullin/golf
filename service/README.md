@@ -116,6 +116,7 @@ with a real evaluation.
 | POST | `/v1/runner/runs/:id/started` | RUNNER_TOKEN | `{external_ref?}` |
 | POST | `/v1/runner/runs/:id/result` | RUNNER_TOKEN | the JSON `execute.py` writes |
 | POST | `/v1/admin/tick` | ADMIN_TOKEN | advance every runnable run now |
+| POST | `/v1/admin/projects/:slug/baselines` | ADMIN_TOKEN | `{label, name}` scores an existing player (e.g. `L`) in the candidate seat as a baseline row |
 
 ## Deploying to Cloudflare
 

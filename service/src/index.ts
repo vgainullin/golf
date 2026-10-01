@@ -16,6 +16,7 @@
  *   POST /v1/runner/runs/:id/result           RunResult
  * Admin (Bearer ADMIN_TOKEN):
  *   POST /v1/admin/tick                       advance every runnable run now
+ *   POST /v1/admin/projects/:slug/baselines   {label, name} score an existing player as a baseline
  */
 import {
   getProject,
@@ -26,7 +27,7 @@ import {
   runEvents,
   transition,
 } from "./db";
-import { donate, drive, HttpError, recordResult, tick, type Submission } from "./pipeline";
+import { donate, drive, HttpError, queueBaseline, recordResult, tick, type Submission } from "./pipeline";
 import type { Env, Project, Run, RunResult } from "./types";
 
 type Handler = (req: Request, env: Env, ctx: ExecutionContext, params: string[]) => Promise<Response>;
@@ -157,6 +158,15 @@ const routes: [string, RegExp, Handler][] = [
   ["POST", /^\/v1\/admin\/tick$/, async (req, env) => {
     auth(req, env.ADMIN_TOKEN, "ADMIN_TOKEN");
     return json(await tick(env));
+  }],
+  ["POST", /^\/v1\/admin\/projects\/([\w-]+)\/baselines$/, async (req, env, ctx, [slug]) => {
+    auth(req, env.ADMIN_TOKEN, "ADMIN_TOKEN");
+    const p = await mustProject(env, slug);
+    const body = await readJson<{ label?: string; name?: string }>(req);
+    if (!body.label || !/^[A-Z][A-Z0-9]{0,3}$/.test(body.label)) throw new HttpError(400, "label is required, e.g. L");
+    const runId = await queueBaseline(env, p, body.label, (body.name ?? `Builtin ${body.label}`).slice(0, 120));
+    ctx.waitUntil(drive(env, runId).catch(() => undefined));
+    return json({ run_id: runId }, 201);
   }],
 ];
 

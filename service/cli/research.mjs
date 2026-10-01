@@ -10,6 +10,7 @@
 //   research run RUN_ID [--watch]
 //   research report RUN_ID
 //   research tick                                   (ADMIN_TOKEN)
+//   research baseline golf --label L --name NAME    (ADMIN_TOKEN) score an existing player
 //   research runner [--once] [--python PATH] [--games-per-perm N]   (RUNNER_TOKEN)
 //
 // Env: RESEARCH_API (default http://localhost:8787), RUNNER_TOKEN, ADMIN_TOKEN.
@@ -184,6 +185,15 @@ const commands = {
     for (const m of d.moved) console.log(`  ${m.id} -> ${m.status}`);
   },
 
+  async baseline({ pos, flags }) {
+    if (!pos[0] || !flags.label) throw new Error("usage: research baseline SLUG --label L [--name NAME]");
+    const d = await call("POST", `/v1/admin/projects/${pos[0]}/baselines`, {
+      token: process.env.ADMIN_TOKEN,
+      body: { label: flags.label, name: flags.name },
+    });
+    console.log(`queued baseline run ${d.run_id}`);
+  },
+
   // Pull-based runner for DISPATCHER=queue: claim a run, execute it with
   // service/runner/execute.py in this checkout, post the result.
   async runner({ flags }) {
@@ -228,7 +238,7 @@ const commands = {
 
 const [cmd, ...rest] = process.argv.slice(2);
 if (!cmd || !commands[cmd]) {
-  console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 15).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 16).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
   process.exit(cmd ? 1 : 0);
 }
 commands[cmd](parseArgs(rest)).catch((e) => {

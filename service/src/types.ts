@@ -56,7 +56,7 @@ export interface Run {
   project_id: number;
   donation_id: string | null;
   status: RunStatus;
-  spec_source: "agent" | "donor";
+  spec_source: "agent" | "donor" | "baseline";
   spec_json: string | null;
   title: string | null;
   hypothesis: string | null;
