@@ -4,6 +4,7 @@
  */
 import { analyze, LOOKAHEAD_SOURCE, plan, type StartingPoint } from "./agent";
 import { dispatch } from "./dispatch";
+import { loadJournal } from "./journal";
 import {
   getProjectById,
   getRun,
@@ -163,7 +164,7 @@ function boardProtocol(spec: RunSpec, result: RunResult | null): string {
     : spec.protocol;
 }
 
-async function planContext(env: Env, run: Run, board?: string) {
+async function planContext(env: Env, run: Run, board?: string, withJournal = true) {
   const project = await getProjectById(env, run.project_id);
   const history = (await listRuns(env, project.id, 20)).filter((r) => r.id !== run.id && r.title);
   const donorNote = run.donation_id
@@ -174,7 +175,9 @@ async function planContext(env: Env, run: Run, board?: string) {
       .bind(project.id, run.id)
       .first<number>("n")) ?? 0;
   const lb = await leaderboard(env, project, board ?? project.protocol);
-  return { project, history, ordinal, donorNote, leaderboard: lb, start: await startingPoint(env, lb) };
+  // The journal only matters to Claude; skip the fetch for the scripted fallback.
+  const journal = withJournal && env.ANTHROPIC_API_KEY ? await loadJournal(env, project) : [];
+  return { project, history, ordinal, donorNote, journal, leaderboard: lb, start: await startingPoint(env, lb) };
 }
 
 /**
@@ -222,6 +225,7 @@ async function planStep(env: Env, run: Run): Promise<boolean> {
       spec_json: JSON.stringify(p.spec),
       title: p.title,
       hypothesis: p.hypothesis,
+      plan_review: p.review,
     });
   } catch (err) {
     await failOrRetry(env, run, "planning", "funded", err);

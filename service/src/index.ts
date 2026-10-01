@@ -103,6 +103,7 @@ const routes: [string, RegExp, Handler][] = [
         spec: run.spec_json ? JSON.parse(run.spec_json) : null,
         result: run.result_json ? JSON.parse(run.result_json) : null,
         report_md: run.report_md,
+        plan_review: run.plan_review,
       },
       events: await runEvents(env, id),
     });

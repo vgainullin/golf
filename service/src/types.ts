@@ -37,6 +37,7 @@ export interface Project {
   run_price_cents: number;
   balance_cents: number;
   agent_brief: string;
+  journal_paths: string; // comma-separated repo paths the planner reads
   created_at: string;
 }
 
@@ -67,6 +68,7 @@ export interface Run {
   win_rate: number | null;
   simulated: number;
   report_md: string | null;
+  plan_review: string | null; // the planner's read of the journal and past runs
   error: string | null;
   attempts: number;
   created_at: string;

@@ -15,9 +15,13 @@ README came from the same setup (it sat as `D` in `L,D,I,R`), so the board
 starts with two baselines: the Bayes lookahead player (the champion) at 8.751
 and the Exp14 DQN at 9.582.
 
-Every planned run starts from the best entry on the board that has code (at
-first, the lookahead as `agents/lookahead.py`) and changes one thing in it, so
-each result says whether that change helped.
+Before each run, the research agent reads golf's experiment journal
+(`docs/experiments.md`, `docs/beyond-heuristic-rl.md`, `data/llm_benchmarks.md`,
+fetched from the repo at plan time) and the full report of every earlier run on
+the board. From that it decides what to try: a new agent of its own design, a
+change to the current leader's code, or a CPU training run. The leader's source
+is included as the bar to beat. Its review is saved with the run and printed in
+the report.
 
 Payments are stubbed. A donation is recorded as captured and nothing is charged.
 
@@ -44,7 +48,7 @@ donation ──► funded ──plan──► planned ──dispatch──► di
 - A donation goes into the project pool. Each time the pool reaches the run price, a run is created and the price is taken out.
 - A donor who pays for a full run can submit their own candidate (agent code or a checkpoint URL). That skips planning.
 - Each step is a guarded status update (`UPDATE ... WHERE status = ?`), so the cron and request handlers can't take the same step twice. `planning` and `analyzing` act as locks and get released after 15 minutes if a worker dies. Failed steps retry up to three times.
-- The planner and the reporter use Claude (`AGENT_MODEL`, default `claude-opus-5-5`) when `ANTHROPIC_API_KEY` is set. Claude gets the source of the current best entry and returns it with one change. Without a key, scripted one-change variants of the lookahead (`agents/`) and a templated report stand in so the loop still runs.
+- The planner and the reporter use Claude (`AGENT_MODEL`, default `claude-opus-5-5`) when `ANTHROPIC_API_KEY` is set. The journal is the first, cached system block, so planner and reporter calls share it. Without a key nothing reads the journal: the fallback cycles through two fixed lookahead variants in `agents/`, and the report is a template.
 
 ## Dispatchers
 
@@ -146,4 +150,4 @@ For the `github` dispatcher, set `DISPATCHER = "github"` and `PUBLIC_URL` in
 - Submitted agent code runs unsandboxed inside the executor. The GitHub workflow keeps secrets out of that step and doesn't persist the checkout token, but a real deployment needs a proper sandbox.
 - There's no GPU path. It would reuse `deploy/` and the Lambda Labs workflow, gated on `ALLOW_GPU`.
 - Leaderboard ranks use raw means with no confidence intervals, so small gaps between rows may be noise.
-- The Claude planner and reporter haven't been exercised live yet because there was no API key in the dev environment. The scripted and templated paths are what the e2e test covers.
+- The Claude planner and reporter haven't been exercised against the real API yet because there was no API key in the dev environment. Their request and response handling was checked against a local mock of the Messages API; the e2e test covers the scripted path.
