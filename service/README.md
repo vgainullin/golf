@@ -12,7 +12,12 @@ Python agent code or a DQN trained with `src.tournament`. The candidate plays as
 random): all 24 seatings, 1000 games each, 9 holes. The score is its average
 points per hole, and lower is better. The DQN champion's row in the top-level
 README came from the same setup (it sat as `D` in `L,D,I,R`), so the board
-starts with that baseline at 9.582.
+starts with two baselines: the Bayes lookahead player (the champion) at 8.751
+and the Exp14 DQN at 9.582.
+
+Every planned run starts from the best entry on the board that has code (at
+first, the lookahead as `agents/lookahead.py`) and changes one thing in it, so
+each result says whether that change helped.
 
 Payments are stubbed. A donation is recorded as captured and nothing is charged.
 
@@ -24,6 +29,7 @@ service/
   migrations/     D1 schema and the golf project seed
   cli/research.mjs  CLI over the API (no dependencies), includes a pull runner
   runner/execute.py Executes one run spec in a golf checkout and writes a result JSON
+  agents/         The lookahead as agent code, plus the scripted one-change variants
   scripts/e2e.sh  Local end-to-end check
 ../.github/workflows/research_run.yml   GitHub Actions executor (CPU)
 ```
@@ -38,7 +44,7 @@ donation ──► funded ──plan──► planned ──dispatch──► di
 - A donation goes into the project pool. Each time the pool reaches the run price, a run is created and the price is taken out.
 - A donor who pays for a full run can submit their own candidate (agent code or a checkpoint URL). That skips planning.
 - Each step is a guarded status update (`UPDATE ... WHERE status = ?`), so the cron and request handlers can't take the same step twice. `planning` and `analyzing` act as locks and get released after 15 minutes if a worker dies. Failed steps retry up to three times.
-- The planner and the reporter use Claude (`AGENT_MODEL`, default `claude-opus-5-5`) when `ANTHROPIC_API_KEY` is set. Without a key, a scripted planner and a templated report stand in so the loop still runs.
+- The planner and the reporter use Claude (`AGENT_MODEL`, default `claude-opus-5-5`) when `ANTHROPIC_API_KEY` is set. Claude gets the source of the current best entry and returns it with one change. Without a key, scripted one-change variants of the lookahead (`agents/`) and a templated report stand in so the loop still runs.
 
 ## Dispatchers
 
@@ -93,8 +99,7 @@ node cli/research.mjs donate golf --amount 20 --code my_agent.py --title "My age
 `my_agent.py` defines `stage0(state, seat)` and `stage1(state, seat)`. Each one
 returns an `(N,)` long tensor of actions for N parallel games. It can also define
 `reset(state, seat)` (called at the start of each hole) and `observe(state, seat)`
-(called after every step) to track beliefs. See `SCRIPTED_PLANS` in
-`src/agent.ts` for two examples.
+(called after every step) to track beliefs. See `agents/` for examples.
 
 `npm run e2e` runs the whole loop against a fresh local database with the mock
 dispatcher. `DISPATCHER=queue GAMES=20 BOARD=seatcycle-v1@20g npm run e2e` runs it

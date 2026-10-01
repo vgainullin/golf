@@ -32,3 +32,9 @@ binding = "DB"
 database_name = "research-runs"
 database_id = "00000000-0000-0000-0000-000000000000" # replace after `wrangler d1 create research-runs`
 migrations_dir = "migrations"
+
+# Agent code under agents/ is bundled as text (starting points for the planner).
+[[rules]]
+type = "Text"
+globs = ["**/*.py"]
+fallthrough = false

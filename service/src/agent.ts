@@ -12,14 +12,27 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
+import lookaheadSource from "../agents/lookahead.py";
+import flipPartnerSource from "../agents/lookahead_flip_partner.py";
+import placeMarginSource from "../agents/lookahead_place_margin.py";
 import type { Env, LeaderboardRow, Project, Run, RunResult, RunSpec } from "./types";
+
+/** The Bayes lookahead player as agent code: the fallback starting point. */
+export const LOOKAHEAD_SOURCE: string = lookaheadSource;
 
 export interface PlanContext {
   project: Project;
   leaderboard: LeaderboardRow[];
   history: Run[]; // earlier runs of this project, newest first
   ordinal: number; // how many runs this project had before this one
+  start: StartingPoint; // the best entry with code; every run changes one thing in it
   donorNote?: string | null;
+}
+
+export interface StartingPoint {
+  name: string;
+  metric_value: number | null;
+  code: string;
 }
 
 export interface Plan {
@@ -35,16 +48,9 @@ export interface Report {
 
 const PlanSchema = z.object({
   title: z.string().describe("Short name for this candidate, shown on the leaderboard"),
-  hypothesis: z.string().describe("What you expect and why, in two or three sentences"),
-  kind: z.enum(["agent_code", "train"]),
-  agent_code: z
-    .string()
-    .nullable()
-    .describe("For kind=agent_code: full Python module source. Null otherwise."),
-  train_args_json: z
-    .string()
-    .nullable()
-    .describe("For kind=train: JSON object of src.tournament flags (snake_case). Null otherwise."),
+  change: z.string().describe("The one change made to the starting point, in one sentence"),
+  hypothesis: z.string().describe("Why this change should lower the score, in two or three sentences"),
+  agent_code: z.string().describe("Full Python module source: the starting point with the one change applied"),
 });
 
 const ReportSchema = z.object({
@@ -82,6 +88,9 @@ function describeContext(ctx: PlanContext): string {
       ctx.project.lower_is_better ? "lower" : "higher"
     } is better):\n${lb || "(empty)"}`,
     `Earlier runs, newest first:\n${hist || "(none)"}`,
+    `Starting point: ${ctx.start.name}${
+      ctx.start.metric_value != null ? ` (${ctx.start.metric_value.toFixed(3)})` : ""
+    }, the best entry with code. Its source:\n\n\`\`\`python\n${ctx.start.code}\n\`\`\``,
     ctx.donorNote ? `The donor who funded this run wrote: ${ctx.donorNote}` : "",
   ]
     .filter(Boolean)
@@ -100,24 +109,23 @@ export async function plan(env: Env, ctx: PlanContext): Promise<Plan> {
     output_config: { effort: "high", format: betaZodOutputFormat(PlanSchema) },
     system:
       "You maintain an open research project. Each donation pays for exactly one run. " +
-      "Pick the single experiment most likely to improve the leaderboard or to teach " +
-      "something the next run can use. Build on earlier findings; don't repeat a run. " +
-      "Runs execute on CPU, so keep training inside the stated caps. Agent code must be " +
-      "self-contained, import only torch and the repo's src modules, and be vectorized over N games.",
+      "Every run starts from the starting point (the best entry on the leaderboard that has " +
+      "code) and changes exactly one thing in it, so the result says whether that change helps. " +
+      "Pick the change most likely to lower the score, using what earlier runs found; don't " +
+      "repeat a change that was already tried. Return the full modified module. It must import " +
+      "only torch and the repo's src modules, be vectorized over N games, and return legal actions.",
     messages: [{ role: "user", content: describeContext(ctx) + "\n\nPlan the next run." }],
   });
   if (response.stop_reason === "refusal") throw new Error("planner declined the request");
   const out = response.parsed_output;
   if (!out) throw new Error(`planner returned no parseable plan (stop_reason=${response.stop_reason})`);
 
-  const spec: RunSpec = { kind: out.kind, protocol: ctx.project.protocol, compute: "cpu" };
-  if (out.kind === "agent_code") {
-    if (!out.agent_code) throw new Error("planner chose agent_code without code");
-    spec.agent_code = out.agent_code;
-  } else {
-    spec.train = { args: JSON.parse(out.train_args_json ?? "{}") };
-  }
-  return { title: out.title, hypothesis: out.hypothesis, spec };
+  if (!out.agent_code.trim()) throw new Error("planner returned empty agent code");
+  return {
+    title: out.title,
+    hypothesis: `Change to ${ctx.start.name}: ${out.change} ${out.hypothesis}`,
+    spec: { kind: "agent_code", agent_code: out.agent_code, protocol: ctx.project.protocol, compute: "cpu" },
+  };
 }
 
 export async function analyze(
@@ -194,76 +202,20 @@ function assemble(
 // ---------------------------------------------------------------------------
 
 
-const SCRIPTED_PLANS: { title: string; hypothesis: string; spec: Omit<RunSpec, "protocol" | "compute"> }[] = [
+// Each scripted plan is the Bayes lookahead with one change. They can't build
+// on whatever is on top of the board, so they always start from the lookahead.
+const SCRIPTED_PLANS: { title: string; hypothesis: string; code: string }[] = [
   {
-    title: "Improved heuristic as candidate",
+    title: "Lookahead, flip toward column matches",
     hypothesis:
-      "Seat the improved heuristic as C to get its number on this exact protocol, so later code agents have a floor to beat.",
-    spec: {
-      kind: "agent_code",
-      agent_code: [
-        "from src.vectorized_golf import heuristic_stage0, improved_stage1",
-        "",
-        "def stage0(state, seat):",
-        "    return heuristic_stage0(state, seat)",
-        "",
-        "def stage1(state, seat):",
-        "    return improved_stage1(state, seat)",
-        "",
-      ].join("\n"),
-    },
+      "Change to the Bayes lookahead: when it discards and flips, flip a hidden card whose column partner is already revealed instead of the first hidden slot. That flip is the only one that can complete a column match, so it should cancel more points.",
+    code: flipPartnerSource,
   },
   {
-    title: "Lookahead draw + improved placement",
+    title: "Lookahead, place only on a 0.5 gain",
     hypothesis:
-      "Most of the lookahead player's edge may come from the draw decision. Pair its belief-based stage 0 with the cheap improved-heuristic stage 1 and see how much of the gap closes.",
-    spec: {
-      kind: "agent_code",
-      agent_code: [
-        "from src.bayes_optimal import BayesBeliefTracker, lookahead_stage0",
-        "from src.vectorized_golf import improved_stage1",
-        "",
-        "_tracker = None",
-        "",
-        "def reset(state, seat):",
-        "    global _tracker",
-        "    _tracker = BayesBeliefTracker(state.player_cards.shape[0], state.player_cards.device)",
-        "    _tracker.observe(state, my_player_id=seat)",
-        "",
-        "def observe(state, seat):",
-        "    _tracker.observe(state, my_player_id=seat)",
-        "",
-        "def stage0(state, seat):",
-        "    _tracker.observe(state, my_player_id=seat)",
-        "    return lookahead_stage0(state, seat, _tracker)",
-        "",
-        "def stage1(state, seat):",
-        "    return improved_stage1(state, seat)",
-        "",
-      ].join("\n"),
-    },
-  },
-  {
-    title: "Small v3 DQN with win bonus (CPU)",
-    hypothesis:
-      "A CPU-sized version of the Exp14 recipe (v3 model, hindsight shaping, win bonus 0.3) shows how much of the champion's strength survives a 30x smaller training budget.",
-    spec: {
-      kind: "train",
-      train: {
-        args: {
-          model_variant: "v3",
-          hidden_dim_choices: [256],
-          embedding_dim: 64,
-          population_size: 4,
-          generations: 10,
-          episodes_per_gen: 500,
-          buffer_capacity: 50000,
-          batch_size: 256,
-          reward_shaping: "hindsight",
-          win_bonus: 0.3,
-        },
-      },
-    },
+      "Change to the Bayes lookahead: place the held card only when it lowers expected score by at least 0.5, otherwise discard and flip. Small expected gains may not be worth giving up the information a flip reveals.",
+    code: placeMarginSource,
   },
 ];
 
@@ -272,7 +224,7 @@ function scriptedPlan(ctx: PlanContext): Plan {
   return {
     title: p.title,
     hypothesis: p.hypothesis + " (Scripted plan: no ANTHROPIC_API_KEY configured.)",
-    spec: { ...p.spec, protocol: ctx.project.protocol, compute: "cpu" },
+    spec: { kind: "agent_code", agent_code: p.code, protocol: ctx.project.protocol, compute: "cpu" },
   };
 }
 

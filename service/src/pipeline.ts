@@ -2,7 +2,7 @@
  * The run lifecycle. Every step is a guarded status transition, so the cron
  * driver and request handlers can call these concurrently without doubling up.
  */
-import { analyze, plan } from "./agent";
+import { analyze, LOOKAHEAD_SOURCE, plan, type StartingPoint } from "./agent";
 import { dispatch } from "./dispatch";
 import {
   getProjectById,
@@ -14,7 +14,7 @@ import {
   runsInStatus,
   transition,
 } from "./db";
-import type { Env, Project, Run, RunResult, RunSpec } from "./types";
+import type { Env, LeaderboardRow, Project, Run, RunResult, RunSpec } from "./types";
 
 const MAX_ATTEMPTS = 3;
 const STALE_MINUTES = 15;
@@ -173,7 +173,33 @@ async function planContext(env: Env, run: Run, board?: string) {
     (await env.DB.prepare("SELECT COUNT(*) AS n FROM runs WHERE project_id = ? AND rowid < (SELECT rowid FROM runs WHERE id = ?)")
       .bind(project.id, run.id)
       .first<number>("n")) ?? 0;
-  return { project, history, ordinal, donorNote, leaderboard: await leaderboard(env, project, board ?? project.protocol) };
+  const lb = await leaderboard(env, project, board ?? project.protocol);
+  return { project, history, ordinal, donorNote, leaderboard: lb, start: await startingPoint(env, lb) };
+}
+
+/**
+ * The best leaderboard entry whose code we can hand the planner. A builtin
+ * lookahead baseline maps to its agent-code form. Falls back to the lookahead.
+ */
+async function startingPoint(env: Env, rows: LeaderboardRow[]): Promise<StartingPoint> {
+  for (const row of rows) {
+    if (row.simulated) continue;
+    if (!row.run_id) {
+      if (row.name.startsWith("Bayes lookahead")) {
+        return { name: row.name, metric_value: row.metric_value, code: LOOKAHEAD_SOURCE };
+      }
+      continue;
+    }
+    const specJson = await env.DB.prepare("SELECT spec_json FROM runs WHERE id = ?").bind(row.run_id).first<string>("spec_json");
+    const spec = specJson ? (JSON.parse(specJson) as RunSpec) : null;
+    if (spec?.kind === "agent_code" && spec.agent_code) {
+      return { name: row.name, metric_value: row.metric_value, code: spec.agent_code };
+    }
+    if (spec?.kind === "builtin" && spec.builtin?.label === "L") {
+      return { name: row.name, metric_value: row.metric_value, code: LOOKAHEAD_SOURCE };
+    }
+  }
+  return { name: "Bayes lookahead (L)", metric_value: null, code: LOOKAHEAD_SOURCE };
 }
 
 async function failOrRetry(env: Env, run: Run, from: Run["status"], back: Run["status"], err: unknown) {
