@@ -1,0 +1,28 @@
+{
+  "name": "research-runs",
+  "version": "1.0.0",
+  "description": "Donate-to-run research service (Cloudflare Worker + CLI). First project: golf.",
+  "scripts": {
+    "dev": "wrangler dev --test-scheduled",
+    "db:migrate:local": "wrangler d1 migrations apply research-runs --local",
+    "db:migrate:remote": "wrangler d1 migrations apply research-runs --remote",
+    "typecheck": "tsc -p .",
+    "deploy": "wrangler deploy",
+    "research": "node cli/research.mjs",
+    "e2e": "bash scripts/e2e.sh"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261001.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.145.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "zod": "^4.6.5"
+  },
+  "private": true,
+  "type": "module",
+  "bin": {
+    "research": "cli/research.mjs"
+  }
+}

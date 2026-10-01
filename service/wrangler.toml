@@ -1,0 +1,34 @@
+name = "research-runs"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Advance runs that are waiting on the agent (planning, analysis) once a minute.
+# Locally: `npm run tick` or `curl localhost:8787/__scheduled` with --test-scheduled.
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+# mock   - no compute; the run gets simulated numbers right away (flagged on the leaderboard)
+# queue  - a runner (`research runner`) claims runs over the API and executes them
+# github - dispatch .github/workflows/research_run.yml on GITHUB_REPO
+DISPATCHER = "mock"
+GITHUB_REPO = "vgainullin/golf"
+GITHUB_REF = "main"
+AGENT_MODEL = "claude-opus-5-5"
+# GPU runs launch paid Lambda Labs instances. Off unless set to "true".
+ALLOW_GPU = "false"
+# Public base URL of this API; the GitHub workflow calls back to it.
+PUBLIC_URL = ""
+
+# Secrets (wrangler secret put / .dev.vars locally):
+#   ANTHROPIC_API_KEY  research agent; without it a scripted planner/reporter is used
+#   RUNNER_TOKEN       shared with runners and the GitHub workflow
+#   ADMIN_TOKEN        for /v1/admin/*
+#   GITHUB_TOKEN       fine-grained token with actions:write on GITHUB_REPO (github dispatcher)
+
+[[d1_databases]]
+binding = "DB"
+database_name = "research-runs"
+database_id = "00000000-0000-0000-0000-000000000000" # replace after `wrangler d1 create research-runs`
+migrations_dir = "migrations"
