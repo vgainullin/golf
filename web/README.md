@@ -20,8 +20,10 @@ python -m http.server 8000
 | Route | What it does |
 |---|---|
 | `#/` | Leaderboard from `data/leaderboard.json`, plus how to benchmark your own agent and the method. |
+| `#/how-to-play` | Rules, scoring with worked examples, and tips drawn from the research. |
 | `#/play` | Play a match against three AI seats, with an optional Bayes "coach" hint. |
 | `#/arena` | Pick four agents and run seat-cycled matches in a Web Worker. Results include 95% CIs and copy out as Markdown. |
+| `#/models`, `#/models/<id>` | One page per agent (how it plays, strengths, results, code, notes) from `data/models.json`. Model names across the site link here. |
 | `#/research` | Research agenda and notes. Notes listed in `data/notes.json` are rendered from the repo's Markdown. |
 | `#/fund` | Donation tiers and per-experiment funding goals from `data/funding.json`. |
 

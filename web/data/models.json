@@ -1,0 +1,163 @@
+{
+  "models": [
+    {
+      "id": "lookahead",
+      "name": "Bayes lookahead",
+      "code": "L",
+      "kind": "Belief search",
+      "agent": "lookahead",
+      "tagline": "Counts every card it has seen and picks the move with the lowest expected final score. No tunable parameters.",
+      "how": [
+        "Keeps an exact belief over the cards it hasn't seen yet: all 52 cards start unseen, and every face-up card, discard and its own held card is crossed off as it appears.",
+        "Scores a layout by its expected final score, treating each face-down slot as a draw without replacement from the unseen cards, including the exact chance that a column pairs up.",
+        "Stage 1: tries the held card in all six slots and keeps the best placement if it beats the current expected score. Otherwise it discards and flips, since flipping a card changes the variance but not the expected score.",
+        "Stage 0: compares taking the known discard with drawing, averaging the draw over all 13 ranks weighted by how many of each are still unseen."
+      ],
+      "strengths": ["Best agent in the repo on both score and win rate.", "Nothing to train or tune.", "A scramble test confirms it never peeks at hidden cards."],
+      "weaknesses": ["Looks one move ahead only.", "Ignores opponents: it doesn't model when someone is about to end the hole."],
+      "results": [
+        { "config": "L,D,I,R seat-cycled, 24,000 matches", "avg": 9.11, "win": 0.483, "source": "data/seat_cycling_exp14_vs_lookahead.txt" },
+        { "config": "Seat 0 vs R,H,R, 5,000 matches", "avg": 6.88, "win": null, "source": "docs/experiments.md" },
+        { "config": "Seat 0 vs R,R,R, 5,000 matches", "avg": 6.45, "win": null, "source": "docs/experiments.md" }
+      ],
+      "code_paths": ["src/bayes_optimal.py", "web/js/agents.js"],
+      "notes": [{ "id": "experiments", "label": "Experiment 12b: 1-step lookahead Bayes player" }]
+    },
+    {
+      "id": "dqn",
+      "name": "DQN champion",
+      "code": "D",
+      "kind": "Reinforcement learning",
+      "agent": null,
+      "tagline": "A self-attention Q-network trained by population self-play over 350 generations. The strongest learned agent.",
+      "how": [
+        "Model v3 (GolfDQNv3) embeds each card as rank plus suit, runs a Transformer encoder over the card tokens so it can compare ranks across slots for column matches, then pools them into an MLP that outputs Q-values for the 16 actions.",
+        "Trained by population-based DQN in src/tournament.py: 8 agents train in parallel through vectorized self-play, play a round-robin each generation, and the best survive and mutate.",
+        "Uses hindsight reward shaping and cyclic epsilon annealing (350 generations in 7 cycles of 50). The champion is Exp 14, generation 350, agent 4."
+      ],
+      "strengths": ["Beats both hand-coded heuristics by a wide margin.", "Learned to swap out face-up cards and build column matches by itself."],
+      "weaknesses": ["About 0.5 points per hole behind the lookahead.", "Needs PyTorch and a checkpoint, so it can't run in the browser yet."],
+      "results": [
+        { "config": "L,D,I,R seat-cycled, 24,000 matches", "avg": 9.58, "win": 0.385, "source": "data/seat_cycling_exp14_vs_lookahead.txt" },
+        { "config": "Exp 11 champion, seat 0 vs R,H,R, 5,000 matches", "avg": 9.59, "win": null, "source": "docs/experiments.md" }
+      ],
+      "code_paths": ["src/dqn_offline.py", "src/tournament.py", "src/reward_shaping.py"],
+      "notes": [
+        { "id": "experiments", "label": "Experiments 10 to 15: cyclic epsilon, win bonus and distillation" },
+        { "id": "beyond-heuristic", "label": "Why plain DQN plateaus at the heuristic" }
+      ]
+    },
+    {
+      "id": "improved",
+      "name": "Improved heuristic",
+      "code": "I",
+      "kind": "Hand-coded",
+      "agent": "improved",
+      "tagline": "The base heuristic plus one change: it will also replace cards that are already face-up.",
+      "how": [
+        "Stage 0: takes the discard if it's worth less than 4 points or matches the rank of one of its face-up cards. Otherwise it draws.",
+        "Stage 1: tries the held card in all six slots. If the best spot saves at least 4 points it places it there. If not, and the move doesn't make things worse by 4 or more, it places it on the first face-down slot. Otherwise it discards and flips."
+      ],
+      "strengths": ["Fast and transparent.", "Swapping out face-up cards alone takes the base heuristic from about 14 to about 10.5 points per hole against the same opponents."],
+      "weaknesses": ["Fixed thresholds: it doesn't count cards, so it can't tell when the deck is rich or poor in low cards."],
+      "results": [
+        { "config": "L,D,I,R seat-cycled, 24,000 matches", "avg": 12.02, "win": 0.132, "source": "data/seat_cycling_exp14_vs_lookahead.txt" },
+        { "config": "Seat 0 vs R,H,R, 5,000 matches", "avg": 10.52, "win": null, "source": "docs/experiments.md" }
+      ],
+      "code_paths": ["src/vectorized_golf.py", "web/js/agents.js"],
+      "notes": [{ "id": "experiments", "label": "Heuristic decomposition and behavioral metrics" }]
+    },
+    {
+      "id": "heuristic",
+      "name": "Base heuristic",
+      "code": "H",
+      "kind": "Hand-coded",
+      "agent": "heuristic",
+      "tagline": "The original rule-based player and the RL baseline. Column-aware, but it never touches a face-up card.",
+      "how": [
+        "Stage 0: same as the improved heuristic. It takes the discard if it's worth less than 4 points or matches a face-up rank, otherwise it draws.",
+        "Stage 1: only considers face-down slots, using the same 4-point thresholds to decide between placing and discard-and-flip."
+      ],
+      "strengths": ["Simple and well understood.", "Imitation learning reproduces it exactly, which makes it the reference point for RL."],
+      "weaknesses": ["Never replaces a bad face-up card, which costs about 3.5 points per hole compared with the improved version."],
+      "results": [
+        { "config": "Seat 0 vs R,H,R, 5,000 matches", "avg": 14.0, "win": null, "source": "docs/experiments.md" },
+        { "config": "Baseline in the LLM harness, 500 matches", "avg": 14.1, "win": null, "source": "data/llm_benchmarks.md" }
+      ],
+      "code_paths": ["src/vectorized_golf.py", "web/js/agents.js"],
+      "notes": [{ "id": "beyond-heuristic", "label": "Improving beyond the heuristic" }]
+    },
+    {
+      "id": "simple",
+      "name": "Greedy",
+      "code": "S",
+      "kind": "Hand-coded",
+      "agent": "simple",
+      "tagline": "Takes low discards and puts every card on a random face-down slot. A sanity check that sits between random and the heuristics.",
+      "how": [
+        "Stage 0: takes the discard if it's worth less than 4 points, otherwise draws.",
+        "Stage 1: always places the held card, on a random face-down slot (or any slot once all are face-up)."
+      ],
+      "strengths": ["Shows how much of the heuristics' edge comes from simply keeping low cards."],
+      "weaknesses": ["No column matching and no card counting. It even places high cards."],
+      "results": [],
+      "code_paths": ["src/vectorized_golf.py", "web/js/agents.js"],
+      "notes": []
+    },
+    {
+      "id": "random",
+      "name": "Random",
+      "code": "R",
+      "kind": "Baseline",
+      "agent": "random",
+      "tagline": "Picks uniformly among legal moves. The floor every other agent is measured against.",
+      "how": ["Stage 0: takes or draws with equal probability.", "Stage 1: picks uniformly among all legal placements and flips."],
+      "strengths": ["Gives a fixed reference point for every benchmark."],
+      "weaknesses": ["Everything else."],
+      "results": [
+        { "config": "L,D,I,R seat-cycled, 24,000 matches", "avg": 32.64, "win": 0.0, "source": "data/seat_cycling_exp14_vs_lookahead.txt" },
+        { "config": "Baseline in the LLM harness, 500 matches", "avg": 32.2, "win": null, "source": "data/llm_benchmarks.md" }
+      ],
+      "code_paths": ["src/vectorized_golf.py", "web/js/agents.js"],
+      "notes": []
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "name": "claude-haiku-4.5",
+      "code": "LLM",
+      "kind": "Language model",
+      "agent": null,
+      "tagline": "A hosted language model playing from a text description of the table. It beats random easily but mostly loses to the base heuristic.",
+      "how": [
+        "src/llm_player.py renders the game state as a text prompt, parses the model's reply into an action and checks it against the legal moves.",
+        "Played through OpenRouter in the seats LLM, Random, Heuristic, Random: 5 matches of 9 holes."
+      ],
+      "strengths": ["Zero invalid actions across all runs.", "Beats random by about 14 points per hole."],
+      "weaknesses": ["Lost to the base heuristic in 4 of 5 matches.", "Almost never builds column matches, and very often replaces face-up cards (about 78% of placements)."],
+      "results": [
+        { "config": "LLM,R,H,R, mean of 5 matches", "avg": 15.97, "win": null, "source": "data/llm_benchmarks.md" }
+      ],
+      "code_paths": ["src/llm_player.py"],
+      "notes": [{ "id": "llm-benchmarks", "label": "LLM Golf benchmarks" }]
+    },
+    {
+      "id": "deepseek-r1-7b",
+      "name": "deepseek-r1-7b",
+      "code": "LLM",
+      "kind": "Language model",
+      "agent": null,
+      "tagline": "A small local reasoning model. It thinks at length but plays at about random level.",
+      "how": [
+        "Run locally through LM Studio with the same LLM harness, stateless prompts and up to 4,096 output tokens per move.",
+        "One 9-hole match took about three hours because each move averaged roughly 1,700 reasoning tokens."
+      ],
+      "strengths": ["Takes the discard often, so it does try to use known cards."],
+      "weaknesses": ["15% of its moves were invalid even after the prompt fixes.", "No column-match strategy."],
+      "results": [
+        { "config": "LLM,R,H,R, 1 match", "avg": 29.67, "win": null, "source": "data/llm_benchmarks.md" }
+      ],
+      "code_paths": ["src/llm_player.py"],
+      "notes": [{ "id": "llm-benchmarks", "label": "LLM Golf benchmarks" }]
+    }
+  ]
+}

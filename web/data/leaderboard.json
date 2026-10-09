@@ -12,7 +12,8 @@
       "games": 24000,
       "config": "L,D,I,R seat-cycled",
       "source": "data/seat_cycling_exp14_vs_lookahead.txt",
-      "playable": "lookahead"
+      "playable": "lookahead",
+      "model": "lookahead"
     },
     {
       "agent": "DQN champion (Exp14 gen 350)",
@@ -23,7 +24,8 @@
       "games": 24000,
       "config": "L,D,I,R seat-cycled",
       "source": "data/seat_cycling_exp14_vs_lookahead.txt",
-      "playable": null
+      "playable": null,
+      "model": "dqn"
     },
     {
       "agent": "Improved heuristic",
@@ -34,7 +36,8 @@
       "games": 24000,
       "config": "L,D,I,R seat-cycled",
       "source": "data/seat_cycling_exp14_vs_lookahead.txt",
-      "playable": "improved"
+      "playable": "improved",
+      "model": "improved"
     },
     {
       "agent": "Random",
@@ -45,7 +48,8 @@
       "games": 24000,
       "config": "L,D,I,R seat-cycled",
       "source": "data/seat_cycling_exp14_vs_lookahead.txt",
-      "playable": "random"
+      "playable": "random",
+      "model": "random"
     },
     {
       "agent": "claude-haiku-4.5",
@@ -57,7 +61,8 @@
       "config": "LLM,R,H,R (5 games)",
       "source": "data/llm_benchmarks.md",
       "playable": null,
-      "reference": true
+      "reference": true,
+      "model": "claude-haiku-4-5"
     },
     {
       "agent": "deepseek-r1-7b",
@@ -69,7 +74,8 @@
       "config": "LLM,R,H,R (1 game)",
       "source": "data/llm_benchmarks.md",
       "playable": null,
-      "reference": true
+      "reference": true,
+      "model": "deepseek-r1-7b"
     }
   ]
 }

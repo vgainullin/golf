@@ -235,3 +235,11 @@ select, input[type="number"] {
 
 footer.site-footer { border-top: 1px solid var(--border); padding: 2rem 0; color: var(--muted); font-size: 0.875rem; }
 footer.site-footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1rem; }
+
+/* Model links and cards */
+a.model-link { color: inherit; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); text-underline-offset: 3px; }
+a.model-link:hover { color: var(--accent); text-decoration-color: currentColor; }
+.felt a.model-link { color: #eef5ef; }
+.felt a.model-link:hover { color: #ffd36b; }
+a.model-card { display: block; color: var(--text); text-decoration: none; transition: border-color 0.12s; }
+a.model-card:hover { border-color: var(--accent); }

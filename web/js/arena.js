@@ -2,6 +2,7 @@
 
 import { AGENTS } from "./agents.js";
 import { $, esc, fmt, pct } from "./ui.js";
+import { modelLink } from "./pages.js";
 
 const ORDER = ["lookahead", "improved", "heuristic", "simple", "random"];
 const PRESETS = [
@@ -12,10 +13,11 @@ const PRESETS = [
 
 let worker = null;
 
-export function renderArena(view) {
+export function renderArena(view, params = new URLSearchParams()) {
   if (worker) { worker.terminate(); worker = null; }
   const opt = (sel) => ORDER.map((k) => `<option value="${k}" ${k === sel ? "selected" : ""}>${AGENTS[k].name}</option>`).join("");
-  const start = PRESETS[0].roster;
+  const seat = params.get("seat");
+  const start = AGENTS[seat] ? [seat, ...PRESETS[0].roster.filter((k) => k !== seat).slice(0, 3)] : PRESETS[0].roster;
 
   view.innerHTML = `
     <div class="eyebrow">Arena</div>
@@ -43,7 +45,7 @@ export function renderArena(view) {
     <h2>Agents</h2>
     <div class="table-wrap"><table>
       <thead><tr><th>Agent</th><th>Code</th><th>How it plays</th></tr></thead>
-      <tbody>${ORDER.map((k) => `<tr><td><b>${AGENTS[k].name}</b></td><td class="mono">${AGENTS[k].code}</td><td style="white-space:normal">${esc(AGENTS[k].blurb)}</td></tr>`).join("")}</tbody>
+      <tbody>${ORDER.map((k) => `<tr><td><b>${modelLink(k, AGENTS[k].name)}</b></td><td class="mono">${AGENTS[k].code}</td><td style="white-space:normal">${esc(AGENTS[k].blurb)}</td></tr>`).join("")}</tbody>
     </table></div>
     <p class="muted small">The DQN champion and LLM players run in Python and aren't available in the browser yet. Funding the research agenda brings them here.</p>`;
 
@@ -114,7 +116,7 @@ function showResults(view, roster, d, cfg) {
   const rows = d.labels.map((l, i) => `
     <tr>
       <td class="rank">${i + 1}</td>
-      <td><b>${AGENTS[l.key].name}</b></td>
+      <td><b>${modelLink(l.key, AGENTS[l.key].name)}</b></td>
       <td class="num">${fmt(l.mean)} <span class="muted">± ${fmt(l.ci)}</span></td>
       <td><div class="bar"><span style="width:${(100 * l.mean) / maxMean}%"></span></div></td>
       <td class="num">${pct(l.win)}</td>
