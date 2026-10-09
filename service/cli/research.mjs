@@ -3,7 +3,7 @@
 //
 //   research projects
 //   research project golf
-//   research donate golf --amount 20 [--donor NAME] [--note TEXT]
+//   research donate golf --amount 20 [--donor NAME] [--note TEXT]   (ADMIN_TOKEN; manual entry)
 //                        [--code agent.py | --checkpoint URL] [--title T] [--hypothesis H]
 //   research leaderboard golf [--protocol ID]
 //   research runs golf
@@ -112,9 +112,9 @@ const commands = {
           : { kind: "checkpoint", checkpoint: { url: flags.checkpoint } },
       };
     }
-    const d = await call("POST", `/v1/projects/${slug}/donations`, { body });
+    const d = await call("POST", `/v1/projects/${slug}/donations`, { body, token: process.env.ADMIN_TOKEN });
     if (flags.json) return console.log(JSON.stringify(d, null, 2));
-    console.log(`Donation ${d.donation_id} recorded (payment stubbed). ${d.message}`);
+    console.log(`Donation ${d.donation_id} recorded (manual entry, no payment taken). ${d.message}`);
     for (const id of d.runs) console.log(`  run ${id}   follow with: research run ${id} --watch`);
   },
 

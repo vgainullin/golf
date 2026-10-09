@@ -20,6 +20,34 @@
       "path": "data/llm_benchmarks.md",
       "summary": "How hosted and local language models play Golf through the LLM harness, with per-run scores and behavioral metrics.",
       "tags": ["LLM", "benchmark"]
+    },
+    {
+      "id": "run-b80813921e47",
+      "title": "Research run: Lookahead, place only on a 0.5 gain",
+      "path": "data/research_runs/run_b80813921e47.md",
+      "summary": "8.658 per hole, new top score. Place the held card only when it improves expected score by at least 0.5.",
+      "tags": ["research run", "seatcycle-v1"]
+    },
+    {
+      "id": "run-fda8adb84016",
+      "title": "Research run: Lookahead, flip toward column matches",
+      "path": "data/research_runs/run_fda8adb84016.md",
+      "summary": "9.152 per hole. Flip a hidden card whose column partner is already revealed.",
+      "tags": ["research run", "seatcycle-v1"]
+    },
+    {
+      "id": "run-6a3b7d9ad27b",
+      "title": "Research run: Lookahead draw + improved placement",
+      "path": "data/research_runs/run_6a3b7d9ad27b.md",
+      "summary": "11.166 per hole. The lookahead's draw decision paired with the improved heuristic's placement.",
+      "tags": ["research run", "seatcycle-v1"]
+    },
+    {
+      "id": "run-b493377ef502",
+      "title": "Research run: Improved heuristic as candidate",
+      "path": "data/research_runs/run_b493377ef502.md",
+      "summary": "11.387 per hole. The improved heuristic scored in the candidate seat as a floor for later runs.",
+      "tags": ["research run", "seatcycle-v1"]
     }
   ]
 }

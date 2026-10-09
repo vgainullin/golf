@@ -37,24 +37,36 @@ route();
 // ---------------------------------------------------------------------------
 
 async function renderHome(view) {
-  const lb = await loadJSON("data/leaderboard.json");
-  const main = lb.rows.filter((r) => !r.reference).sort((a, b) => a.avg - b.avg);
+  const [lb, svc] = await Promise.all([loadJSON("data/leaderboard.json"), loadJSON("data/service.json").catch(() => ({}))]);
+  const live = await liveLeaderboard(svc);
+  const main = (live ? live.rows : lb.rows.filter((r) => !r.reference)).sort((a, b) => a.avg - b.avg);
   const refs = lb.rows.filter((r) => r.reference);
   const best = main[0];
   const matches = Math.max(...main.map((r) => r.games));
+  // Static run rows open the report in Research; live rows open the API's report.
+  const sourceHref = (r) => r.href || (r.run ? `#/research/${r.run.replace("_", "-")}` : REPO_BASE + r.source);
+  const sourceLink = (r) => {
+    const href = sourceHref(r);
+    const ext = !href.startsWith("#");
+    return `<a href="${esc(href)}"${ext ? ' target="_blank" rel="noopener"' : ""}>${esc(r.run ? "Run report" : r.config)}</a>`;
+  };
+  const kindPill = (r) => `<span class="pill ${r.kind === "Research run" ? "ok" : ""}">${esc(r.kind)}</span>${r.simulated ? ' <span class="pill">simulated</span>' : ""}`;
 
   // "=1"-style ties are not computed here: the seat-cycled table has no CIs.
   const row = (r, i) => `
     <tr class="${r.reference ? "ref" : ""}">
       <td class="rank">${r.reference ? "–" : i + 1}</td>
       <td><b>${modelLink(r.model, r.agent)}</b> <span class="muted mono small">${esc(r.code)}</span></td>
-      <td><span class="pill">${esc(r.kind)}</span></td>
-      <td class="num">${fmt(r.avg)}</td>
+      <td>${kindPill(r)}</td>
+      <td class="num">${fmt(r.avg, 3)}</td>
       <td class="num">${pct(r.win)}</td>
       <td class="num">${r.games.toLocaleString()}</td>
-      <td class="small"><a href="${REPO_BASE}${esc(r.source)}" target="_blank" rel="noopener">${esc(r.config)}</a></td>
+      <td class="small">${sourceLink(r)}</td>
       <td>${r.playable ? `<a class="btn" href="#/play?vs=${esc(r.playable)}">Play</a>` : `<span class="muted small">Python only</span>`}</td>
     </tr>`;
+  const note = live
+    ? `Live from the research-runs service, board ${esc(live.protocol)}. ${esc(lb.note)}`
+    : `${esc(lb.note)} Updated ${esc(lb.updated)}.`;
 
   view.innerHTML = `
     <section class="hero">
@@ -67,7 +79,7 @@ async function renderHome(view) {
         <a class="btn" href="#/fund">Fund the research</a>
       </div>
       <div class="stats">
-        <div class="stat"><div class="k">Best avg / hole</div><div class="v">${fmt(best.avg)}</div></div>
+        <div class="stat"><div class="k">Best avg / hole</div><div class="v">${fmt(best.avg, 3)}</div></div>
         <div class="stat"><div class="k">Leader</div><div class="v" style="font-size:1rem;font-family:var(--sans)">${esc(best.agent)}</div></div>
         <div class="stat"><div class="k">Matches per agent</div><div class="v">${matches.toLocaleString()}</div></div>
         <div class="stat"><div class="k">Mode</div><div class="v" style="font-size:1rem;font-family:var(--sans)">4 players · 9 holes</div></div>
@@ -75,7 +87,7 @@ async function renderHome(view) {
     </section>
 
     <h2>Leaderboard</h2>
-    <p class="muted small">${esc(lb.note)} Lower score is better. Updated ${esc(lb.updated)}.</p>
+    <p class="muted small">${note} Lower score is better.</p>
     <div class="table-wrap"><table>
       <thead><tr><th>#</th><th>Agent</th><th>Type</th><th class="num">Avg / hole</th><th class="num">Win rate</th><th class="num">Matches</th><th>Matchup</th><th></th></tr></thead>
       <tbody>${main.map(row).join("")}${refs.map(row).join("")}</tbody>
@@ -84,8 +96,8 @@ async function renderHome(view) {
     <h2>Benchmark your own agent</h2>
     <div class="grid-3">
       <div class="panel"><div class="step-num">01</div><h3>Write a player</h3><p class="muted small">Implement a <code>stage0</code> (take or draw) and <code>stage1</code> (place or flip) function against the vectorized simulator in <code>src/vectorized_golf.py</code>, or point the LLM harness at your model.</p></div>
-      <div class="panel"><div class="step-num">02</div><h3>Run seat cycling</h3><p class="muted small"><code>uv run python -m scripts.seat_cycling --roster L,D,I,R</code> plays every seating so no agent benefits from acting first.</p></div>
-      <div class="panel"><div class="step-num">03</div><h3>Send a pull request</h3><p class="muted small">Add your result and write-up under <code>data/</code> or <code>docs/</code>. Merged results appear on this leaderboard and in Research.</p></div>
+      <div class="panel"><div class="step-num">02</div><h3>Score it on seatcycle-v1</h3><p class="muted small"><code>uv run python -m service.runner.execute --spec spec.json --out result.json</code> seats your agent as C against L, I and R in all 24 seatings, the same benchmark the research runs use. See <code>service/README.md</code>.</p></div>
+      <div class="panel"><div class="step-num">03</div><h3>Send a pull request</h3><p class="muted small">Add your agent, result and write-up under <code>data/</code> or <code>docs/</code>. Merged results appear on this leaderboard and in Research.</p></div>
     </div>
 
     <h2>Method</h2>
@@ -96,6 +108,36 @@ async function renderHome(view) {
       <dt>Seat cycling</dt><dd>Every distinct seating of the roster plays the same number of matches, so results are free of seat-order bias.</dd>
       <dt>Checks</dt><dd>MDP diagnostics run before training, and every evaluation reports behavioral metrics (column matches, take rate, swaps of face-up cards) alongside the score.</dd>
     </dl>`;
+}
+
+/** Rows from the research-runs API, or null when it isn't configured or can't be reached. */
+async function liveLeaderboard(svc) {
+  if (!svc.api_url) return null;
+  try {
+    const base = svc.api_url.replace(/\/$/, "");
+    const res = await fetch(`${base}/v1/projects/${encodeURIComponent(svc.project || "golf")}/leaderboard`, { cache: "no-cache" });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.rows?.length) return null;
+    return {
+      protocol: data.protocol,
+      rows: data.rows.map((r) => ({
+        agent: r.name,
+        code: r.source === "baseline" ? "" : "C",
+        kind: r.run_id && r.source !== "baseline" ? "Research run" : "Baseline",
+        avg: r.metric_value,
+        win: r.win_rate,
+        games: 24000,
+        config: data.protocol,
+        run: r.run_id,
+        href: r.run_id ? `${base}/v1/runs/${encodeURIComponent(r.run_id)}/report` : null,
+        source: "service/README.md",
+        simulated: r.simulated,
+      })),
+    };
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

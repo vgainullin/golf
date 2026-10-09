@@ -23,7 +23,7 @@ change to the current leader's code, or a CPU training run. The leader's source
 is included as the bar to beat. Its review is saved with the run and printed in
 the report.
 
-Payments are stubbed. A donation is recorded as captured and nothing is charged.
+Public money comes in through Stripe Checkout: a signed `checkout.session.completed` webhook credits the project's pool once per session. Admins can also record a donation by hand (grants, transfers, tests) with `ADMIN_TOKEN`.
 
 ## Layout
 
@@ -115,7 +115,8 @@ with a real evaluation.
 |---|---|---|---|
 | GET | `/v1/projects` | | |
 | GET | `/v1/projects/:slug` | | best entry, run counts |
-| POST | `/v1/projects/:slug/donations` | | `{donor, amount_usd, note?, submission?: {title?, hypothesis?, spec: {kind, agent_code \| checkpoint}}}` |
+| POST | `/v1/projects/:slug/donations` | ADMIN_TOKEN | manual entry: `{donor, amount_usd, note?, submission?: {title?, hypothesis?, spec: {kind, agent_code \| checkpoint}}}` |
+| POST | `/v1/webhooks/stripe` | Stripe signature | paid Checkout Sessions; `client_reference_id` (or `metadata.project`) names the project |
 | GET | `/v1/projects/:slug/leaderboard` | | `?protocol=` for other boards |
 | GET | `/v1/projects/:slug/runs` | | |
 | GET | `/v1/runs/:id` | | spec, result, report, events |
@@ -129,6 +130,10 @@ with a real evaluation.
 
 ## Deploying to Cloudflare
 
+`.github/workflows/service.yml` typechecks and runs the mock end-to-end loop on every change, and on `main` applies D1 migrations, deploys the Worker and syncs its secrets once `CLOUDFLARE_API_TOKEN` and the `D1_DATABASE_ID` variable exist (the workflow header lists every secret and variable). After a deploy, the Pages workflow republishes the site pointed at `RESEARCH_API_URL`, so the leaderboard reads live from the API.
+
+By hand:
+
 ```bash
 npx wrangler d1 create research-runs      # put the id in wrangler.toml
 npm run db:migrate:remote
@@ -136,6 +141,7 @@ npx wrangler secret put RUNNER_TOKEN
 npx wrangler secret put ADMIN_TOKEN
 npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler secret put GITHUB_TOKEN      # actions:write on vgainullin/golf, for DISPATCHER=github
+npx wrangler secret put STRIPE_WEBHOOK_SECRET
 npm run deploy
 ```
 
@@ -145,7 +151,7 @@ For the `github` dispatcher, set `DISPATCHER = "github"` and `PUBLIC_URL` in
 
 ## Known gaps
 
-- Payments are stubbed. Stripe Checkout plus a webhook that calls `donate()` would replace the stub.
+- Stripe needs a Payment Link whose URL goes in `web/data/funding.json`, and a webhook endpoint for `checkout.session.completed` and `checkout.session.async_payment_succeeded` pointing at `/v1/webhooks/stripe`. Refunds aren't taken back out of the pool.
 - Planning and reporting run from the cron or `tick`. A planner call can outlast `waitUntil` after a donation request, so a run can sit in `funded` for up to a minute. Cloudflare Queues or Workflows would fit better.
 - Submitted agent code runs unsandboxed inside the executor. The GitHub workflow keeps secrets out of that step and doesn't persist the checkout token, but a real deployment needs a proper sandbox.
 - There's no GPU path. It would reuse `deploy/` and the Lambda Labs workflow, gated on `ALLOW_GPU`.

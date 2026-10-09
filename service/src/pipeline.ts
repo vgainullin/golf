@@ -38,17 +38,23 @@ export async function donate(
   amountCents: number,
   note: string | null,
   submission: Submission | null,
+  paymentRef?: string,
 ) {
   if (submission && amountCents < project.run_price_cents) {
     throw new HttpError(400, `submitting your own candidate needs a full run (${project.run_price_cents} cents)`);
   }
   const donationId = newId("don");
-  await env.DB.batch([
+  // payment_ref is unique, so a payment processor retrying the same payment is
+  // ignored: the insert does nothing and the pool update finds no new row.
+  const [inserted] = await env.DB.batch([
     env.DB.prepare(
-      "INSERT INTO donations (id, project_id, donor, amount_cents, note, payment_ref) VALUES (?, ?, ?, ?, ?, ?)",
-    ).bind(donationId, project.id, donor, amountCents, note, `stub:${donationId}`),
-    env.DB.prepare("UPDATE projects SET balance_cents = balance_cents + ? WHERE id = ?").bind(amountCents, project.id),
+      "INSERT OR IGNORE INTO donations (id, project_id, donor, amount_cents, note, payment_ref) VALUES (?, ?, ?, ?, ?, ?)",
+    ).bind(donationId, project.id, donor, amountCents, note, paymentRef ?? `manual:${donationId}`),
+    env.DB.prepare(
+      "UPDATE projects SET balance_cents = balance_cents + ? WHERE id = ? AND EXISTS (SELECT 1 FROM donations WHERE id = ?)",
+    ).bind(amountCents, project.id, donationId),
   ]);
+  if (!inserted.meta.changes) return { donation_id: null, duplicate: true, runs: [] as string[], balance_cents: null };
 
   const runIds: string[] = [];
   for (;;) {
@@ -81,7 +87,7 @@ export async function donate(
   const balance = await env.DB.prepare("SELECT balance_cents FROM projects WHERE id = ?")
     .bind(project.id)
     .first<number>("balance_cents");
-  return { donation_id: donationId, runs: runIds, balance_cents: balance };
+  return { donation_id: donationId, duplicate: false, runs: runIds, balance_cents: balance };
 }
 
 function normalizeSubmission(project: Project, s: Partial<RunSpec>): RunSpec {

@@ -4,7 +4,7 @@
  * Public:
  *   GET  /v1/projects
  *   GET  /v1/projects/:slug
- *   POST /v1/projects/:slug/donations        {donor, amount_usd | amount_cents, note?, submission?}
+ *   POST /v1/webhooks/stripe                  Stripe Checkout events (signed); paid sessions fund the pool
  *   GET  /v1/projects/:slug/leaderboard      ?protocol=
  *   GET  /v1/projects/:slug/runs
  *   GET  /v1/runs/:id                         run + events
@@ -15,6 +15,8 @@
  *   POST /v1/runner/runs/:id/started          {external_ref?}
  *   POST /v1/runner/runs/:id/result           RunResult
  * Admin (Bearer ADMIN_TOKEN):
+ *   POST /v1/projects/:slug/donations        {donor, amount_usd | amount_cents, note?, submission?}
+ *                                            manual entry (grants, transfers, tests); public money comes through Stripe
  *   POST /v1/admin/tick                       advance every runnable run now
  *   POST /v1/admin/projects/:slug/baselines   {label, name} score an existing player as a baseline
  */
@@ -28,6 +30,7 @@ import {
   transition,
 } from "./db";
 import { donate, drive, HttpError, queueBaseline, recordResult, tick, type Submission } from "./pipeline";
+import { handleStripeWebhook } from "./stripe";
 import type { Env, Project, Run, RunResult } from "./types";
 
 type Handler = (req: Request, env: Env, ctx: ExecutionContext, params: string[]) => Promise<Response>;
@@ -46,7 +49,14 @@ const routes: [string, RegExp, Handler][] = [
       runs_by_status: Object.fromEntries(counts.results.map((c) => [c.status, c.n])),
     });
   }],
+  ["POST", /^\/v1\/webhooks\/stripe$/, async (req, env, ctx) => {
+    const out = await handleStripeWebhook(req, env);
+    for (const id of out.runs) ctx.waitUntil(drive(env, id).catch(() => undefined));
+    return json(out);
+  }],
   ["POST", /^\/v1\/projects\/([\w-]+)\/donations$/, async (req, env, ctx, [slug]) => {
+    // Without a payment behind it a donation is free compute, so only an admin can record one.
+    auth(req, env.ADMIN_TOKEN, "ADMIN_TOKEN");
     const p = await mustProject(env, slug);
     const body = await readJson<{
       donor?: string;
@@ -111,7 +121,7 @@ const routes: [string, RegExp, Handler][] = [
   ["GET", /^\/v1\/runs\/([\w-]+)\/report$/, async (_r, env, _c, [id]) => {
     const run = await mustRun(env, id);
     if (!run.report_md) throw new HttpError(404, `no report yet; run is ${run.status}`);
-    return new Response(run.report_md, { headers: { "content-type": "text/markdown; charset=utf-8" } });
+    return new Response(run.report_md, { headers: { "content-type": "text/markdown; charset=utf-8", ...CORS } });
   }],
 
   // --- runner ---
@@ -174,6 +184,10 @@ const routes: [string, RegExp, Handler][] = [
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
+    if (req.method === "OPTIONS") {
+      // Only the public GET routes are meant for browsers (the static site reads the leaderboard).
+      return new Response(null, { status: 204, headers: { ...CORS, "access-control-max-age": "86400" } });
+    }
     try {
       for (const [method, re, handler] of routes) {
         const m = url.pathname.match(re);
@@ -195,10 +209,15 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET",
+};
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: { "content-type": "application/json; charset=utf-8", ...CORS },
   });
 }
 

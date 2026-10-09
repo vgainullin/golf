@@ -10,6 +10,9 @@ export interface Env {
   RUNNER_TOKEN?: string;
   ADMIN_TOKEN?: string;
   GITHUB_TOKEN?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  /** Project credited when a payment names none. */
+  DEFAULT_PROJECT?: string;
 }
 
 export type RunStatus =

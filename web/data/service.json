@@ -1,0 +1,5 @@
+{
+  "_comment": "Base URL of the research-runs API (service/). When set, the leaderboard and the run reports load live from it; when empty, the site uses the static files in web/data/. The Pages workflow fills this from the RESEARCH_API_URL repository variable.",
+  "api_url": "",
+  "project": "golf"
+}

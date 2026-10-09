@@ -19,7 +19,7 @@ python -m http.server 8000
 
 | Route | What it does |
 |---|---|
-| `#/` | Leaderboard from `data/leaderboard.json`, plus how to benchmark your own agent and the method. |
+| `#/` | Leaderboard on the seatcycle-v1 benchmark (candidate as C in C,L,I,R), with research runs alongside the baselines. Reads live from the research-runs API when `data/service.json` has an `api_url`, otherwise from `data/leaderboard.json`. |
 | `#/how-to-play` | Rules, scoring with worked examples, and tips drawn from the research. |
 | `#/play` | Play a match against three AI seats, with an optional Bayes "coach" hint. |
 | `#/arena` | Pick four agents and run seat-cycled matches in a Web Worker. Results include 95% CIs and copy out as Markdown. |
@@ -46,7 +46,7 @@ Donations are **not live**. To enable them, put a hosted checkout link (a Stripe
 
 ## Adding content
 
-- **Leaderboard row:** append to `data/leaderboard.json` with a `source` pointing at the result file in the repo.
+- **Leaderboard row:** append to `data/leaderboard.json` with a `source` pointing at the result file in the repo. Research runs keep their report in `data/research_runs/` and are listed in `data/notes.json`. Once the service is deployed, runs land on the live board without editing anything here.
 - **Research note:** add the Markdown file to the repo and list it in `data/notes.json`.
 - **Research project:** add it to `projects` in `data/funding.json`; set `status: "done"` and `note: <note id>` once it's written up.
 
