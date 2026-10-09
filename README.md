@@ -176,6 +176,16 @@ uv run python -m src.llm_player --model anthropic/claude-haiku-4.5 \
 
 Existing benchmark results in [`data/llm_benchmarks.md`](data/llm_benchmarks.md).
 
+### Web UI — `web/`
+
+A static site (no build step) to play Golf against the browser ports of the heuristic and Bayes lookahead players, run seat-cycled simulation competitions, read the research notes, and crowdfund new experiments. Serve the repo root and open `/web/`:
+
+```bash
+python -m http.server 8000   # then open http://localhost:8000/web/
+```
+
+See [`web/README.md`](web/README.md) for the pages, the Python parity check, and how to enable donations.
+
 ## Repository layout
 
 ```
@@ -203,6 +213,7 @@ docs/
 data/
   llm_benchmarks.md          # LLM benchmark writeup + per-game results
   *_behavioral_metrics.json  # Reference behavioral metrics for known models
+web/                         # Static web UI: play, arena, research notes, funding
 deploy/                      # Lambda Labs GPU orchestration for tournament training
 .github/workflows/           # CI: capacity check, tournament training, model upload
 deprecated/                  # Superseded approaches kept for historical reference

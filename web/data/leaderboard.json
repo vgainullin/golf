@@ -1,0 +1,75 @@
+{
+  "updated": "2026-04-02",
+  "mode": "4 players · 9 holes · lower is better",
+  "note": "Seat-cycled matchup L,D,I,R: 24 seatings x 1000 games x 9 holes. LLM rows come from a different, smaller harness and are listed for reference only.",
+  "rows": [
+    {
+      "agent": "Bayes lookahead",
+      "code": "L",
+      "kind": "Belief search",
+      "avg": 9.11,
+      "win": 0.483,
+      "games": 24000,
+      "config": "L,D,I,R seat-cycled",
+      "source": "data/seat_cycling_exp14_vs_lookahead.txt",
+      "playable": "lookahead"
+    },
+    {
+      "agent": "DQN champion (Exp14 gen 350)",
+      "code": "D",
+      "kind": "Reinforcement learning",
+      "avg": 9.58,
+      "win": 0.385,
+      "games": 24000,
+      "config": "L,D,I,R seat-cycled",
+      "source": "data/seat_cycling_exp14_vs_lookahead.txt",
+      "playable": null
+    },
+    {
+      "agent": "Improved heuristic",
+      "code": "I",
+      "kind": "Hand-coded",
+      "avg": 12.02,
+      "win": 0.132,
+      "games": 24000,
+      "config": "L,D,I,R seat-cycled",
+      "source": "data/seat_cycling_exp14_vs_lookahead.txt",
+      "playable": "improved"
+    },
+    {
+      "agent": "Random",
+      "code": "R",
+      "kind": "Baseline",
+      "avg": 32.64,
+      "win": 0.0,
+      "games": 24000,
+      "config": "L,D,I,R seat-cycled",
+      "source": "data/seat_cycling_exp14_vs_lookahead.txt",
+      "playable": "random"
+    },
+    {
+      "agent": "claude-haiku-4.5",
+      "code": "LLM",
+      "kind": "Language model",
+      "avg": 15.97,
+      "win": null,
+      "games": 5,
+      "config": "LLM,R,H,R (5 games)",
+      "source": "data/llm_benchmarks.md",
+      "playable": null,
+      "reference": true
+    },
+    {
+      "agent": "deepseek-r1-7b",
+      "code": "LLM",
+      "kind": "Language model",
+      "avg": 29.67,
+      "win": null,
+      "games": 1,
+      "config": "LLM,R,H,R (1 game)",
+      "source": "data/llm_benchmarks.md",
+      "playable": null,
+      "reference": true
+    }
+  ]
+}

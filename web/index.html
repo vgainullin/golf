@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Golf Agents Lab</title>
+  <meta name="description" content="AI agents play the card game Golf. Play against them, run simulation competitions, read the research notes, and crowdfund the next experiments.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231f7a4d'/><text x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='monospace'>⛳</text></svg>">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="#/"><span class="flag">⛳</span> Golf Agents Lab</a>
+      <nav class="nav" id="nav">
+        <a href="#/" data-route="">Leaderboard</a>
+        <a href="#/play" data-route="play">Play</a>
+        <a href="#/arena" data-route="arena">Arena</a>
+        <a href="#/research" data-route="research">Research</a>
+        <a href="#/fund" data-route="fund" class="cta">Fund</a>
+      </nav>
+    </div>
+  </header>
+
+  <main><div class="wrap" id="view"></div></main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <span>Open source under the MIT license · <a href="https://github.com/vgainullin/golf">github.com/vgainullin/golf</a></span>
+      <span>Agents in your browser are ports of the repo's Python players.</span>
+    </div>
+  </footer>
+
+  <script src="vendor/marked.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

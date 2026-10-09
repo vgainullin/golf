@@ -1,0 +1,25 @@
+{
+  "notes": [
+    {
+      "id": "experiments",
+      "title": "Experiments: improving beyond the heuristic",
+      "path": "docs/experiments.md",
+      "summary": "The full lab notebook: residual DQN, DQfD, hindsight reward shaping, MDP diagnostics, representation monopolization, the Bayes lookahead and distillation.",
+      "tags": ["RL", "lab notebook"]
+    },
+    {
+      "id": "beyond-heuristic",
+      "title": "Improving beyond the heuristic: RL approaches",
+      "path": "docs/beyond-heuristic-rl.md",
+      "summary": "Design notes written before the RL experiments: why epsilon-greedy DQN plateaus at the heuristic and which approaches were worth trying.",
+      "tags": ["RL", "design"]
+    },
+    {
+      "id": "llm-benchmarks",
+      "title": "LLM Golf benchmarks",
+      "path": "data/llm_benchmarks.md",
+      "summary": "How hosted and local language models play Golf through the LLM harness, with per-run scores and behavioral metrics.",
+      "tags": ["LLM", "benchmark"]
+    }
+  ]
+}
