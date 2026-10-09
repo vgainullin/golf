@@ -1,0 +1,27 @@
+# command: uv run python -m scripts.seat_cycling --roster L2,L,R,R --games-per-perm 1000 --holes 9 --seed 3 --device cpu
+# source_revision: 6cfa8f1
+=== Matchup: L2,L,R,R (4 players) ===
+  12 distinct seatings x 1000 games x 9 holes = 108000 hole-instances per label-instance
+  seed=3 device=cpu
+
+  Per-label summary (sorted by avg score):
+    label   avg score/hole   win rate
+    L2            7.575741   51.437%
+    L             7.735695   48.562%
+    R            32.380982    0.000%
+
+  Per-seating breakdown (avg score / win rate):
+    seating                     seat0        seat1        seat2        seat3
+    L2,L,R,R               5.93/80.8%   8.54/19.1%  33.07/0.0%  31.50/0.0%
+    L2,R,L,R               6.27/71.0%  32.50/0.0%   7.94/29.0%  32.78/0.0%
+    L2,R,R,L               7.17/56.2%  32.89/0.0%  31.59/0.0%   7.81/43.8%
+    L,L2,R,R               6.54/78.5%   8.95/21.5%  32.83/0.0%  31.34/0.0%
+    L,R,L2,R               6.90/64.6%  32.77/0.0%   8.03/35.4%  32.79/0.0%
+    L,R,R,L2               7.82/51.5%  32.98/0.0%  31.34/0.0%   7.94/48.5%
+    R,L2,L,R              31.52/0.0%   6.43/76.2%   8.83/23.8%  32.96/0.0%
+    R,L2,R,L              32.77/0.0%   6.63/68.9%  32.74/0.0%   8.15/31.0%
+    R,L,L2,R              31.45/0.0%   6.91/76.2%   9.08/23.7%  32.96/0.0%
+    R,L,R,L2              32.71/0.0%   7.15/64.6%  32.84/0.0%   8.41/35.4%
+    R,R,L2,L              33.16/0.0%  31.29/0.0%   6.79/74.3%   8.99/25.7%
+    R,R,L,L2              33.01/0.0%  31.36/0.0%   7.27/74.9%   9.28/25.0%
+

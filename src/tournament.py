@@ -175,6 +175,7 @@ class TournamentConfig:
     output_dir: Path = Path("data/tournament")
     warmstart_checkpoint: Optional[Path] = None
     resume: bool = False  # resume from last saved generation in output_dir
+    allow_legacy_resume: bool = False  # opt in when an old run has no saved config
     seed: int = 42
     device: str = "auto"
     hf_repo_id: Optional[str] = None
@@ -182,6 +183,66 @@ class TournamentConfig:
     sanity_check: bool = False
     wandb_project: Optional[str] = None
     wandb_run_name: Optional[str] = None
+
+
+TOURNAMENT_CONFIG_FILENAME = "tournament_config.json"
+RESUME_OVERRIDE_FIELDS = {
+    "generations",
+    "output_dir",
+    "resume",
+    "allow_legacy_resume",
+    "device",
+    "hf_repo_id",
+    "hf_token",
+    "sanity_check",
+    "wandb_project",
+    "wandb_run_name",
+}
+
+
+def tournament_config_dict(config: TournamentConfig) -> Dict[str, Any]:
+    """Return a JSON-safe training config without credentials."""
+    data = asdict(config)
+    data.pop("hf_token", None)
+    for key, value in list(data.items()):
+        if isinstance(value, Path):
+            data[key] = str(value)
+        elif isinstance(value, tuple):
+            data[key] = list(value)
+    return data
+
+
+def save_tournament_config(config: TournamentConfig) -> Path:
+    """Persist the effective training configuration beside run artifacts."""
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    path = config.output_dir / TOURNAMENT_CONFIG_FILENAME
+    path.write_text(json.dumps(tournament_config_dict(config), indent=2) + "\n")
+    return path
+
+
+def restore_tournament_config(config: TournamentConfig) -> bool:
+    """Restore training fields while retaining continuation/runtime overrides."""
+    path = config.output_dir / TOURNAMENT_CONFIG_FILENAME
+    if not path.exists():
+        message = f"{path} not found; resume config cannot be restored"
+        if not config.allow_legacy_resume:
+            raise RuntimeError(
+                f"{message}. Pass --allow-legacy-resume only after verifying the original objective."
+            )
+        print(f"WARNING: {message}; continuing by explicit legacy override")
+        return False
+
+    saved = json.loads(path.read_text())
+    config.generations = max(config.generations, int(saved.get("generations", 0)))
+    for key, value in saved.items():
+        if key in RESUME_OVERRIDE_FIELDS or not hasattr(config, key):
+            continue
+        if key == "lr_range":
+            value = tuple(value)
+        elif key == "warmstart_checkpoint" and value is not None:
+            value = Path(value)
+        setattr(config, key, value)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -964,8 +1025,10 @@ class TournamentTrainer:
 
     def __init__(self, config: TournamentConfig):
         self.config = config
-        self.device = resolve_device(config.device)
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        if config.resume:
+            restore_tournament_config(self.config)
+        self.device = resolve_device(self.config.device)
 
         # Population: list of (AgentRecord, model, target_model, optimizer, buffer)
         self.population: List[Tuple[AgentRecord, nn.Module, nn.Module, torch.optim.Optimizer, ReplayBuffer]] = []
@@ -973,7 +1036,7 @@ class TournamentTrainer:
         self.history: List[Dict[str, Any]] = []
 
         # Reward shaping
-        self.reward_shaper = HindsightRewardShaper() if config.reward_shaping == "hindsight" else None
+        self.reward_shaper = HindsightRewardShaper() if self.config.reward_shaping == "hindsight" else None
 
         # Loss tracking
         self.loss_history: Dict[str, List[float]] = {}
@@ -987,6 +1050,7 @@ class TournamentTrainer:
             self._resume_population()
         else:
             self._init_population()
+            save_tournament_config(self.config)
 
     def _make_optimizer(self, model: nn.Module, lr: float) -> torch.optim.Optimizer:
         if self.config.spectral_decoupling:
@@ -1653,6 +1717,7 @@ class TournamentTrainer:
                     "hidden_dim": rec.hyperparams["hidden_dim"],
                     "model_variant": rec.hyperparams.get("model_variant", "v1"),
                 },
+                "training_config": tournament_config_dict(self.config),
                 "agent_record": rec_dict,
             }, path)
             rankings.append(rec_dict)
@@ -1688,6 +1753,7 @@ class TournamentTrainer:
                 "hidden_dim": best_rec.hyperparams["hidden_dim"],
                 "model_variant": best_rec.hyperparams.get("model_variant", "v1"),
             },
+            "training_config": tournament_config_dict(self.config),
             "agent_record": {k: v for k, v in best_rec.to_dict().items()
                             if k != "hyperparams" or not isinstance(v, dict)} | {
                 "hyperparams": {k: v for k, v in best_rec.hyperparams.items() if not k.startswith("_")},
@@ -2101,6 +2167,8 @@ def parse_args(argv=None) -> TournamentConfig:
     p.add_argument("--output-dir", type=Path, default=Path("data/tournament"))
     p.add_argument("--warmstart-checkpoint", type=Path, default=None)
     p.add_argument("--resume", action="store_true", help="Resume from last saved generation")
+    p.add_argument("--allow-legacy-resume", action="store_true",
+                   help="Allow resume without tournament_config.json after manual verification")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     p.add_argument("--hf-repo-id", type=str, default=None)
@@ -2155,6 +2223,7 @@ def parse_args(argv=None) -> TournamentConfig:
         output_dir=args.output_dir,
         warmstart_checkpoint=args.warmstart_checkpoint,
         resume=args.resume,
+        allow_legacy_resume=args.allow_legacy_resume,
         seed=args.seed,
         device=args.device,
         hf_repo_id=args.hf_repo_id,

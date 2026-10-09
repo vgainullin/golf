@@ -77,13 +77,14 @@ uv run python -m src.tournament \
   --epsilon-start 0.868 --epsilon-end 0.051 \
   --lr-range 8.3e-5 0.0024 --updates-per-episode 8 \
   --target-update-interval 843 --gamma 0.99 \
-  --reward-shaping hindsight --win-bonus 0.3 \
+  --reward-shaping hindsight --win-bonus 10 --loss-penalty -5 \
   --output-dir data/my_run
 
 uv run python -m src.tournament --help    # full flag reference
 ```
 
 Outputs go to `--output-dir`: per-generation checkpoints, `metrics_log.jsonl`, `champion.pt`, `hall_of_fame.pt`, and an Optuna-readable summary.
+Validated agent identities and checkpoint checksums are recorded in [`data/agent_manifest.json`](data/agent_manifest.json); mutable `champion.pt` aliases are not authoritative across resumed runs.
 
 ### Hyperparameter search — `src/optuna_search.py`
 
@@ -115,7 +116,7 @@ Reusable across any RL environment with minor adapter code.
 | `eval_hof.py` | Download and evaluate a Hall-of-Fame checkpoint from HuggingFace | `uv run python -m scripts.eval_hof --repo-id vgainullin/golf --games 1000 --holes 9` |
 | `eval_vs_random.py` | Evaluate every checkpoint in a tournament directory vs random opponents (GPU-batched) | `uv run python -m scripts.eval_vs_random --tournament-dir data/my_run --games 200 --holes 9` |
 | `eval_compare.py` | Head-to-head between specific DQN checkpoints | `uv run python -m scripts.eval_compare --checkpoints a.pt b.pt --games 5000` |
-| `seat_cycling.py` | Seat-cycled head-to-head between any agents (L/D/D1/D2/I/H/R); use D1+D2 for two-DQN matchups | `uv run python -m scripts.seat_cycling --roster D1,D2,R,R --dqn1-checkpoint a.pt --dqn2-checkpoint b.pt --games-per-perm 2000` |
+| `seat_cycling.py` | Seat-cycled head-to-head between any agents (L2/L/D/D1/D2/I/H/R); use D1+D2 for two-DQN matchups | `uv run python -m scripts.seat_cycling --roster D1,D2,R,R --dqn1-checkpoint a.pt --dqn2-checkpoint b.pt --games-per-perm 2000` |
 | `agent_comparison.py` | Score/rank distributions and win rate plots; supports one or two DQN checkpoints | `uv run python -m scripts.agent_comparison --dqn1-checkpoint a.pt --dqn1-name "Exp11" --dqn2-checkpoint b.pt --dqn2-name "Exp14"` |
 | `plot_training_progress.py` | 3-panel plot (solo score, behavioral metrics, epsilon schedule) from `metrics_log.jsonl` | `uv run python -m scripts.plot_training_progress --metrics data/my_run/metrics_log.jsonl --output progress.png` |
 | `policy_audit.py` | Decision-level DQN vs Bayes Lookahead comparison: agreement rate, Spearman ρ, counterfactual scores | `uv run python -m scripts.policy_audit --dqn-checkpoint a.pt --games 2000` |
@@ -128,6 +129,8 @@ All evaluation reports four behavioral metrics alongside score: `col_matches` (a
 Belief-augmented player that maintains an exact posterior over unobserved cards. The belief is a `(N, 52)` bool mask (sufficient under shuffle-once-and-deal), from which we derive per-rank multiset counts and column-match probabilities.
 
 The **1-step lookahead** (label `L`) enumerates all legal actions, scores each resulting layout with `expected_score` (which treats hidden slots as draws from the belief multiset with exact without-replacement column-match math), and picks the action minimizing expected final score. Zero tunable parameters.
+
+The **bounded lookahead** (label `L2`) preserves L except when L would reveal its final hidden card before the last round has started. It then compares finishing against placing into a revealed slot to guarantee one more turn. Its deterministic rank-only surrogate enumerates all 13 possible ranks for the next unknown held card under the current posterior; it does not simulate intervening opponents or the next discard choice.
 
 ```bash
 # Solo eval
@@ -144,6 +147,19 @@ uv run python -m scripts.agent_comparison \
   --dqn2-checkpoint data/exp14_win_bonus/gen_350/gen350_agent4.pt --dqn2-name "DQN Exp14" \
   --games 1000 --holes 9
 ```
+
+Current-leader gate (mean of seeds 0 and 3; each seed is 12 permutations × 1000 games × 9 holes, roster L2,L,R,R):
+
+| Agent | Avg score/hole | Win rate |
+|---|---:|---:|
+| Bounded lookahead (L2) | **7.564** | **51.9%** |
+| 1-step lookahead (L) | 7.745 | 48.1% |
+
+These values are roster-specific. The direct, seat-balanced result establishes L2 over L; the older L,D,I,R table below remains the learned-agent comparison.
+
+![L2 versus L seat-cycled comparison](data/figures/seat_cycling_l2_vs_l.png)
+
+Mechanism replay: [data/demo_l2_timing.md](data/demo_l2_timing.md)
 
 Seat-cycled results (24 permutations × 1000 games × 9 holes, 4-player L,D,I,R):
 
@@ -211,6 +227,7 @@ docs/
   beyond-heuristic-rl.md     # Pre-RL design notes
   figures/                   # Training-progress plots
 data/
+  agent_manifest.json              # Canonical evaluated agents + checkpoint checksum
   llm_benchmarks.md          # LLM benchmark writeup + per-game results
   *_behavioral_metrics.json  # Reference behavioral metrics for known models
 web/                         # Static web UI: play, arena, research notes, funding

@@ -19,6 +19,8 @@ Usage:
 
 Roster labels:
     B = Bayes (belief-aware improved heuristic)
+    L2 = bounded 2-ply posterior lookahead
+    L = 1-step posterior lookahead
     I = Improved heuristic
     R = Random
 """
@@ -38,6 +40,8 @@ from src.bayes_optimal import (
     bayes_stage1,
     bayes_v2_stage0,
     bayes_v3_stage0,
+    bounded_lookahead_stage0,
+    bounded_lookahead_stage1,
     lookahead_stage0,
     lookahead_stage1,
 )
@@ -76,6 +80,9 @@ class SeatHandler:
       L  -- 1-step lookahead (lookahead_stage0 + lookahead_stage1).
             Threshold-free; enumerates all actions and picks the one
             minimizing expected final score under the belief.
+      L2 -- bounded end-of-hole lookahead. Preserves L's decisions except
+            when L would reveal its final hidden card; then rolls one own
+            decision forward to decide whether an extra turn is worth delaying.
       I  -- improved heuristic (heuristic_stage0 + improved_stage1).
       H  -- base heuristic (heuristic_stage0 + heuristic_stage1).
       D  -- DQN model loaded from --dqn-checkpoint.
@@ -84,11 +91,12 @@ class SeatHandler:
       R  -- random.
     """
 
-    LABELS = ("B", "B2", "B3", "L", "D", "D1", "D2", "I", "H", "R")
+    LABELS = ("B", "B2", "B3", "L", "L2", "D", "D1", "D2", "I", "H", "R")
 
     # Tunable per-handler config
     b2_cutoff: float = float(4)
     b3_draw_override_threshold: float = 0.50
+    l2_enabled: bool = True
     # Class-level DQN registry: label -> (model, obs_fn, device).
     # Populated by CLI for each DQN label used in the roster.
     dqn_registry: Dict[str, tuple] = {}
@@ -101,7 +109,7 @@ class SeatHandler:
         self.N = N
         self.device = device
 
-        if label in ("B", "B2", "B3", "L"):
+        if label in ("B", "B2", "B3", "L", "L2"):
             self.tracker = BayesBeliefTracker(N, device)
         else:
             self.tracker = None
@@ -135,6 +143,9 @@ class SeatHandler:
         elif self.label == "L":
             self.tracker.observe(state, my_player_id=self.seat)
             return lookahead_stage0(state, self.seat, self.tracker)
+        elif self.label == "L2":
+            self.tracker.observe(state, my_player_id=self.seat)
+            return bounded_lookahead_stage0(state, self.seat, self.tracker)
         elif self.label in ("I", "H"):
             return heuristic_stage0(state, self.seat)
         elif self.label in ("D", "D1", "D2"):
@@ -170,6 +181,14 @@ class SeatHandler:
         elif self.label == "L":
             self.tracker.observe(state, my_player_id=self.seat)
             return lookahead_stage1(state, self.seat, self.tracker)
+        elif self.label == "L2":
+            self.tracker.observe(state, my_player_id=self.seat)
+            return bounded_lookahead_stage1(
+                state,
+                self.seat,
+                self.tracker,
+                enabled=SeatHandler.l2_enabled,
+            )
         elif self.label == "I":
             return improved_stage1(state, self.seat)
         elif self.label == "H":
@@ -191,7 +210,7 @@ def run_seating(
     holes: int,
     device: torch.device,
     stack_low_cards: bool = False,
-) -> List[float]:
+) -> Tuple[List[float], List[float]]:
     """Run num_games games with the given seating and return per-seat avg
     score / hole (length n_players).
     """
@@ -247,6 +266,13 @@ def run_seating(
                     torch.full_like(state.end_game_player, pid),
                     state.end_game_player,
                 )
+
+        if not state.done.all():
+            unfinished = int((~state.done).sum().item())
+            raise RuntimeError(
+                f"turn safety cap reached with {unfinished}/{N} games unfinished "
+                f"in hole {hole} for seating {seating}"
+            )
 
         for sid in range(n_players):
             game_totals[:, sid] += compute_final_score(state.player_cards[:, sid, :], device)
@@ -321,17 +347,21 @@ def print_report(
     per_perm: List[Tuple[Tuple[str, ...], List[float], List[float]]],
     num_games_per_perm: int,
     holes: int,
+    seed: int | None = None,
+    device: str | None = None,
 ) -> None:
     n_players = len(roster)
     total_games = num_games_per_perm * len(per_perm)
     print(f"=== Matchup: {','.join(roster)} ({n_players} players) ===")
     print(f"  {len(per_perm)} distinct seatings x {num_games_per_perm} games "
           f"x {holes} holes = {total_games * holes} hole-instances per label-instance")
+    if seed is not None and device is not None:
+        print(f"  seed={seed} device={device}")
     print()
     print(f"  Per-label summary (sorted by avg score):")
     print(f"    {'label':<6s}  {'avg score/hole':>14s}  {'win rate':>9s}")
     for label in sorted(label_means.keys(), key=lambda l: label_means[l]):
-        print(f"    {label:<6s}  {label_means[label]:14.3f}  {label_win_rates[label]:8.1%}")
+        print(f"    {label:<6s}  {label_means[label]:14.6f}  {label_win_rates[label]:8.3%}")
     print()
 
     print(f"  Per-seating breakdown (avg score / win rate):")
@@ -354,7 +384,7 @@ def main():
         "--roster",
         type=str,
         required=True,
-        help="Comma-separated player labels (B/I/R). Length = n_players.",
+        help="Comma-separated player labels. Length = n_players.",
     )
     p.add_argument("--games-per-perm", type=int, default=1000)
     p.add_argument("--holes", type=int, default=9)
@@ -435,7 +465,16 @@ def main():
     )
     if args.stack_low_cards:
         print("(stacked deck: 2s, Ks, As at bottom)")
-    print_report(roster, label_means, label_win_rates, per_perm, args.games_per_perm, args.holes)
+    print_report(
+        roster,
+        label_means,
+        label_win_rates,
+        per_perm,
+        args.games_per_perm,
+        args.holes,
+        seed=args.seed,
+        device=str(device),
+    )
 
 
 if __name__ == "__main__":
