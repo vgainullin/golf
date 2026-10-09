@@ -2,13 +2,16 @@
 
 import { renderPlay } from "./play.js";
 import { renderArena } from "./arena.js";
+import { renderHowTo, renderModels, modelLink } from "./pages.js";
 import { $, esc, loadJSON, fmt, pct, money, REPO_BASE } from "./ui.js";
 
 const view = $("#view");
 
 const ROUTES = {
   "": renderHome,
+  "how-to-play": renderHowTo,
   play: renderPlay,
+  models: renderModels,
   arena: renderArena,
   research: renderResearch,
   fund: renderFund,
@@ -44,7 +47,7 @@ async function renderHome(view) {
   const row = (r, i) => `
     <tr class="${r.reference ? "ref" : ""}">
       <td class="rank">${r.reference ? "–" : i + 1}</td>
-      <td><b>${esc(r.agent)}</b> <span class="muted mono small">${esc(r.code)}</span></td>
+      <td><b>${modelLink(r.model, r.agent)}</b> <span class="muted mono small">${esc(r.code)}</span></td>
       <td><span class="pill">${esc(r.kind)}</span></td>
       <td class="num">${fmt(r.avg)}</td>
       <td class="num">${pct(r.win)}</td>

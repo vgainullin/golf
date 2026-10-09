@@ -6,6 +6,7 @@ import {
 } from "./engine.js";
 import { AGENTS, makeAgent } from "./agents.js";
 import { $, esc, cardHTML, matchedSlots } from "./ui.js";
+import { modelLink } from "./pages.js";
 
 const SPEEDS = { slow: 1100, normal: 600, fast: 220 };
 const DEFAULT_OPPONENTS = ["improved", "lookahead", "heuristic"];
@@ -22,13 +23,14 @@ export function renderPlay(view, params) {
   view.innerHTML = `
     <div class="eyebrow">Play</div>
     <h1>Beat the bots at Golf</h1>
-    <p class="lede">You sit in seat 1 against three AI players. Lowest total after the last hole wins. Not sure what to do? Ask the Bayes coach for a hint.</p>
+    <p class="lede">You sit in seat 1 against three AI players. Lowest total after the last hole wins. Not sure what to do? Ask the Bayes coach for a hint, or read <a href="#/how-to-play">how to play</a> and <a href="#/models">who you're up against</a>.</p>
     <details class="panel" style="margin-bottom:1rem">
       <summary><b>How to play</b></summary>
       <ul class="small">
         <li>Everyone has six face-down cards in two rows of three. The hole ends when someone turns their last card face-up; everyone else then gets one more turn.</li>
         <li>On your turn, take the face-up discard or draw from the deck. Then either put the card on one of your six slots (the old card is discarded face-up), or discard it and flip one of your face-down cards.</li>
         <li>Scores: 2 = −2, A = 1, K = 0, 3–9 face value, 10/J/Q = 10. Two cards of the same rank in a column cancel to 0.</li>
+        <li><a href="#/how-to-play">Full rules with examples</a></li>
       </ul>
     </details>
     <div class="panel" id="setup">
@@ -145,7 +147,7 @@ function startMatch(view, my, oppKeys, holes, speed) {
       const ms = matchedSlots(h.cards[p], h.revealed[p]);
       const cards = h.cards[p].map((c, i) => cardHTML(c, { faceUp: h.revealed[p][i], small: true, cls: ms.has(i) ? "match" : "" })).join("");
       return `<div class="opp ${!h.done && h.current === p ? "turn" : ""}">
-        <div class="who"><b>${esc(m.seats[p].name)}</b><span>showing ${h.visibleScore(p)} · total ${tot[p]}</span></div>
+        <div class="who"><b>${modelLink(m.seats[p].key, m.seats[p].name, { newTab: true })}</b><span>showing ${h.visibleScore(p)} · total ${tot[p]}</span></div>
         <div class="layout">${cards}</div></div>`;
     }).join("");
 
@@ -200,7 +202,7 @@ function startMatch(view, my, oppKeys, holes, speed) {
     const tot = totals();
     const finished = m.holeIdx >= m.holes && m.hole.done;
     const shares = winShares(tot);
-    const rows = m.seats.map((s, p) => `<tr class="${p === 0 ? "me-row" : ""}"><td>${esc(s.name)}</td>${m.history.map((r) => `<td class="num">${r[p]}</td>`).join("")}<td class="num"><b>${tot[p]}</b></td></tr>`).join("");
+    const rows = m.seats.map((s, p) => `<tr class="${p === 0 ? "me-row" : ""}"><td>${s.human ? "You" : modelLink(s.key, s.name, { newTab: true })}</td>${m.history.map((r) => `<td class="num">${r[p]}</td>`).join("")}<td class="num"><b>${tot[p]}</b></td></tr>`).join("");
     let banner = "";
     if (finished) {
       const msg = shares[0] === 1 ? "You won the match. Nice golf." : shares[0] > 0 ? "You tied for the win." : `${esc(m.seats[shares.indexOf(Math.max(...shares))].name)} won this one.`;
