@@ -1,0 +1,96 @@
+name: Research run
+
+# Dispatched by the research-runs service (service/) for one funded run.
+# Fetches the run spec from the API, executes it with service/runner/execute.py,
+# and posts the result back. CPU only for now; GPU runs are refused.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run id from the research-runs API"
+        required: true
+        type: string
+      api_url:
+        description: "Base URL of the research-runs API"
+        required: true
+        type: string
+      compute:
+        description: "cpu or gpu"
+        required: false
+        default: "cpu"
+        type: string
+
+permissions:
+  contents: read
+
+run-name: "Research run ${{ inputs.run_id }}"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      API_URL: ${{ inputs.api_url }}
+    steps:
+      - name: Refuse GPU runs
+        if: inputs.compute != 'cpu'
+        run: |
+          echo "::error::GPU research runs are not wired up yet"
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # The run may execute submitted agent code; leave no token in .git/config.
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install CPU dependencies
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --python .venv/bin/python -e .
+
+      - name: Report started and fetch spec
+        env:
+          RUNNER_TOKEN: ${{ secrets.RESEARCH_RUNNER_TOKEN }}
+        run: |
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          curl -fsS -X POST "$API_URL/v1/runner/runs/$RUN_ID/started" \
+            -H "Authorization: Bearer $RUNNER_TOKEN" -H "Content-Type: application/json" \
+            -d "{\"external_ref\": \"$RUN_URL\"}"
+          curl -fsS "$API_URL/v1/runner/runs/$RUN_ID/spec" \
+            -H "Authorization: Bearer $RUNNER_TOKEN" -o "$RUNNER_TEMP/spec.json"
+          python3 -c "import json,sys; s=json.load(open(sys.argv[1])); print('kind:', s['kind'], 'protocol:', s['protocol'])" "$RUNNER_TEMP/spec.json"
+
+      - name: Execute run
+        # No secrets in this step's environment.
+        run: |
+          .venv/bin/python -m service.runner.execute \
+            --spec "$RUNNER_TEMP/spec.json" --out "$RUNNER_TEMP/result.json" || true
+
+      - name: Post result
+        if: always()
+        env:
+          RUNNER_TOKEN: ${{ secrets.RESEARCH_RUNNER_TOKEN }}
+        run: |
+          if [ ! -s "$RUNNER_TEMP/result.json" ]; then
+            echo '{"status":"error","error":"workflow failed before the executor wrote a result"}' > "$RUNNER_TEMP/result.json"
+          fi
+          curl -fsS -X POST "$API_URL/v1/runner/runs/$RUN_ID/result" \
+            -H "Authorization: Bearer $RUNNER_TOKEN" -H "Content-Type: application/json" \
+            --data-binary @"$RUNNER_TEMP/result.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-run-${{ inputs.run_id }}
+          path: |
+            ${{ runner.temp }}/spec.json
+            ${{ runner.temp }}/result.json
+          if-no-files-found: ignore
