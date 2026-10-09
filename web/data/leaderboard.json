@@ -1,43 +1,85 @@
 {
-  "updated": "2026-04-02",
-  "mode": "4 players · 9 holes · lower is better",
-  "note": "Seat-cycled matchup L,D,I,R: 24 seatings x 1000 games x 9 holes. LLM rows come from a different, smaller harness and are listed for reference only.",
+  "updated": "2026-10-01",
+  "mode": "4 players \u00b7 9 holes \u00b7 lower is better",
+  "note": "Benchmark seatcycle-v1: the candidate plays in seat C against the Bayes lookahead, the improved heuristic and random (roster C,L,I,R), over all 24 seatings x 1000 games x 9 holes. Research runs are scored by the research-runs service on the same protocol. Reference rows come from other setups and aren't ranked.",
   "rows": [
+    {
+      "agent": "Lookahead, place only on a 0.5 gain",
+      "code": "C",
+      "kind": "Research run",
+      "avg": 8.658,
+      "win": 0.455,
+      "games": 24000,
+      "config": "C,L,I,R seat-cycled",
+      "source": "data/research_runs/run_b80813921e47.md",
+      "playable": null,
+      "model": null,
+      "run": "run_b80813921e47"
+    },
     {
       "agent": "Bayes lookahead",
       "code": "L",
       "kind": "Belief search",
-      "avg": 9.11,
-      "win": 0.483,
+      "avg": 8.751,
+      "win": 0.439,
       "games": 24000,
-      "config": "L,D,I,R seat-cycled",
-      "source": "data/seat_cycling_exp14_vs_lookahead.txt",
+      "config": "C,L,I,R seat-cycled",
+      "source": "data/research_runs/baseline_lookahead.md",
       "playable": "lookahead",
-      "model": "lookahead"
+      "model": "lookahead",
+      "baseline": true
+    },
+    {
+      "agent": "Lookahead, flip toward column matches",
+      "code": "C",
+      "kind": "Research run",
+      "avg": 9.152,
+      "win": 0.379,
+      "games": 24000,
+      "config": "C,L,I,R seat-cycled",
+      "source": "data/research_runs/run_fda8adb84016.md",
+      "playable": null,
+      "model": null,
+      "run": "run_fda8adb84016"
     },
     {
       "agent": "DQN champion (Exp14 gen 350)",
       "code": "D",
       "kind": "Reinforcement learning",
-      "avg": 9.58,
+      "avg": 9.582,
       "win": 0.385,
       "games": 24000,
       "config": "L,D,I,R seat-cycled",
       "source": "data/seat_cycling_exp14_vs_lookahead.txt",
       "playable": null,
-      "model": "dqn"
+      "model": "dqn",
+      "baseline": true
+    },
+    {
+      "agent": "Lookahead draw + improved placement",
+      "code": "C",
+      "kind": "Research run",
+      "avg": 11.166,
+      "win": 0.191,
+      "games": 24000,
+      "config": "C,L,I,R seat-cycled",
+      "source": "data/research_runs/run_6a3b7d9ad27b.md",
+      "playable": null,
+      "model": null,
+      "run": "run_6a3b7d9ad27b"
     },
     {
       "agent": "Improved heuristic",
       "code": "I",
       "kind": "Hand-coded",
-      "avg": 12.02,
-      "win": 0.132,
+      "avg": 11.387,
+      "win": 0.176,
       "games": 24000,
-      "config": "L,D,I,R seat-cycled",
-      "source": "data/seat_cycling_exp14_vs_lookahead.txt",
+      "config": "C,L,I,R seat-cycled",
+      "source": "data/research_runs/run_b493377ef502.md",
       "playable": "improved",
-      "model": "improved"
+      "model": "improved",
+      "baseline": true
     },
     {
       "agent": "Random",
@@ -49,7 +91,8 @@
       "config": "L,D,I,R seat-cycled",
       "source": "data/seat_cycling_exp14_vs_lookahead.txt",
       "playable": "random",
-      "model": "random"
+      "model": "random",
+      "reference": true
     },
     {
       "agent": "claude-haiku-4.5",
@@ -77,5 +120,6 @@
       "reference": true,
       "model": "deepseek-r1-7b"
     }
-  ]
+  ],
+  "protocol": "seatcycle-v1"
 }

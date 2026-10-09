@@ -16,6 +16,7 @@
       "strengths": ["Best agent in the repo on both score and win rate.", "Nothing to train or tune.", "A scramble test confirms it never peeks at hidden cards."],
       "weaknesses": ["Looks one move ahead only.", "Ignores opponents: it doesn't model when someone is about to end the hole."],
       "results": [
+        { "config": "C,L,I,R seat-cycled (seatcycle-v1), 24,000 matches", "avg": 8.751, "win": 0.439, "source": "data/research_runs/baseline_lookahead.md" },
         { "config": "L,D,I,R seat-cycled, 24,000 matches", "avg": 9.11, "win": 0.483, "source": "data/seat_cycling_exp14_vs_lookahead.txt" },
         { "config": "Seat 0 vs R,H,R, 5,000 matches", "avg": 6.88, "win": null, "source": "docs/experiments.md" },
         { "config": "Seat 0 vs R,R,R, 5,000 matches", "avg": 6.45, "win": null, "source": "docs/experiments.md" }
@@ -61,6 +62,7 @@
       "strengths": ["Fast and transparent.", "Swapping out face-up cards alone takes the base heuristic from about 14 to about 10.5 points per hole against the same opponents."],
       "weaknesses": ["Fixed thresholds: it doesn't count cards, so it can't tell when the deck is rich or poor in low cards."],
       "results": [
+        { "config": "C,L,I,R seat-cycled (seatcycle-v1), 24,000 matches", "avg": 11.387, "win": 0.176, "source": "data/research_runs/run_b493377ef502.md" },
         { "config": "L,D,I,R seat-cycled, 24,000 matches", "avg": 12.02, "win": 0.132, "source": "data/seat_cycling_exp14_vs_lookahead.txt" },
         { "config": "Seat 0 vs R,H,R, 5,000 matches", "avg": 10.52, "win": null, "source": "docs/experiments.md" }
       ],

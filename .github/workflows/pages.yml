@@ -7,6 +7,11 @@ on:
   push:
     branches: [main]
     paths: ["web/**", "docs/**", "data/**", ".github/workflows/pages.yml"]
+  # Also republish after the research-runs service deploys, so a new API URL is picked up.
+  workflow_run:
+    workflows: ["service"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -20,6 +25,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,10 +35,16 @@ jobs:
       - run: node --test web/tests/*.test.mjs
       # Keep the repo-relative layout so the research view can read docs/ and data/ via "../".
       - name: Assemble site
+        env:
+          RESEARCH_API_URL: ${{ vars.RESEARCH_API_URL }}
         run: |
           mkdir _site
           cp -r web docs data _site/
           rm -rf _site/web/tests
+          # Point the site at the live research-runs API when one is deployed.
+          if [ -n "$RESEARCH_API_URL" ]; then
+            jq --arg url "$RESEARCH_API_URL" '.api_url = $url' web/data/service.json > _site/web/data/service.json
+          fi
           touch _site/.nojekyll
           cat > _site/index.html <<'HTML'
           <!doctype html><meta charset="utf-8"><title>Golf Agents Lab</title>
