@@ -11,6 +11,10 @@ python -m http.server 8000
 # open http://localhost:8000/web/
 ```
 
+## Deploy
+
+`.github/workflows/pages.yml` publishes the site to GitHub Pages on every push to `main` that touches `web/`, `docs/` or `data/` (or on demand from the Actions tab). One-time setup: **Settings → Pages → Build and deployment → Source: GitHub Actions**. The site is then at `https://vgainullin.github.io/golf/` (redirects to `/golf/web/`).
+
 ## Pages
 
 | Route | What it does |
