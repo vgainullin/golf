@@ -1,0 +1,65 @@
+{
+  "_comment": "Donations are not live. Set provider.donate_url to a hosted checkout link (for example a Stripe Payment Link, Open Collective or GitHub Sponsors page) to enable the Donate buttons. Update raised amounts from the provider's dashboard; nothing here is computed automatically.",
+  "currency": "USD",
+  "provider": {
+    "name": "Hosted checkout (not configured)",
+    "donate_url": "",
+    "amount_param": ""
+  },
+  "tiers": [
+    {
+      "amount": 5,
+      "label": "Caddie",
+      "perk": "Helps cover simulation compute for the public arena benchmarks."
+    },
+    {
+      "amount": 25,
+      "label": "Birdie",
+      "perk": "Helps fund agentic research runs: an agent proposes, trains and evaluates one idea."
+    },
+    {
+      "amount": 100,
+      "label": "Eagle",
+      "perk": "Helps fund a full seat-cycled benchmark of a new agent, written up in the research notes."
+    }
+  ],
+  "projects": [
+    {
+      "id": "agent-researcher",
+      "title": "Autonomous research agent",
+      "status": "proposed",
+      "goal": 1500,
+      "raised": 0,
+      "summary": "An LLM agent that reads the research notes, proposes the next experiment, runs it with the existing training and seat-cycling scripts, and opens a pull request with its write-up.",
+      "deliverable": "A new note per run and a leaderboard entry for every agent it produces."
+    },
+    {
+      "id": "two-step-lookahead",
+      "title": "Two-step Bayes lookahead",
+      "status": "proposed",
+      "goal": 400,
+      "raised": 0,
+      "summary": "Extend the 1-step lookahead to reason about the next draw, and model opponents' likely end-of-hole timing.",
+      "deliverable": "A new L2 player and a seat-cycled comparison against L."
+    },
+    {
+      "id": "llm-league",
+      "title": "LLM league",
+      "status": "proposed",
+      "goal": 800,
+      "raised": 0,
+      "summary": "Run every major hosted model through the LLM harness for 100 matches each so the language-model rows on the leaderboard are statistically meaningful.",
+      "deliverable": "LLM leaderboard rows with 95% confidence intervals."
+    },
+    {
+      "id": "distill-bayes",
+      "title": "Distill the lookahead into a DQN",
+      "status": "done",
+      "goal": 0,
+      "raised": 0,
+      "summary": "Fine-tune the DQN champion to rank actions like the Bayes lookahead (Experiment 15).",
+      "deliverable": "Write-up in the experiments notebook.",
+      "note": "experiments"
+    }
+  ]
+}
