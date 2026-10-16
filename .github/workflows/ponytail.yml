@@ -1,0 +1,99 @@
+name: ponytail
+# AGENTS.md (Ponytail section): every diff gets /ponytail-review, and "must fix" findings block the merge.
+# Runs Claude Code (claude-code-action) through OpenRouter with the Ponytail skills committed in
+# .claude/skills/ (pinned by this repo's history, not fetched from upstream),
+# posts the findings as one sticky PR comment, and fails the check on VERDICT: FAIL.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: ponytail-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Fork PRs get no secrets; drafts aren't ready for review.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (!github.event.pull_request.draft
+          && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PR: ${{ github.event.pull_request.number || inputs.pr }}
+      HAS_KEY: ${{ secrets.OPENROUTER_API_KEY != '' }}
+    steps:
+      - name: Check for the OpenRouter key
+        id: key
+        run: |
+          if [[ "$HAS_KEY" == true ]]; then echo "ok=true" >> "$GITHUB_OUTPUT"
+          else echo "::warning::OPENROUTER_API_KEY not set; Ponytail review skipped"; fi
+      - uses: actions/checkout@v4
+        if: steps.key.outputs.ok == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false   # keep the token out of .git/config, which the model can read
+      - name: Check out the PR head (manual runs)
+        if: steps.key.outputs.ok == 'true' && github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout "$PR"
+      - name: Ponytail review
+        if: steps.key.outputs.ok == 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          # OpenRouter's documented setup for claude-code-action: the action needs
+          # anthropic_api_key to start, and these route every request to OpenRouter.
+          ANTHROPIC_BASE_URL: https://openrouter.ai/api
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
+          # Pinned slugs (AGENTS.md §3): "latest" aliases would change verdicts with no commit.
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: anthropic/claude-haiku-5.5   # Claude Code's background model
+          PONYTAIL_DEFAULT_MODE: full
+        with:
+          anthropic_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+          github_token: ${{ github.token }}
+          prompt: |
+            Run the Ponytail review skill (/ponytail-review, in .claude/skills/) on pull request
+            ${{ github.repository }}#${{ env.PR }}. The diff is `git diff origin/${{ github.base_ref || github.event.repository.default_branch }}...HEAD`.
+            Follow AGENTS.md. Do not change any file except ponytail-report.md.
+            Write the findings to ponytail-report.md in markdown, grouped as "Must fix", "Should fix",
+            and "Nit", each with file:line and a one-line reason. The last line must be exactly
+            `VERDICT: PASS` if there are no "Must fix" findings, otherwise `VERDICT: FAIL`.
+          claude_args: |
+            --model anthropic/claude-sonnet-5.5
+            --max-turns 40
+            --allowedTools Skill,Read,Grep,Glob,Write,Bash(git diff:*),Bash(git log:*),Bash(git show:*)
+      - name: Post findings as a sticky comment
+        if: steps.key.outputs.ok == 'true' && always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          # The report is model-written and goes to a public comment; GitHub masks secrets in
+          # logs, not in comments. Refuse to post anything that contains one.
+          if [[ -f ponytail-report.md ]] && { grep -qF "$KEY" ponytail-report.md || grep -qF "$GH_TOKEN" ponytail-report.md; }; then
+            echo "::error::Report contains a secret; not posting it"
+            exit 1
+          fi
+          if [[ ! -s ponytail-report.md ]]; then
+            printf 'Ponytail review produced no report. See the run log: %s\n' \
+              "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > ponytail-report.md
+          fi
+          { echo "<!-- ponytail-review -->"; echo "### Ponytail review"; echo; cat ponytail-report.md; } > body.md
+          gh pr comment "$PR" --body-file body.md --edit-last 2>/dev/null \
+            || gh pr comment "$PR" --body-file body.md
+      - name: Gate on the verdict
+        if: steps.key.outputs.ok == 'true'
+        run: |
+          verdict="$(tr -d '\r' < ponytail-report.md | grep -E '^VERDICT: (PASS|FAIL)$' | tail -n 1)"
+          echo "$verdict" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ "$verdict" == "VERDICT: PASS" ]]
