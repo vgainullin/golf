@@ -1726,3 +1726,92 @@ Distillation from Bayes Lookahead accelerates early learning (col_matches high f
 - `data/seat_cycling_exp14_vs_exp15.txt` — Exp14 vs Exp15 final champion benchmark
 - `data/figures/policy_audit.png` — 6-panel policy audit figure
 
+
+## Experiment 16: Weight-space programming of the DQN champion by Opus (2026-11-03)
+
+### Motivation
+
+Takehi et al., ["Weight-Space Programming"](https://rikiyat.github.io/blog/weight-space-programming/) (MIT CSAIL blog, 2026-11-02), report a frontier LLM improving trained networks by reading their raw weights and writing new ones, with no optimizer. In their Go setup the model gets a Python sandbox with the weights and a small budget of "forward passes" (batches of practice games). It looks at how the network loses, edits the responsible part, and keeps an edit only if it wins more. Exp 14/15 left the champion (`gen350_agent4`) on a plateau that more RL and distillation did not break. The question: can Claude Opus improve it by editing weights directly?
+
+### Setup
+
+- **Programmer:** headless Claude Code (`claude -p --model opus`, model `claude-opus-5-5`) on the Max plan. Prompt: `scripts/wsp_prompt.md`. Launcher: `scripts/wsp_run.sh`.
+- **Network:** `gen350_agent4` (v3, emb 64, hidden 256, 189,552 weights), from HF `vgainullin/golf` `exp14_win_bonus/champion_gen350_agent4.pt`, sha256 `abfe1553…5a81`. Edits must keep the config and every tensor shape.
+- **Forward pass** (`scripts/wsp_pass.py`): the candidate plays as C in C,L,I,R across all 24 seatings, 100 games each (2,400 matches × 9 holes, ~2 min on 4 cores).
+  - It runs on practice seed 1. The held-out benchmark uses seed 0.
+  - It reports the score, the paired difference vs pass 1 (the base) with SE over seatings, and a trace of 8 games: every decision's obs, Q-values, valid actions and chosen action, plus hole scores.
+  - Budget: 25 passes.
+- **Allowed:** reading code and docs, and probing the network on hand-built inputs.
+- **Forbidden:** optimizers and gradients, training or distillation scripts, running the engine, opponents or seat-cycling code directly, random weight-perturbation search, and touching the budget files. These are enforced by the prompt and audited in the transcript, not sandboxed.
+- **Held-out:** `seatcycle-v1` (C,L,I,R, 24 seatings × 1000 games × 9 holes, seed 0) through `service.runner.execute`, for both `base.pt` and `final.pt`, so the comparison is paired.
+- **Two runs, identical except effort:**
+  - `opus_b25` at effort high, inherited from `CLAUDE_EFFORT=high`. The run did not record its level.
+  - `opus_max_b25` at `--effort max`.
+  - Before the max run, all first-run artifacts were moved out of the repo. The max transcript has 0 references to them, and its findings overlap only where it rediscovered them.
+
+### Results (held-out, 24,000 matches)
+
+| | Base | High run | Max run |
+|---|---|---|---|
+| C avg/hole | 9.546 | 9.225 | **8.885** |
+| vs base (paired over 24 seatings) | — | −0.322 ± 0.026 | **−0.661 ± 0.082** |
+| C win rate | 38.9% | 42.8% | 43.2% |
+| L avg/hole in the same games | 9.080 | 9.154 | 8.775 |
+| Weights changed | — | 1 | 22,876 (12%) |
+| Passes used / 25 | — | 9 | 5 |
+| Practice-set gain | — | −0.324 | −0.568 |
+| Wall time | — | ~35 min | ~68 min |
+| Tokens (cache read / cache write / output) | — | 10.5M / 0.15M / 78k | 45.5M / 0.54M / 361k |
+
+Max vs high on the same held-out protocol: −0.340 ± 0.077 per hole.
+
+- The practice gains carried over to held-out games. The high run's gain was the same on both. The max run's held-out gain was larger than its practice gain.
+- 8.885 is the best non-lookahead score on this protocol: research-run best 9.152, lookahead 8.751.
+
+### What the network gets wrong, as both runs found it
+
+1. **The stage-0 head is inconsistent with the network's own stage-1 head.** For each take-or-draw decision, the runs computed the value the stage-1 head implies:
+   - **Take:** the best placement of the discard.
+   - **Draw:** the average, over unseen cards, of the best stage-1 action with that card in hand.
+
+   On trace states the stage-0 head overvalues take by ~0.8 and undervalues draw by ~1.1. The gap is roughly constant across deck size and hidden-card count. This matches the Exp 15 policy audit (DQN takes 10,746 times where the lookahead draws, vs 2,749 the other way). The champion takes discarded 3/4/5s it should pass on.
+2. **Stage 1 overvalues revealing a card by ~2–3 points** relative to replacing an already revealed card, so the champion goes out early. At seat 0 it ended 61 of 72 traced holes itself; after the max edit, 41. Only the max run turned this into a working edit.
+
+### The edits
+
+- **High run: one weight.** `mlp.4.bias[1]` (the Q of "draw") += 1.5. The size came from a fitted curve over +0.5…+2.5: the vertex was +1.55, practice optimum about −0.32. Two probe-based edits to the stage-1 placement rows made things worse (+0.11 and +0.57). The probe readout carried ±1.25 of per-state noise that scrambled placement choices.
+- **Max run: a circuit plus one bias.**
+  - **E1, reveal-premium correction:** every card-revealing stage-1 action costs δ = 1.5.
+    - **Detector:** 12 low-impact layer-1 transformer FFN units (each ≤ 0.26 max |ΔQ| when ablated) were rewritten as clipped detectors for "own slot p is face-down". Their input directions are closed-form Fisher discriminants on layer-1 FFN inputs from trace states plus slot-permuted variants.
+    - **Isolation:** the detectors write into six channel directions, which are projected out of every live unit.
+    - **Reader:** dead MLP units read the channels and write only to Q[place p]. The flip biases also drop by δ.
+    - **Offline check before spending a pass:** 53 intended decision changes on traces, 8 unintended.
+  - **E2:** `mlp.4.bias[0]` (the Q of "take") −= 1.0. This is the same stage-0 fix as the high run, from the other side. Disagreements with the network's own lookahead fell from 44/471 to 8/507.
+  - δ was flat over 1.5–2.0; at δ = 3.0 the network stalls on its final turn.
+
+### Interpretation
+
+- **The plateau was partly a calibration problem, not only the belief bottleneck.** Exp 15 concluded the feedforward v3 network could not improve without belief information. Hand edits that change no capacity and add no information removed 0.66 per hole, more than half the champion's gap to the lookahead on this protocol. Both errors are inconsistencies the network can detect in itself: its stage-0 values disagree with its own stage-1 values. Self-consistency against the network's own heads was the most productive diagnostic in both runs.
+- **Effort mattered here, but n = 1 per level.**
+  - The max run built and verified a circuit before spending passes. The high run swept a scalar and its circuit-level edits failed.
+  - The max run used ~4× the tokens and 2× the wall time but fewer passes.
+  - Run-to-run variance is unmeasured, so the 0.34 gap between them is suggestive, not established.
+- **What changed is the decisions, not the value estimates.** The runs edited Q only where argmax decisions change. Using `final.pt` as a TD-learning initialisation would need its Q scale rechecked.
+
+### Caveats
+
+- **Rules enforced only by prompt.** The no-training and no-engine rules were enforced by the prompt and checked afterwards by grepping both transcripts and every script. Neither run imported the engine, opponents or training code, or used gradients.
+- **Fitted on practice traces.** The max run's detector was fitted on traces from passes on the practice seed. Held-out games use a different seed and recover the full gain.
+- **Opponents' scores move too.** Longer holes give every player more turns: L scored 8.775 in the max run's games vs 9.080 with the base.
+
+### Next
+
+- Replicate 2–3 runs per effort level to measure run-to-run variance.
+- Try the edit Opus proposed next: a rank-aware stage-0 correction (the take-vs-draw gap runs from ~0.4 for a discarded 2 to 2–3.8 for high cards), and a final-turn detector.
+- Resume RL from the max `final.pt` and see whether training keeps or erases the edits.
+
+### Data
+
+- `scripts/wsp_pass.py`, `scripts/wsp_prompt.md`, `scripts/wsp_run.sh`: harness
+- `data/wsp_results/opus_b25/`, `data/wsp_results/opus_max_b25/`: each run's `NOTES.md` (Opus's own write-up), `passes.jsonl`, held-out JSONs, prompt and budget
+- Checkpoints, traces, transcripts and Opus's analysis scripts are local only: `data/wsp/opus_max_b25/` and `~/wsp_archive/opus_b25/` on pop-os, both git-ignored
