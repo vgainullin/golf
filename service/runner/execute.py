@@ -204,7 +204,10 @@ def evaluate(protocol_id: str, device: torch.device, games_override: int | None 
     sc.SeatHandler = CandidateHandler  # run_seating builds handlers by this name
     roster = ["C", *ROSTER_OPPONENTS]
     t0 = time.time()
-    means, wins, per_perm = sc.run_matchup(roster, proto["games_per_perm"], proto["holes"], device)
+    # crn protocols deal identical cards per (seating, hole) to every candidate; see run_seating.
+    deal_seed = proto["seed"] if proto.get("crn") else None
+    means, wins, per_perm = sc.run_matchup(roster, proto["games_per_perm"], proto["holes"], device,
+                                           deal_seed=deal_seed)
     return {
         "protocol": {"id": protocol_id, "roster": roster, **proto},
         "metric": {"name": "avg_score_per_hole", "value": round(means["C"], 4), "lower_is_better": True},
