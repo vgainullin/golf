@@ -21,7 +21,7 @@ held-out benchmark; the lookahead scores about 8.75. Ideas worth knowing are in
 `docs/experiments.md` and `docs/beyond-heuristic-rl.md` (for example, where the DQN loses
 points to the lookahead).
 
-## Your tools and limits
+{PRIOR}## Your tools and limits
 
 - Work in Python (`.venv/bin/python`, torch and numpy on CPU) inside `{RUN_DIR}`. Load the
   weights, analyse them, edit tensors, save candidates as `{RUN_DIR}/cand_NN.pt` in the same

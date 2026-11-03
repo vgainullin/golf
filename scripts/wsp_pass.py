@@ -124,6 +124,7 @@ def main(argv=None) -> int:
     used = len(ledger.read_text().splitlines()) if ledger.exists() else 0
     if used >= budget["max_passes"]:
         raise SystemExit(f"budget spent: {used}/{budget['max_passes']} passes used")
+    ex.PROTOCOLS["wsp-practice"]["seed"] = budget.get("practice_seed", 1)
     check_candidate(args.candidate, args.run_dir / "base.pt")
 
     torch.set_num_threads(4)
