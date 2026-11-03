@@ -27,24 +27,38 @@ points to the lookahead).
   weights, analyse them, edit tensors, save candidates as `{RUN_DIR}/cand_NN.pt` in the same
   format with the same config and tensor shapes (no new layers or units).
 - You may evaluate the network on inputs you construct by hand to understand it.
-- The ONLY way to see it play is a forward pass, which spends one unit of a budget of
-  {BUDGET} passes:
-  `taskset -c 0-3 .venv/bin/python -m scripts.wsp_pass {RUN_DIR}/cand_NN.pt --run-dir {RUN_DIR}`
-  It plays 2,400 practice games (100 per seating) and prints the candidate's average score per
-  hole, win rate, and its difference from pass 1 with a paired standard error over the 24
-  seatings (every pass starts from the same practice seed; decks drift apart once play differs), and writes a trace of 8 games (every decision's
-  observation, Q-values, valid actions and chosen action, plus each hole's scores by seat) to
-  `{RUN_DIR}/trace_NNN.jsonl`. Results so far are in `{RUN_DIR}/passes.jsonl`. Spend pass 1 on
-  `base.pt` itself so you have a baseline.
+- The ONLY way to see it play is a forward pass. There are two kinds, each with its own budget:
+  - **Practice pass** (budget {BUDGET}, ~3 min):
+    `taskset -c 0-3 .venv/bin/python -m scripts.wsp_pass {RUN_DIR}/cand_NN.pt --run-dir {RUN_DIR}`
+    7,200 games (300 per seating, 24 seatings) on the practice seed.
+  - **Confirm pass** (budget {CONFIRMS}, ~7 min): the same command with `--confirm`. 24,000 games
+    (1,000 per seating) on a separate seed, about 1.8× less noisy than a practice pass. Use it to check a candidate you
+    already believe in, not to screen.
+  - Both print the candidate's average score per hole, win rate, and its difference from `base.pt`
+    on the same tier with a paired standard error over the 24 seatings. `base.pt` was scored on
+    both tiers before you started (`base_practice.json`, `base_confirm.json`), so you do not
+    spend a pass on it.
+  - Every candidate is dealt identical cards per (seating, hole): the deck order of each hole is
+    fixed by the seed, whatever happened in earlier holes. Re-scoring the same weights gives the
+    same number, and paired differences reflect changed decisions, not different deals.
+  - A practice pass writes `{RUN_DIR}/trace_NNN.jsonl`: 2 games from every seating, so the
+    candidate sits in every seat. Each decision has the observation, Q-values, valid actions,
+    chosen action, `unseen_by_rank` (how many of each rank C has not seen this hole, from the
+    same history-aware tracker the lookahead uses) and `expected_unknown_score`. Each hole ends
+    with its scores by seat. Decisions in games that are already over are left out. Results so
+    far are in `{RUN_DIR}/passes.jsonl` and `{RUN_DIR}/confirms.jsonl`.
+  - Near-ties on practice are noise: picking the best of several candidates that tie on practice
+    overstates its gain. The confirm tier exists to check the one you pick.
 - Forbidden: gradient descent or any optimizer, training scripts (`src.tournament`,
   `src.optuna_search`, distillation), running the game engine, simulator, opponents or seat-cycling
-  code yourself, editing `wsp_pass.py`, `budget.json` or `passes.jsonl`, and reading anything
+  code yourself, editing `wsp_pass.py`, `budget.json`, the `base_*.json` files or the ledgers, and reading anything
   under `data/` outside `{RUN_DIR}`. Searching over many random weight perturbations is also out:
   each edit should come from a reason you can state.
 
 ## Deliverables in `{RUN_DIR}`
 
-- `final.pt`: your best candidate (copy `base.pt` if nothing beat it).
+- `final.pt`: your best candidate. It must be byte-identical to a candidate you ran a confirm pass
+  on (`cp` it), or a copy of `base.pt` if nothing beat it.
 - `NOTES.md`: what you found the network computes (name specific units, heads or directions),
   every edit you made and why, which tensors and how many weights changed, the pass results,
   and what you would try next. Be plain about what did not work.

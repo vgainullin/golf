@@ -3,7 +3,8 @@
 # weights with a fixed forward-pass budget, then final.pt gets the held-out benchmark.
 #   scripts/wsp_run.sh <champion.pt> [budget=25] [run_name] [effort=high]
 # Continue from an earlier run: pass its final.pt as <champion.pt> and set PRIOR_RUN=<that run dir>
-# (its notes and scripts are copied in as reference). PRACTICE_SEED (default 1) picks the practice decks.
+# (its notes and scripts are copied in as reference). PRACTICE_SEED (default 1), CONFIRM_SEED (default 2)
+# and CONFIRMS (default 3) set the practice and confirm tiers; see scripts/wsp_pass.py.
 # shortcut: the pass budget and the no-training rule are enforced by prompt and audited in
 #   transcript.jsonl, not sandboxed; move to a container if a run ever cheats.
 set -euo pipefail
@@ -13,7 +14,10 @@ RUN=data/wsp/$NAME
 mkdir -p "$RUN"
 # The champion was saved on MPS; re-save on CPU so a plain torch.load works.
 .venv/bin/python -c "import sys,torch; torch.save(torch.load(sys.argv[1],map_location='cpu',weights_only=False),sys.argv[2])" "$CKPT" "$RUN/base.pt"
-echo "{\"max_passes\": $BUDGET, \"practice_seed\": ${PRACTICE_SEED:-1}}" > "$RUN/budget.json"
+CONFIRMS=${CONFIRMS:-3}
+echo "{\"max_passes\": $BUDGET, \"max_confirms\": $CONFIRMS, \"practice_seed\": ${PRACTICE_SEED:-1}, \"confirm_seed\": ${CONFIRM_SEED:-2}}" > "$RUN/budget.json"
+# Score base.pt on both tiers before the session, so the programmer's passes are all spent on candidates.
+taskset -c 0-3 .venv/bin/python -m scripts.wsp_pass --baseline --run-dir "$RUN"
 PRIOR_TEXT=""
 if [ -n "${PRIOR_RUN:-}" ]; then
   mkdir -p "$RUN/prior"
@@ -26,8 +30,8 @@ PRIOR_TEXT="$PRIOR_TEXT" .venv/bin/python -c "
 import os, sys
 t = open('scripts/wsp_prompt.md').read()
 p = os.environ['PRIOR_TEXT']
-t = t.replace('{PRIOR}', p + '\n\n' if p else '').replace('{RUN_DIR}', sys.argv[1]).replace('{BUDGET}', sys.argv[2])
-open(sys.argv[1] + '/prompt.md', 'w').write(t)" "$RUN" "$BUDGET"
+t = t.replace('{PRIOR}', p + '\n\n' if p else '').replace('{RUN_DIR}', sys.argv[1]).replace('{BUDGET}', sys.argv[2]).replace('{CONFIRMS}', sys.argv[3])
+open(sys.argv[1] + '/prompt.md', 'w').write(t)" "$RUN" "$BUDGET" "$CONFIRMS"
 
 taskset -c 0-3 env -u CLAUDE_EFFORT claude -p "$(cat "$RUN/prompt.md")" --model opus --effort "$EFFORT" \
   --output-format stream-json --verbose \
@@ -35,6 +39,16 @@ taskset -c 0-3 env -u CLAUDE_EFFORT claude -p "$(cat "$RUN/prompt.md")" --model 
   > "$RUN/transcript.jsonl" 2> "$RUN/claude.err" || echo "claude exited $?" >> "$RUN/claude.err"
 
 [ -f "$RUN/final.pt" ] || { echo "no final.pt in $RUN"; exit 1; }
+# final.pt must be a confirmed candidate (or the base). Recorded, not enforced, so held-out still runs.
+.venv/bin/python -c "
+import hashlib, json, pathlib, sys
+r = pathlib.Path(sys.argv[1]); h = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+f = h(r / 'final.pt')
+c = r / 'confirms.jsonl'
+ok = f == h(r / 'base.pt') or (c.exists() and any(json.loads(l)['sha256'] == f for l in c.read_text().splitlines()))
+m = json.loads((r / 'run_meta.json').read_text()); m['final_confirmed'] = ok
+(r / 'run_meta.json').write_text(json.dumps(m))
+print('final.pt confirmed:', ok)" "$RUN"
 # Held-out benchmark (seed 0, never seen by the programmer) for both, so the comparison is paired.
 for m in base final; do
   echo "{\"kind\":\"checkpoint\",\"checkpoint\":{\"url\":\"$RUN/$m.pt\"},\"protocol\":\"seatcycle-v1\"}" > "$RUN/heldout_$m.spec.json"
