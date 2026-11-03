@@ -1804,14 +1804,55 @@ Max vs high on the same held-out protocol: −0.340 ± 0.077 per hole.
 - **Fitted on practice traces.** The max run's detector was fitted on traces from passes on the practice seed. Held-out games use a different seed and recover the full gain.
 - **Opponents' scores move too.** Longer holes give every player more turns: L scored 8.775 in the max run's games vs 9.080 with the base.
 
+### Round 2: a second max session on the round-1 network (`opus_max_r2`)
+
+- **Setup:** `base.pt` = round 1's max `final.pt`, `--effort max`, 25-pass budget. Practice moved to seed 2 so the session would not tune further to seed 1's games. Held-out games are unchanged (seed 0).
+  - The prompt adds a "Starting point" section: the network is already edited, its held-out score is 8.89, and it may build on, revise or remove the earlier edits (`scripts/wsp_prompt_prior.md`).
+  - Round 1's `NOTES.md` and edit scripts were copied into the run dir. This round is a continuation, not an independent replicate.
+
+| Held-out (24,000 matches) | Raw champion | Round 1 | Round 2 |
+|---|---|---|---|
+| C avg/hole | 9.546 | 8.885 | **8.847** |
+| vs previous (paired) | — | −0.661 ± 0.082 | −0.038 ± 0.020 |
+| C win rate | 38.9% | 43.2% | 42.9% |
+| L avg/hole in the same games | 9.080 | 8.775 | 8.757 |
+| Weights changed vs raw | — | 22,876 | 39,235 |
+| Practice gain (its own seed) | — | −0.568 | −0.132 ± 0.067 |
+| Passes used / 25 | — | 5 | 12 |
+| Tokens (cache read / cache write / output) | — | 45.5M / 0.54M / 361k | 67.9M / 0.63M / 428k |
+| Wall time | — | ~68 min | ~100 min |
+
+**Edits added in round 2** (32,565 weights changed vs round 1):
+- **F, a final-turn flag.** The network could not tell when an opponent had gone out, so round 1's reveal penalty (E1) also fired on C's last turn, where revealing has no downside.
+  - **Detection:** a layer-0 head now checks "this opponent has all six cards face-up", and a layer-1 head broadcasts that to the own tokens. The MLP reads it.
+  - **Effect:** when F fires, E1 switches off and taking the discard gets +1.0.
+  - **Check:** on fresh synthetic states, F fired on every final turn and never on normal turns, including turns where an opponent had one card left.
+- **E3:** +1.0 for replacing a face-up 9/T/J/Q at slot p. Detection is 72–95% depending on the slot, with ~0.1% false alarms.
+- **E6:** +1.0 for flipping instead of placing a held 8–Q face-down. No measurable effect.
+- **Ablations on practice:** removing E3 costs 0.079 ± 0.061; removing F and its take bonus costs 0.075 ± 0.061. The two add up.
+
+**Why the gain shrank from practice to held-out:**
+- Four candidates tied within noise on practice (8.814–8.818, pairwise SE 0.055–0.07), and the session shipped the best of about 15 tried. Picking the top of a noisy tie overstates its score.
+- At 2,400 matches a pass resolves about ±0.15 per hole. Every round-2 edit is worth less than that, so passes could not choose between them.
+- The session saw this and stopped at 12 of 25 passes.
+
+**What round 2 learned about diagnosis:**
+- **Round 1's lookahead was biased.** The obs-only lookahead built in round 1 (its belief model and its 1-step oracle) counts buried discards as unseen. Players discard high cards, so late in a hole it overestimates the unseen mean: +0.46 per card at one own face-down card, against C's own observation history.
+- **That bias pushes toward revealing and taking.** Several apparent errors disappeared under a history-aware belief. One is the late-hole take preference. A take bonus built on it (E4) was dropped after scoring +0.008 on practice.
+- **Reveal-penalty variants: the lookahead pointed the wrong way.** On every δ variant the lookahead predicted an improvement, and the games said otherwise. A race-aware penalty (δ 1.0 near the end, 2.0 otherwise) cost +0.27 ± 0.085. Judging how long to keep cards face-down needs a non-myopic reference.
+
+**Takeaways:**
+- **Diminishing returns.** Round 1 fixed two large, self-consistency-detectable errors worth 0.66 combined. Round 2's errors are each worth under 0.1, and a 2,400-match pass cannot confirm them.
+- **Fix the measurement, not the budget.** More practice games per pass (4–10×) or a non-myopic reference to diagnose against would help a third round more than more passes would.
+
 ### Next
 
 - Replicate 2–3 runs per effort level to measure run-to-run variance.
-- Try the edit Opus proposed next: a rank-aware stage-0 correction (the take-vs-draw gap runs from ~0.4 for a discarded 2 to 2–3.8 for high cards), and a final-turn detector.
-- Resume RL from the max `final.pt` and see whether training keeps or erases the edits.
+- A third round only with bigger passes (≥ 10,000 practice matches) and a non-myopic reference to diagnose against. Round 2's notes list the next edits: make E1's slot detectors blind to the F broadcast, add a card-counting channel, and extend E3 to 7/8.
+- Resume RL from the round-2 `final.pt` and see whether training keeps or erases the edits.
 
 ### Data
 
-- `scripts/wsp_pass.py`, `scripts/wsp_prompt.md`, `scripts/wsp_run.sh`: harness
-- `data/wsp_results/opus_b25/`, `data/wsp_results/opus_max_b25/`: each run's `NOTES.md` (Opus's own write-up), `passes.jsonl`, held-out JSONs, prompt and budget
-- Checkpoints, traces, transcripts and Opus's analysis scripts are local only: `data/wsp/opus_max_b25/` and `~/wsp_archive/opus_b25/` on pop-os, both git-ignored
+- `scripts/wsp_pass.py`, `scripts/wsp_prompt.md`, `scripts/wsp_prompt_prior.md`, `scripts/wsp_run.sh`: harness. Set `PRIOR_RUN` and `PRACTICE_SEED` to continue from an earlier run.
+- `data/wsp_results/opus_b25/`, `data/wsp_results/opus_max_b25/`, `data/wsp_results/opus_max_r2/`: each run's `NOTES.md` (Opus's own write-up), `passes.jsonl`, held-out JSONs, prompt and budget
+- Checkpoints, traces, transcripts and Opus's analysis scripts are local only: `data/wsp/opus_max_b25/`, `data/wsp/opus_max_r2/` and `~/wsp_archive/opus_b25/` on pop-os, both git-ignored
