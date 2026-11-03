@@ -21,3 +21,6 @@ wandb/
 # Allow the small tracked metric files committed to data/
 !data/dqn_behavioral_metrics.json
 !data/heuristic_behavioral_metrics.json
+
+# weight-space programming runs (checkpoints, transcripts, traces)
+data/wsp/
