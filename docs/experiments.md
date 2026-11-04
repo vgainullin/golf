@@ -1845,14 +1845,96 @@ Max vs high on the same held-out protocol: −0.340 ± 0.077 per hole.
 - **Diminishing returns.** Round 1 fixed two large, self-consistency-detectable errors worth 0.66 combined. Round 2's errors are each worth under 0.1, and a 2,400-match pass cannot confirm them.
 - **Fix the measurement, not the budget.** More practice games per pass (4–10×) or a non-myopic reference to diagnose against would help a third round more than more passes would.
 
+### Round 3: harness v2, a third max session (`opus_max_r3`)
+
+- **Setup:** `base.pt` = round 2's `final.pt` (8.847 held-out), `--effort max`, harness v2 (#22).
+  - **Common deals:** every candidate is dealt identical cards per (seating, hole).
+  - **Practice:** 300 games per seating (7,200), seed 1, budget 25.
+  - **Confirm:** 1,000 per seating (24,000), seed 2, budget 3.
+  - **Rule:** `final.pt` must be byte-identical to a confirmed candidate.
+  - **Traces:** 2 games from every seating, with C's history-aware belief.
+  - Opus got rounds 1 and 2's notes and scripts.
+- Launched from the `wsp/multi-prior` branch (`c6157b9`). The VR build was sharing cores 0–3, which slowed some passes 2–3×.
+
+| Held-out (24,000 matches) | Raw champion | Round 1 | Round 2 | **Round 3** |
+|---|---|---|---|---|
+| C avg/hole | 9.546 | 8.885 | 8.847 | **8.168** |
+| vs previous (paired) | — | −0.661 ± 0.082 | −0.038 ± 0.020 | **−0.679 ± 0.030** |
+| C win rate | 38.9% | 43.2% | 42.9% | 44.9% |
+| L avg/hole in the same games | 9.080 | 8.775 | 8.757 | 8.198 |
+| Weights changed vs raw | — | 22,876 | 39,235 | 55,016 |
+| Practice / confirm gain | — | −0.568 / — | −0.132 / — | −0.699 / **−0.665 ± 0.026** |
+| Passes used | — | 5 | 12 | 25 + 3 confirms |
+| Tokens (cache read / cache write / output) | — | 45.5M / 0.54M / 361k | 67.9M / 0.63M / 428k | 129.0M / 0.59M / 370k |
+| Opus time | — | ~68 min | ~100 min | ~3 h 05 |
+
+Against the raw champion: −1.378 ± 0.104 per hole. In the same games the edited DQN now edges ahead of the lookahead, 8.168 vs 8.198. Every player scores lower than before because holes run longer.
+
+**The confirm tier matched held-out.** cand_21 scored −0.665 ± 0.026 on confirm and −0.679 ± 0.030 held-out. All three confirmed candidates held up within one practice SE of their practice gains (cand_12 −0.607 → −0.591, cand_18 −0.629 → −0.605, cand_21 −0.699 → −0.665). Round 2's practice-to-held-out collapse (−0.13 → −0.04) did not recur. The earlier worry that common-deals estimates run 0.03 more negative than held-out came to −0.014 here, within noise.
+
+**What round 3 found: going out early is the error.** Round 1's reveal penalty was a proxy for it.
+1. **Going out ends C's own improvement.** When C reveals its last face-down card on a normal turn, every opponent gets one more turn and C gets none. Placing on a revealed slot instead ("staying") guarantees C at least one more turn. The base went out 58% of the time in that spot.
+   - **Go-out penalty (GO):** −6.5 on revealing the last face-down card on a normal turn. It is gated off on final turns by round 2's flag F, and fires on 95–97% of the intended states. Alone, with round 1's reveal penalty still in, it was worth −0.39.
+2. **With GO in place, round 1's general reveal penalty hurts.** Revealing early has information value.
+   - Removing it gave −0.15 more.
+   - A small reveal bonus added −0.03.
+3. **Except at two face-down cards,** where one reveal drops C into the one-card regime. The final bonus is count-dependent: 0 at two face-down cards, +1.5 at three or more (−0.07 over a uniform 0.75). It saturates by +2.5.
+   - **Resulting play:** C goes out in 17% of holes (base 35%) and gets a final turn in 83% (65%). Its reveal rate with one card left fell from 0.58 to 0.19.
+4. **Final-turn fixes, worth 0.083 ± 0.007 together.** Final turns are now common:
+   - a take-bias correction, fitted where the exact 1-step lookahead is optimal: on final turns, Q0(take) − Q0(draw) = 0.96 × lookahead margin + 1.45;
+   - a hidden-placement penalty;
+   - "don't discard a held 3/4/5".
+5. **Smaller fixes:**
+   - a 2-on-2 fix: −2.5 for placing a held 2 anywhere except next to a revealed 2;
+   - E6 removed;
+   - round 1's slot readers refit. They misread revealed 6/7/8 at slot 1 as face-down in most such states, because "slot p face-down" is not linearly separable at the layer-1 FFN input but is at the pooled representation.
+
+**Ablations of the final network** (practice, pairwise):
+- **Without GO:** +0.85, worse than base by 0.15. The reveal bonus only works with the go-out penalty in place.
+- **Without the final-turn fixes:** +0.083 ± 0.007.
+- **E3 doubled or removed:** each +0.055.
+- **GO 5.0–6.5** is a plateau.
+
+**Edit size:** all round-3 edits are in the MLP head: 17,671 weights vs round 2. The transformer is untouched. 50 previously dead h2 units are now in use, and 16 low-impact h1 units were repurposed.
+
+**What did not work:**
+- **References as tuners:** the 2-step reference undervalues staying. It implied a go-out penalty of 1.5–2, and the games put it at 6.5. So every normal-turn parameter was set by passes, not offline references.
+- **A pair-low-cards bonus:** looked like −0.11 offline, measured −0.007 ± 0.013 in play.
+
+**Audit:**
+- No engine, opponent, optimizer or gradient imports.
+- No reads of `data/` outside the run dir.
+- `t.py` re-implements the lookahead's decision rule in its own code as a diagnostic reference, without importing it. That's allowed, but it's the closest any run has come to using the opponent as a teacher.
+- One write outside the run dir: a round-3 summary appended to the repo's `STATE.md`, which the box rules ask sessions to keep. It is accurate and was kept.
+
+**Takeaways:**
+- **Measurement was the bottleneck in round 2, not the programmer.** With common deals and a confirm tier, sub-0.1 effects became measurable: pairwise SEs were 0.005–0.013. Round 3 found −0.68 on a network that round 2 could improve by only −0.04.
+- **Each round revised the last one's interpretation.** Round 1's reveal penalty was right in direction and wrong in mechanism. Its gain came from stopping premature go-outs, and a targeted version plus a reveal bonus does better.
+- **Q is no longer in points.** GO and the bonuses are decision devices. Resuming TD training from this network would need them removed or re-expressed.
+
+**Cost correction:** the CLI's `total_cost_usd` is cumulative within a session. Earlier session figures summed it across turns and overstated the high-effort run. The CLI's own API-equivalent estimates are:
+
+| Run | API-equivalent |
+|---|---|
+| Round 1, high | ~$4.9 |
+| Round 1, max | ~$20.6 |
+| Round 2 | ~$27.2 |
+| Round 3 | ~$37.9 |
+
+Max cost more than high, not less.
+
 ### Next
 
-- Replicate 2–3 runs per effort level to measure run-to-run variance.
-- A third round only with bigger passes (≥ 10,000 practice matches) and a non-myopic reference to diagnose against. Round 2's notes list the next edits: make E1's slot detectors blind to the F broadcast, add a card-counting channel, and extend E3 to 7/8.
-- Resume RL from the round-2 `final.pt` and see whether training keeps or erases the edits.
+- Replicate 2–3 runs per effort level from the raw champion. The high-vs-max gap is still n = 1 per level.
+- Round 4 ideas from round 3's notes:
+  - an attention-built own-face-down-count flag, to free units and allow a stay-cost-aware go-out penalty;
+  - a real final-turn evaluator (~0.1/hole; C gets a final turn in 83% of holes);
+  - extending E3's coverage.
+- Upload the round-3 `final.pt` to HF and add a leaderboard row. 8.168 on seatcycle-v1 would be the best entry, ahead of the lookahead.
+- Resume RL from the round-3 network once its decision devices are re-expressed as values.
 
 ### Data
 
-- `scripts/wsp_pass.py`, `scripts/wsp_prompt.md`, `scripts/wsp_prompt_prior.md`, `scripts/wsp_run.sh`: harness. Set `PRIOR_RUN` and `PRACTICE_SEED` to continue from an earlier run.
-- `data/wsp_results/opus_b25/`, `data/wsp_results/opus_max_b25/`, `data/wsp_results/opus_max_r2/`: each run's `NOTES.md` (Opus's own write-up), `passes.jsonl`, held-out JSONs, prompt and budget
-- Checkpoints, traces, transcripts and Opus's analysis scripts are local only: `data/wsp/opus_max_b25/`, `data/wsp/opus_max_r2/` and `~/wsp_archive/opus_b25/` on pop-os, both git-ignored
+- `scripts/wsp_pass.py`, `scripts/wsp_prompt.md`, `scripts/wsp_prompt_prior.md`, `scripts/wsp_run.sh`: harness. Set `PRIOR_RUN` (oldest first), `PRACTICE_SEED`, `CONFIRM_SEED` and `CONFIRMS` as needed.
+- `data/wsp_results/opus_b25/`, `data/wsp_results/opus_max_b25/`, `data/wsp_results/opus_max_r2/`, `data/wsp_results/opus_max_r3/`: each run's `NOTES.md` (Opus's own write-up), `passes.jsonl`, held-out JSONs, prompt and budget
+- Checkpoints, traces, transcripts and Opus's analysis scripts are local only: `data/wsp/opus_max_b25/`, `data/wsp/opus_max_r2/`, `data/wsp/opus_max_r3/` and `~/wsp_archive/opus_b25/` on pop-os, both git-ignored

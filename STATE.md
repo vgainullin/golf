@@ -6,45 +6,29 @@
   multi-session continuation and this handoff. CI is green; #23 and #25 fixed two long-standing
   workflow failures.
 - Champion: raw Exp 14 `gen350_agent4`, 9.546 per hole held-out (seatcycle-v1, C,L,I,R). Opus
-  hand edits brought it to:
-  - round 1, effort max: 8.885
-  - round 2, effort max, starting from round 1: **8.847**
+  hand edits, no training:
+  - round 1: 8.885
+  - round 2: 8.847
+  - **round 3 (harness v2): 8.168**, −0.679 ± 0.030 vs round 2, confirm-tier −0.665 ± 0.026. In the
+    same games the lookahead scored 8.198.
 
-  Details are in `docs/experiments.md` (Exp 16) and `data/wsp_results/`.
+  Write-up: `docs/experiments.md` Exp 16. Records: `data/wsp_results/`.
 - Checkpoints and transcripts are local and git-ignored: `data/wsp/opus_max_b25/`,
-  `data/wsp/opus_max_r2/`, `~/wsp_archive/opus_b25/` (the high-effort run).
-
-## In flight: round 3 (`data/wsp/opus_max_r3/`)
-
-- Launched with:
-  `PRIOR_RUN="data/wsp/opus_max_b25 data/wsp/opus_max_r2" scripts/wsp_run.sh data/wsp/opus_max_r2/final.pt 25 opus_max_r3 max`
-- **Settings:** effort max, harness v2.
-  - Common deals.
-  - Practice: 300 games per seating, ~3 min, budget 25.
-  - Confirm: 1,000 per seating, ~7 min, budget 3.
-  - `final.pt` must be a confirmed candidate.
-- **Outputs in the run dir:**
-  - `run_meta.json` (`final_confirmed`)
-  - `passes.jsonl`, `confirms.jsonl`
-  - `heldout_base.json`, `heldout_final.json`
-  - `NOTES.md`
-  - `opus_max_r3.log` (one level up)
-- **Questions it answers:**
-  - Can sub-0.1 edits be found and confirmed now that a practice pass resolves about ±0.05?
-  - Does the confirm-tier gain match held-out? Common-deals estimates ran 0.03–0.04 more negative
-    than held-out on the round-1 → round-2 pair. Watch this.
-- **Audit when it ends:**
-  - grep the transcript for tool calls touching `data/` outside the run dir
-  - check scripts for engine, opponent, optimizer or gradient use
-- **Then:** add round 3 to Exp 16 and copy the small records to `data/wsp_results/opus_max_r3/`.
+  `data/wsp/opus_max_r2/`, `data/wsp/opus_max_r3/` (best: `final.pt` = cand_21, sha256
+  `ff3454f0…5d4a`), and `~/wsp_archive/opus_b25/` (the high-effort run).
+- Round 3's key finding: going out early was the error. Round 1's reveal penalty was a proxy; a
+  go-out penalty plus a count-dependent reveal bonus does better.
 
 ## Open choices (V)
 
-- **Replicates:** high vs max effort, 2 runs each from the raw champion. The effort gap is n = 1
-  per level so far.
-- **Publish:** upload the WSP finals to HF `vgainullin/golf` and add a leaderboard row (8.847 would
-  be the best non-lookahead entry).
-- **RL from the edited network:** does training keep the circuits?
+- **Publish:** upload round 3's `final.pt` to HF `vgainullin/golf` and add a leaderboard row. 8.168
+  would top seatcycle-v1, ahead of the lookahead's 8.751.
+- **Replicates:** high vs max effort, 2 runs each from the raw champion. The effort gap is n = 1 per
+  level so far; ~$5–40 API-equivalent per run.
+- **Round 4:** ideas are in Exp 16's Next list. Harness gap to fix first: `--baseline` should write a
+  base trace, so pass 1 isn't spent on base.
+- **RL from the edited network:** its Q is no longer in points, so the decision devices need
+  re-expressing first.
 
 ## Box notes
 
