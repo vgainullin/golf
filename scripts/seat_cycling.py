@@ -28,7 +28,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from itertools import permutations
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -191,9 +191,15 @@ def run_seating(
     holes: int,
     device: torch.device,
     stack_low_cards: bool = False,
+    deal_seed: Optional[int] = None,
 ) -> List[float]:
     """Run num_games games with the given seating and return per-seat avg
     score / hole (length n_players).
+
+    deal_seed: if set, reseed torch's RNG at the start of every hole from
+    (deal_seed, hole). Each hole is then dealt the same cards whatever the
+    players did in earlier holes, so two candidates in the same seat are
+    compared on identical deals (common random numbers).
     """
     n_players = len(seating)
     N = num_games
@@ -203,6 +209,8 @@ def run_seating(
     game_totals = torch.zeros(N, n_players, dtype=torch.float32, device=device)
 
     for hole in range(1, holes + 1):
+        if deal_seed is not None:
+            torch.manual_seed(deal_seed * 100 + hole)
         state = reset_games(N, device, n_players=n_players, stack_low_cards=stack_low_cards)
         for h in handlers:
             h.reset_for_hole(state)
@@ -283,8 +291,12 @@ def run_matchup(
     holes: int,
     device: torch.device,
     stack_low_cards: bool = False,
+    deal_seed: Optional[int] = None,
 ) -> Tuple[Dict[str, float], Dict[str, float], List[Tuple[Tuple[str, ...], List[float], List[float]]]]:
     """Run all distinct seat-permutations of the roster.
+
+    deal_seed: see run_seating. Each seating gets its own deals, derived from
+    (deal_seed, seating index), so seatings stay independent samples.
 
     Returns (label_to_avg_score, label_to_win_rate, per_perm_table).
     per_perm_table entries: (seating, per-seat avg scores, per-seat win rates).
@@ -294,10 +306,11 @@ def run_matchup(
     label_wins: Dict[str, List[float]] = defaultdict(list)
     per_perm = []
 
-    for seating in perms:
+    for i, seating in enumerate(perms):
         seat_avgs, seat_wins = run_seating(
             seating, num_games_per_perm, holes, device,
             stack_low_cards=stack_low_cards,
+            deal_seed=None if deal_seed is None else deal_seed * 1000 + i,
         )
         per_perm.append((seating, seat_avgs, seat_wins))
         for seat_idx, label in enumerate(seating):
