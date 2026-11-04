@@ -1923,6 +1923,29 @@ Against the raw champion: −1.378 ± 0.104 per hole. In the same games the edit
 
 Max cost more than high, not less.
 
+### Who is learning? (the bitter lesson again)
+
+In Exp 16 the DQN learned nothing. It stayed frozen throughout.
+- **The learner was Opus.** It ran a hypothesis, test and update loop over about 350k practice games across four sessions, and about 255M tokens.
+- **The knowledge lives in its notes:** don't go out with one card left, reveal early, take-vs-draw is miscalibrated. Opus compiled them into gated circuits in the weights.
+- **The edits are decision devices, not values.** The network's Q is no longer in points.
+
+By the categories in "The bitter lesson (so far)" above, the edits themselves are **knowledge about the solution, hand-encoded**, the kind Sutton says plateaus. The hand is a general method spending compute instead of a person, but the pattern is the same.
+
+**The more important part is the diagnosis.** That section's third category, knowledge about what the agent is learning, was the step it said needed humans: behavioural metrics, reward decomposition, "why is it doing that?". Opus automated it.
+- **Its main finding points at our training setup:** the champion goes out early, which wins more holes but scores worse. That points straight at the win bonus (#14), a design choice of ours.
+- **The errors are likely in the problem specification again**, like the stale `next_obs` (Exp 5) and the reward bias (Exp 6). RL learned what it was rewarded for.
+
+**Two readings, which #27 decides:**
+1. **Opus as debugger (the bitter lesson holds).** The DQN, retrained with a score-only reward, the benchmark opponents in the mix and explicit final-turn inputs, reaches ≤ 8.17 on seatcycle-v1 with no hand edits. Then the network was always capable, and Opus found the bugs in its training setup, the role a human played in Exp 5–6.
+2. **Opus as the source of strategy (the lesson fails at this scale).** Corrected training still plateaus above 8.17. Then the encoded knowledge does something learning can't at this much compute, or at least an LLM's prior is a cheaper source of strategy than self-play.
+
+**Second test:** resume RL, with the corrected objective, from the round-3 network once its decision devices are re-expressed as values.
+- **Training keeps the edits:** learning agrees with Opus.
+- **Training erases them:** the two disagree, and held-out scores decide who was right.
+
+Our expectation is reading 1 for most of the gap. On that reading Opus's lasting contribution is automated diagnosis of a learner's mistakes, not the strategy it wrote in.
+
 ### Next
 
 - Replicate 2–3 runs per effort level from the raw champion. The high-vs-max gap is still n = 1 per level.
