@@ -2,8 +2,8 @@
 # Weight-space programming run: headless Claude Code (Opus) edits the DQN champion's
 # weights with a fixed forward-pass budget, then final.pt gets the held-out benchmark.
 #   scripts/wsp_run.sh <champion.pt> [budget=25] [run_name] [effort=high]
-# Continue from an earlier run: pass its final.pt as <champion.pt> and set PRIOR_RUN=<that run dir>
-# (its notes and scripts are copied in as reference). PRACTICE_SEED (default 1), CONFIRM_SEED (default 2)
+# Continue from earlier runs: pass the last run's final.pt as <champion.pt> and set PRIOR_RUN to the
+# run dirs, oldest first (their notes and scripts are copied in as reference). PRACTICE_SEED (default 1), CONFIRM_SEED (default 2)
 # and CONFIRMS (default 3) set the practice and confirm tiers; see scripts/wsp_pass.py.
 # shortcut: the pass budget and the no-training rule are enforced by prompt and audited in
 #   transcript.jsonl, not sandboxed; move to a container if a run ever cheats.
@@ -20,10 +20,16 @@ echo "{\"max_passes\": $BUDGET, \"max_confirms\": $CONFIRMS, \"practice_seed\": 
 taskset -c 0-3 .venv/bin/python -m scripts.wsp_pass --baseline --run-dir "$RUN"
 PRIOR_TEXT=""
 if [ -n "${PRIOR_RUN:-}" ]; then
-  mkdir -p "$RUN/prior"
-  cp "$PRIOR_RUN"/NOTES.md "$PRIOR_RUN"/*.py "$RUN/prior/"
-  cp "$PRIOR_RUN"/circuit_meta*.json "$RUN/prior/" 2>/dev/null || true
-  PRIOR_TEXT=$(sed "s#{RUN_DIR}#$RUN#g" scripts/wsp_prompt_prior.md)
+  # PRIOR_RUN: space-separated run dirs, oldest first; the last one produced <champion.pt>.
+  for P in $PRIOR_RUN; do
+    D="$RUN/prior/$(basename "$P")"; mkdir -p "$D"
+    cp "$P"/NOTES.md "$P"/*.py "$D/"
+    cp "$P"/circuit_meta*.json "$D/" 2>/dev/null || true
+  done
+  LAST=${PRIOR_RUN##* }
+  BASE_HELDOUT=$(.venv/bin/python -c "import json,sys; print(f\"{json.load(open(sys.argv[1]))['metric']['value']:.3f}\")" "$LAST/heldout_final.json")
+  NAMES=$(for P in $PRIOR_RUN; do printf '`%s`, ' "$(basename "$P")"; done); NAMES=${NAMES%, }
+  PRIOR_TEXT=$(sed -e "s#{RUN_DIR}#$RUN#g" -e "s#{BASE_HELDOUT}#$BASE_HELDOUT#g" -e "s#{PRIOR_RUNS}#$NAMES#g" scripts/wsp_prompt_prior.md)
 fi
 echo "{\"effort\": \"$EFFORT\", \"commit\": \"$(git rev-parse --short HEAD)\"}" > "$RUN/run_meta.json"
 PRIOR_TEXT="$PRIOR_TEXT" .venv/bin/python -c "
