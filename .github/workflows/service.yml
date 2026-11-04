@@ -67,6 +67,8 @@ jobs:
     steps:
       - name: Skip when Cloudflare isn't set up
         id: gate
+        # Runs before checkout, so the job's default service/ directory doesn't exist yet.
+        working-directory: .
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "${{ vars.D1_DATABASE_ID }}" ]; then
             echo "::notice::CLOUDFLARE_API_TOKEN or D1_DATABASE_ID is not set; skipping the deploy"
