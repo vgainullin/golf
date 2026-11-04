@@ -87,7 +87,9 @@ jobs:
   # ---------------------------------------------------------------------------
   launch:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ fromJson(inputs.training_timeout_hours) * 60 + 30 }}
+    # Expressions have no arithmetic, so the old computed timeout made the whole file invalid.
+    # This job only launches; training runs on the instance under its own `timeout`.
+    timeout-minutes: 45
     env:
       LL_API_KEY: ${{ secrets.LL_API_KEY }}
 
